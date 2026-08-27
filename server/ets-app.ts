@@ -274,6 +274,17 @@ export interface ParamMemLayoutEntry {
   fromMemoryChild: boolean;
   isVisible: boolean;
   coefficient?: number;
+  // Display metadata, derived the same way as `params` (pr.text || pd.text,
+  // the section/group maps, ti.enums/unit) but WITHOUT the Access="None"
+  // and typeKind==='none' skips `params` applies for its own (UI-editing)
+  // purposes. Present here so a decoder (e.g. decodeParamMem) can label
+  // download-only/hidden params too, straight from the same ETS product
+  // data - not a hardcoded per-param lookup.
+  label?: string;
+  section?: string;
+  group?: string;
+  unit?: string;
+  enums?: Record<string, string>;
 }
 
 export interface ParamModel {
@@ -1392,6 +1403,40 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
         .filter((m: { id: string; items: DynItem[] }) => m.items.length > 0),
     };
 
+    // chooseOwnerOf: paramRefId → the paramRefId of the nearest enclosing
+    // <Choose> in the dynamic tree. Some paramRefs genuinely have no Text of
+    // their own (they're a companion value ETS writes based on a visible
+    // enum/checkbox's selected branch, not something ETS itself ever shows a
+    // distinct label for) - for those, the enclosing choose's own label is
+    // the most meaningful generic thing derivable from the ETS product data,
+    // since that choose IS the user-visible control this companion value
+    // belongs to. Built once from the same dynTree already computed above -
+    // not a per-parameter/per-device lookup.
+    const chooseOwnerOf: Record<string, string> = {};
+    function walkForChooseOwners(
+      items: DynItem[] | null | undefined,
+      owner: string | null,
+    ): void {
+      if (!items) return;
+      for (const it of items) {
+        if (it.type === 'paramRef' && it.refId) {
+          if (owner && !(it.refId in chooseOwnerOf))
+            chooseOwnerOf[it.refId] = owner;
+        } else if (it.type === 'choose' && it.paramRefId) {
+          for (const w of it.whens || [])
+            walkForChooseOwners(w.items, it.paramRefId!);
+        } else if (
+          it.type === 'block' ||
+          it.type === 'channel' ||
+          it.type === 'cib'
+        ) {
+          walkForChooseOwners(it.items, owner);
+        }
+      }
+    }
+    walkForChooseOwners(dynTree.main?.items ?? null, null);
+    for (const md of dynTree.moduleDefs) walkForChooseOwners(md.items, null);
+
     // paramMemLayout: ALL paramRefs (including Access=None download-only params)
     // keyed by paramRefId → { offset, bitOffset, bitSize, defaultValue }
     // Used by the download engine to build the parameter memory segment.
@@ -1412,6 +1457,26 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
       const effectiveAccess = pr.access ?? pd.access ?? '';
       const isVisible =
         effectiveAccess !== 'None' && ti.kind !== undefined && ti.kind !== null;
+
+      // Same generic derivation as `params` above (pr.text || pd.text) -
+      // just not gated on Access/typeKind, so download-only params still
+      // get a real label instead of falling back to their raw paramRefId.
+      // When the paramRef itself has no Text at all (a companion value
+      // written by a <Choose>, not something ETS ever labels on its own),
+      // borrow the enclosing choose's own label/section instead - see
+      // chooseOwnerOf above.
+      let ownLabel = pr.text || pd.text || '';
+      let labelSection = paramRefSectionMap[prId] || '';
+      const ownerId = chooseOwnerOf[prId];
+      if (!ownLabel && ownerId) {
+        const ownerPr = paramRefDefs[ownerId];
+        const ownerPd = ownerPr ? paramDefs[ownerPr.paramId] : null;
+        if (ownerPr && ownerPd) {
+          ownLabel = ownerPr.text || ownerPd.text || '';
+          labelSection = paramRefSectionMap[ownerId] || labelSection;
+        }
+      }
+
       paramMemLayout[prId] = {
         offset: pd.offset,
         bitOffset: pd.bitOffset || 0,
@@ -1422,6 +1487,13 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
         fromMemoryChild: pd.fromMemoryChild || false,
         isVisible,
         ...(ti.coefficient ? { coefficient: ti.coefficient } : {}),
+        ...(ownLabel && {
+          label: ownLabel,
+          section: labelSection,
+          group: paramRefGroupMap[prId] || '',
+          unit: ti.unit || '',
+          enums: ti.enums || {},
+        }),
       };
     }
 

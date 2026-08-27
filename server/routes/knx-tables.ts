@@ -59,6 +59,17 @@ export interface ParamMemEntry {
   coefficient?: number;
   fromMemoryChild?: boolean;
   isVisible?: boolean;
+  // Display metadata for entries `params` (ParamDef, below) doesn't cover -
+  // e.g. Access="None" download-only params, which are excluded from
+  // `params` for its own (UI-editing) purposes but still get read/written
+  // and deserve a real label in a decode. See ets-app.ts's paramMemLayout
+  // construction for how these are derived (generically, from the same ETS
+  // product data every other label comes from - not a per-param lookup).
+  label?: string;
+  section?: string;
+  group?: string;
+  unit?: string;
+  enums?: Record<string, string>;
 }
 
 export interface LoadProcedureStep {
@@ -436,12 +447,19 @@ export function decodeParamMem(
   const out: DecodedParam[] = [];
   for (const [key, info] of Object.entries(paramMemLayout)) {
     if (info.offset === null || info.offset === undefined) continue;
+    // Prefer paramMemLayout's own label metadata (covers every param this
+    // buffer actually has bits for, including Access="None" download-only
+    // ones `params` deliberately excludes for its UI-editing purposes -
+    // see ets-app.ts). Fall back to `params` for parity/older callers, then
+    // the raw key if genuinely nothing was derivable from the ETS product
+    // data either way.
     const def = params?.[key];
-    const label = (def?.label as string) ?? key;
-    const section = (def?.section as string) ?? '';
-    const group = (def?.group as string) ?? '';
-    const unit = (def?.unit as string) ?? '';
-    const enums = (def?.enums as Record<string, string> | undefined) ?? {};
+    const label = info.label ?? (def?.label as string) ?? key;
+    const section = info.section ?? (def?.section as string) ?? '';
+    const group = info.group ?? (def?.group as string) ?? '';
+    const unit = info.unit ?? (def?.unit as string) ?? '';
+    const enums =
+      info.enums ?? (def?.enums as Record<string, string> | undefined) ?? {};
 
     let rawValue: number | string;
     let value: string;

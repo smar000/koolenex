@@ -25,8 +25,10 @@ import {
   AppDataCtx,
   LiveDataCtx,
   VerifyCacheCtx,
+  ProgrammingLogCtx,
+  PROGRAMMING_LOG_CAP,
 } from './contexts.ts';
-import type { VerifyCache, VerifyProgress } from './contexts.ts';
+import type { VerifyCache, VerifyProgress, ProgrammingLog } from './contexts.ts';
 import {
   setI18nT,
   setI18nLang as setI18nLangGlobal,
@@ -90,6 +92,12 @@ export default function App() {
   const [verifyProgress, setVerifyProgress] = useState<
     Record<string, VerifyProgress>
   >({});
+  // Programming page's operation log - lifted up here (rather than local
+  // state in ProgrammingView) so it survives navigating away and back. See
+  // the comment on ProgrammingLogCtx for the retention policy.
+  const [programmingLogEntries, setProgrammingLogEntries] = useState<
+    string[]
+  >([]);
   const [mediumTypes, setMediumTypes] = useState<Record<string, any>>({});
   const [maskVersions, setMaskVersions] = useState<Record<string, any>>({});
   const [i18nLang, setI18nLang] = useState<string>(
@@ -393,6 +401,18 @@ export default function App() {
     [state.verifyCache, verifyProgress],
   );
 
+  const programmingLog: ProgrammingLog = useMemo(
+    () => ({
+      entries: programmingLogEntries,
+      add: (line) =>
+        setProgrammingLogEntries((l) =>
+          [line, ...l].slice(0, PROGRAMMING_LOG_CAP),
+        ),
+      clear: () => setProgrammingLogEntries([]),
+    }),
+    [programmingLogEntries],
+  );
+
   const shellProps = {
     state,
     dispatch,
@@ -413,30 +433,32 @@ export default function App() {
             <AppDataCtx.Provider value={appData}>
               <LiveDataCtx.Provider value={liveData}>
                 <VerifyCacheCtx.Provider value={verifyCache}>
-                  <ProjectActionsCtx.Provider value={projectActions}>
-                    <BusActionsCtx.Provider value={busActions}>
-                      <UndoCtx.Provider value={undoActions}>
-                        <Routes>
-                          <Route
-                            path="/"
-                            element={<AppShell {...shellProps} />}
-                          />
-                          <Route
-                            path="/settings"
-                            element={<AppShell {...shellProps} />}
-                          />
-                          <Route
-                            path="/projects/:id/*"
-                            element={<ProjectLoader {...shellProps} />}
-                          />
-                          <Route
-                            path="*"
-                            element={<Navigate to="/" replace />}
-                          />
-                        </Routes>
-                      </UndoCtx.Provider>
-                    </BusActionsCtx.Provider>
-                  </ProjectActionsCtx.Provider>
+                  <ProgrammingLogCtx.Provider value={programmingLog}>
+                    <ProjectActionsCtx.Provider value={projectActions}>
+                      <BusActionsCtx.Provider value={busActions}>
+                        <UndoCtx.Provider value={undoActions}>
+                          <Routes>
+                            <Route
+                              path="/"
+                              element={<AppShell {...shellProps} />}
+                            />
+                            <Route
+                              path="/settings"
+                              element={<AppShell {...shellProps} />}
+                            />
+                            <Route
+                              path="/projects/:id/*"
+                              element={<ProjectLoader {...shellProps} />}
+                            />
+                            <Route
+                              path="*"
+                              element={<Navigate to="/" replace />}
+                            />
+                          </Routes>
+                        </UndoCtx.Provider>
+                      </BusActionsCtx.Provider>
+                    </ProjectActionsCtx.Provider>
+                  </ProgrammingLogCtx.Provider>
                 </VerifyCacheCtx.Provider>
               </LiveDataCtx.Provider>
             </AppDataCtx.Provider>

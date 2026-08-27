@@ -209,3 +209,28 @@ export function useVerifyCache(): VerifyCache {
     throw new Error('useVerifyCache must be used within VerifyCacheCtx');
   return ctx;
 }
+
+// ── Programming page's operation log — lifted out of ProgrammingView's own
+// state so it survives navigating away and back (that page previously reset
+// its log to [] on every remount). In-memory only, not localStorage - a real
+// page reload still clears it like everything else in the app, this just
+// stops navigation between routes from doing the same thing. Capped at
+// PROGRAMMING_LOG_CAP entries (oldest dropped) so a long-running session
+// doesn't grow this unbounded; no time-based expiry, since the cap plus the
+// natural reset on reload is enough for how this log is actually used.
+export const PROGRAMMING_LOG_CAP = 300;
+
+export interface ProgrammingLog {
+  entries: string[];
+  add: (line: string) => void;
+  clear: () => void;
+}
+
+export const ProgrammingLogCtx = createContext<ProgrammingLog | null>(null);
+
+export function useProgrammingLog(): ProgrammingLog {
+  const ctx = useContext(ProgrammingLogCtx);
+  if (!ctx)
+    throw new Error('useProgrammingLog must be used within ProgrammingLogCtx');
+  return ctx;
+}

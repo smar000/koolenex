@@ -682,19 +682,69 @@ describe('POST /bus/read-memory', () => {
   it('rejects an out-of-range address', async () => {
     const r = await req(ts.baseUrl, 'POST', '/bus/read-memory', {
       deviceAddress: '1.1.1',
-      address: 0x1_0000,
+      address: 0x100_0000,
       length: 4,
     });
     assert.equal(r.status, 400);
   });
 
-  it('rejects a read that would run past the 16-bit address space', async () => {
+  it('accepts an extended (24-bit) address beyond the old 16-bit cap', async () => {
     mockBus.connected = true;
-    // address + length = 0x10002 > 0x10000 → would wrap on the wire.
+    // Extended addressing (see the 16-bit truncation fix) - readMemory()
+    // already picks A_Memory_Read vs A_MemoryExtended_Read per chunk based
+    // on the address, so this route must not reject valid high addresses.
     const r = await req(ts.baseUrl, 'POST', '/bus/read-memory', {
       deviceAddress: '1.1.1',
-      address: 0xfffe,
+      address: 0xc3000,
       length: 4,
+    });
+    assert.equal(r.status, 200);
+  });
+
+  it('rejects a read that would run past the 24-bit address space', async () => {
+    mockBus.connected = true;
+    // address + length = 0x1000002 > 0x1000000 → would wrap on the wire.
+    const r = await req(ts.baseUrl, 'POST', '/bus/read-memory', {
+      deviceAddress: '1.1.1',
+      address: 0xfffffe,
+      length: 4,
+    });
+    assert.equal(r.status, 400);
+  });
+});
+
+// ── POST /bus/read-property ─────────────────────────────────────────────────
+
+describe('POST /bus/read-property', () => {
+  it('returns 409 when not connected', async () => {
+    mockBus.connected = false;
+    const r = await req(ts.baseUrl, 'POST', '/bus/read-property', {
+      deviceAddress: '1.1.1',
+      objIdx: 1,
+      propId: 7,
+    });
+    assert.equal(r.status, 409);
+  });
+
+  it('reads a property and returns hex when connected', async () => {
+    mockBus.connected = true;
+    mockBus.propImage = new Map([['1/7', Buffer.from('000f0000', 'hex')]]);
+    const r = await req(ts.baseUrl, 'POST', '/bus/read-property', {
+      deviceAddress: '1.1.1',
+      objIdx: 1,
+      propId: 7,
+    });
+    assert.equal(r.status, 200);
+    const data = r.data as { hex: string };
+    assert.equal(data.hex, '000f0000');
+    assert.ok(mockBus.calls.some((c) => c.method === 'readPropertyMany'));
+  });
+
+  it('rejects missing deviceAddress', async () => {
+    mockBus.connected = true;
+    const r = await req(ts.baseUrl, 'POST', '/bus/read-property', {
+      objIdx: 1,
+      propId: 7,
     });
     assert.equal(r.status, 400);
   });

@@ -628,14 +628,18 @@ router.post('/bus/read-memory', async (req: Request, res: Response) => {
     z
       .object({
         deviceAddress: z.string().min(1),
-        address: z.number().int().min(0).max(0xffff),
+        // Up to 24-bit: readMemory()/readRegionInSession() already picks
+        // A_Memory_Read vs A_MemoryExtended_Read per chunk based on the
+        // address (see the 16-bit truncation fix) - this route's own cap
+        // just needs to stop rejecting addresses the underlying read path
+        // already handles correctly.
+        address: z.number().int().min(0).max(0xffffff),
         length: z.number().int().min(1).max(4096),
       })
-      // A_Memory_Read carries a 16-bit address; reads must not run past the top
-      // of the address space, or `address + off` would wrap and return bytes
-      // from a different (low) region under the requested high addresses.
-      .refine((v) => v.address + v.length <= 0x10000, {
-        message: 'address + length exceeds the 16-bit memory space (0x10000)',
+      // Reads must not run past the top of the 24-bit extended address
+      // space, or `address + off` would wrap.
+      .refine((v) => v.address + v.length <= 0x1000000, {
+        message: 'address + length exceeds the 24-bit memory space (0x1000000)',
         path: ['length'],
       }),
   );
@@ -651,6 +655,39 @@ router.post('/bus/read-memory', async (req: Request, res: Response) => {
     });
   } catch (e) {
     res.status(502).json({ error: safeError('bus', 'Memory read failed', e) });
+  }
+});
+
+// Read an arbitrary interface-object property. Read-only debug helper - built
+// to check whether other interface objects (e.g. the Address/Association
+// tables, objIdx 1/2) resolve their own PID 7 (PID_TABLE_REFERENCE) base to a
+// specific address, the same way resolveRelmemBases() does for WriteRelMem's
+// own objIdx. Not used by the download/verify pipeline itself.
+router.post('/bus/read-property', async (req: Request, res: Response) => {
+  const b = requireBus(res);
+  if (!b) return;
+  const body = validateBody(
+    req,
+    z.object({
+      deviceAddress: z.string().min(1),
+      objIdx: z.number().int().min(0).max(255),
+      propId: z.number().int().min(0).max(255),
+    }),
+  );
+  const { deviceAddress, objIdx, propId } = body;
+  if (!b.connected) return res.status(409).json({ error: 'Not connected' });
+  try {
+    const [data] = await b.readPropertyMany(deviceAddress, [
+      { objIdx, propId },
+    ]);
+    res.json({
+      deviceAddress,
+      objIdx,
+      propId,
+      hex: (data ?? Buffer.alloc(0)).toString('hex'),
+    });
+  } catch (e) {
+    res.status(502).json({ error: safeError('bus', 'Property read failed', e) });
   }
 });
 

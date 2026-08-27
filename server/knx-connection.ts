@@ -18,6 +18,7 @@ import {
   apduMemoryRead,
   parseMemoryResponse,
   apduMemoryExtendedRead,
+  apduMemoryExtendedWrite,
   parseMemoryExtendedResponse,
   apduPropertyValueWrite,
   apduPropertyValueRead,
@@ -454,7 +455,45 @@ export class KnxConnection extends EventEmitter {
     for (let off = 0; off < length; off += chunkSize) {
       const n = Math.min(chunkSize, length - off);
       const seq = nextSeq();
-      const wantAddr = (address + off) & 0xffff;
+      const wantAddr = address + off;
+      // A_Memory_Read only carries a 16-bit address. A resolved relmem base
+      // (via PID 7) can legitimately land well above 0xFFFF - using the legacy
+      // service there silently truncates to the wrong (low) address and reads
+      // unrelated memory instead of erroring, so use A_MemoryExtended_Read
+      // (24-bit address space) whenever the real address doesn't fit in 16
+      // bits. Devices whose address does fit keep using the legacy service
+      // unchanged - some legacy/ABB-style devices are only known to answer
+      // that one, so this is deliberately the minimum change, not a blanket
+      // switch to extended.
+      //
+      // NOT INDEPENDENTLY CONFIRMED as a full fix yet - see this branch's
+      // commit message for current confidence level and open questions.
+      if (wantAddr > 0xffff) {
+        const apdu = apduMemoryExtendedRead(seq, n, wantAddr);
+        const respP = waitResponse('MemoryExtended_Read_Response', 3000);
+        await this.sendCEMI(buildCEMI(this.localAddr, deviceAddr, apdu, false));
+        const frame = await respP;
+        const { returnCode, address: gotAddr, data } =
+          parseMemoryExtendedResponse(frame);
+        if (returnCode !== 0)
+          throw new Error(
+            `MemoryExtended read error rc=${returnCode} at 0x${wantAddr.toString(16)}`,
+          );
+        if (gotAddr !== wantAddr)
+          throw new Error(
+            `MemoryExtended_Read_Response address mismatch: requested 0x${wantAddr.toString(
+              16,
+            )}, device answered 0x${gotAddr.toString(16)}`,
+          );
+        // Clamp to the requested count: if the device pads/rounds its
+        // response to a fixed chunk size rather than honoring a shorter
+        // final request, an unclamped copy silently drifts every subsequent
+        // chunk by the overrun (confirmed empirically - produced scattered
+        // "real-looking data at the wrong offset" mismatches before this
+        // clamp was added).
+        data.copy(out, off, 0, Math.min(data.length, n));
+        continue;
+      }
       const apdu = apduMemoryRead(seq, n, wantAddr);
       const respP = waitResponse('Memory_Response', 3000);
       await this.sendCEMI(buildCEMI(this.localAddr, deviceAddr, apdu, false));
@@ -690,11 +729,33 @@ export class KnxConnection extends EventEmitter {
               const chunk = mem.slice(off, off + MEM_CHUNK);
               const seq = nextSeq();
               const addr = base + step.offset! + off;
-              const extra2 = Buffer.concat([
-                Buffer.from([chunk.length, (addr >> 8) & 0xff, addr & 0xff]),
-                chunk,
-              ]);
-              const apdu = apduConnected(seq, 'Memory_Write', extra2);
+              // A_Memory_Write only carries a 16-bit address - same problem as
+              // the read side (see readRegionInSession). A resolved relmem
+              // base can land above 0xFFFF, in which case the legacy service
+              // silently truncates to the wrong (low) address and writes
+              // nothing meaningful to the real target. Use
+              // A_MemoryExtended_Write (24-bit address space) whenever the
+              // real address doesn't fit in 16 bits; devices whose address
+              // does fit keep using the legacy service unchanged.
+              //
+              // NOT INDEPENDENTLY CONFIRMED as a full fix yet - see this
+              // branch's commit message for current confidence level and
+              // open questions.
+              const apdu =
+                addr > 0xffff
+                  ? apduMemoryExtendedWrite(seq, addr, chunk)
+                  : apduConnected(
+                      seq,
+                      'Memory_Write',
+                      Buffer.concat([
+                        Buffer.from([
+                          chunk.length,
+                          (addr >> 8) & 0xff,
+                          addr & 0xff,
+                        ]),
+                        chunk,
+                      ]),
+                    );
               const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
               await this.sendCEMI(cemi);
               await delay(30);

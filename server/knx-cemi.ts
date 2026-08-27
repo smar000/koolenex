@@ -188,6 +188,27 @@ export function apduMemoryExtendedRead(
   return apduConnectedFull(seq, APCI_EXT.MemoryExtended_Read, extra);
 }
 
+export function apduMemoryExtendedWrite(
+  seq: number,
+  address: number,
+  data: Buffer,
+): Buffer {
+  // A_MemoryExtended_Write (0x1FB): [count(1)] + [address(3, big-endian)] + [data...].
+  // Same header shape as the read (minus the returned data), count = byte length
+  // being written. Wire format checked against a captured real-ETS
+  // MemExtWrite frame (2026-08-26 testbed capture).
+  const extra = Buffer.concat([
+    Buffer.from([
+      data.length & 0xff,
+      (address >> 16) & 0xff,
+      (address >> 8) & 0xff,
+      address & 0xff,
+    ]),
+    data,
+  ]);
+  return apduConnectedFull(seq, APCI_EXT.MemoryExtended_Write, extra);
+}
+
 export function apduControl(tpciCode: number, seq: number = 0): Buffer {
   // Control PDU octet: T_Connect=0x80, T_Disconnect=0x81,
   // T_Ack=0b11 SSSS 10, T_Nak=0b11 SSSS 11 (the low 2 bits mark the PDU type).

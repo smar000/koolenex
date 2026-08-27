@@ -11,7 +11,12 @@ import {
 } from '../primitives.tsx';
 import { DeviceTypeIcon } from '../icons.tsx';
 import { api } from '../api.ts';
-import { useAppData, useBusActions, useVerifyCache } from '../contexts.ts';
+import {
+  useAppData,
+  useBusActions,
+  useVerifyCache,
+  useProgrammingLog,
+} from '../contexts.ts';
 import { DeviceCompareResults } from './DeviceCompareResults.tsx';
 import styles from './ProgrammingView.module.css';
 
@@ -32,7 +37,7 @@ export function ProgrammingView() {
   const [progress, setProgress] = useState<
     Record<string, { state: string; pct: number }>
   >({});
-  const [log, setLog] = useState<string[]>([]);
+  const { entries: log, add: addLog, clear: clearLog } = useProgrammingLog();
   const [verifyingIds, setVerifyingIds] = useState<Set<number>>(new Set());
   const [slideOverDevice, setSlideOverDevice] = useState<any | null>(null);
   const { devices = [] } = data || {};
@@ -99,10 +104,7 @@ export function ProgrammingView() {
   const programDevice = async (deviceId: any, devAddr: string) => {
     setLogOpen(true);
     setProgress((p) => ({ ...p, [deviceId]: { state: 'running', pct: 5 } }));
-    setLog((l) => [
-      `[${new Date().toLocaleTimeString()}] Downloading → ${devAddr}`,
-      ...l,
-    ]);
+    addLog(`[${new Date().toLocaleTimeString()}] Downloading → ${devAddr}`);
     let pct = 5;
     const iv = setInterval(() => {
       pct = Math.min(pct + (Math.random() * 6 + 2), 90);
@@ -113,28 +115,25 @@ export function ProgrammingView() {
       await api.busProgramDevice(devAddr, pid!, deviceId);
       clearInterval(iv);
       setProgress((p) => ({ ...p, [deviceId]: { state: 'done', pct: 100 } }));
-      setLog((l) => [
+      addLog(
         `[${new Date().toLocaleTimeString()}] ✓ ${devAddr} — programmed`,
-        ...l,
-      ]);
+      );
       onDeviceStatus(deviceId, 'programmed');
     } catch (err: any) {
       clearInterval(iv);
       setProgress((p) => ({ ...p, [deviceId]: { state: 'error', pct: 0 } }));
-      setLog((l) => [
+      addLog(
         `[${new Date().toLocaleTimeString()}] ✗ ${devAddr} — ${err.message}`,
-        ...l,
-      ]);
+      );
     }
   };
 
   const verifyDevice = async (deviceId: any, devAddr: string) => {
     setLogOpen(true);
     setVerifyingIds((s) => new Set(s).add(deviceId));
-    setLog((l) => [
+    addLog(
       `[${new Date().toLocaleTimeString()}] Verifying (read-only) → ${devAddr}`,
-      ...l,
-    ]);
+    );
     try {
       const pid = data?.project?.id;
       const r = await api.busVerifyDevice(devAddr, pid!, deviceId);
@@ -142,15 +141,14 @@ export function ProgrammingView() {
       const msg = r.match
         ? `✓ ${devAddr} — matches computed image (${r.totalBytes} bytes)`
         : `≠ ${devAddr} — ${r.totalDiffering}/${r.totalBytes} bytes differ from computed image`;
-      setLog((l) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...l]);
+      addLog(`[${new Date().toLocaleTimeString()}] ${msg}`);
       // Slide over to show the full comparison as soon as the read completes.
       const dev = devices.find((d: any) => d.id === deviceId) ?? null;
       setSlideOverDevice(dev);
     } catch (err: any) {
-      setLog((l) => [
+      addLog(
         `[${new Date().toLocaleTimeString()}] ✗ ${devAddr} — verify failed: ${err.message}`,
-        ...l,
-      ]);
+      );
     } finally {
       setVerifyingIds((s) => {
         const next = new Set(s);
@@ -214,7 +212,6 @@ export function ProgrammingView() {
           <table className={styles.table}>
             <thead>
               <tr>
-                <TH className={styles.thAddr}>ADDRESS</TH>
                 <TH className={styles.thDevice}>DEVICE</TH>
                 <TH className={styles.thStatus}>STATUS</TH>
                 <TH className={styles.thProgress}>PROGRESS</TH>
@@ -229,19 +226,22 @@ export function ProgrammingView() {
                 return (
                   <tr key={d.id} className="rh">
                     <TD>
-                      <PinAddr
-                        address={d.individual_address}
-                        wtype="device"
-                        className={styles.accentMono}
-                      />
-                    </TD>
-                    <TD>
+                      {/* Address folded into the DEVICE cell as a small pill
+                          (was its own ADDRESS column) - reclaims a column's
+                          worth of width, which matters once the log pane is
+                          open and .table's min-width forces horizontal
+                          scroll (see .table's comment in the CSS module). */}
                       <span className={styles.devName}>
                         <DeviceTypeIcon
                           type={d.device_type}
                           style={{
                             color: COLMAP[d.device_type] || 'var(--muted)',
                           }}
+                        />
+                        <PinAddr
+                          address={d.individual_address}
+                          wtype="device"
+                          className={styles.addrBadge}
                         />
                         {d.name}
                         {d.manufacturer && (
@@ -428,7 +428,7 @@ export function ProgrammingView() {
             </div>
             <div className={styles.logFooter}>
               <Btn
-                onClick={() => setLog([])}
+                onClick={() => clearLog()}
                 color="var(--dim)"
                 bg="var(--bg)"
                 className={styles.logFooterBtn}

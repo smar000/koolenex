@@ -62,15 +62,17 @@
      the matching floor so the table (not the DEVICE column) is what
      shrinks/scrolls once the log pane leaves too little room, rather than
      squeezing DEVICE toward zero again. */
-  /* other columns' widths (46+88+55+244=433) + thDevice's own 122px
-     min-width, below - table-layout:fixed derives DEVICE's actual share
-     from (this min-width minus the other columns' widths), not from its
-     own min-width directly, so this has to stay in sync with both.
+  /* other columns' widths (88+55+244=387) + thDevice's own 168px min-width,
+     below - table-layout:fixed derives DEVICE's actual share from (this
+     min-width minus the other columns' widths), not from its own min-width
+     directly, so this has to stay in sync with both.
      Trimmed as far as still legible (esp. the PROGRAMMED/etc. status
-     badge and the address text) so the table needs less extra width than
+     badge and the address badge) so the table needs less extra width than
      it used to before falling back to horizontal scroll, since scroll is
      otherwise the common case once the log pane is open too. Also .content
-     above got its right padding trimmed 20px -> 14px for the same reason. */
+     above got its right padding trimmed 20px -> 14px for the same reason.
+     ADDRESS used to be its own 46px column; folded into DEVICE as a small
+     pill instead (see .addrBadge) so thDevice's min-width absorbs it. */
   min-width: 555px;
   border-collapse: collapse;
   table-layout: fixed;
@@ -83,6 +85,20 @@
 .mfrLabel {
   color: var(--dim);
   font-size: 9px;
+}
+/* Address pill, folded into the DEVICE cell in place of its own column
+   (see .table's min-width comment). Small/monospace/accent, same visual
+   language as .accentMono used to be, just pill-shaped so it doesn't read
+   as running straight into the device name next to it. */
+.addrBadge {
+  flex-shrink: 0;
+  font-family: monospace;
+  font-size: 10px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
 }
 .progressWrap {
   display: flex;
@@ -221,11 +237,8 @@
 .logFooterBtn {
   width: 100%;
 }
-.thAddr {
-  width: 46px;
-}
 .thDevice {
-  min-width: 122px;
+  min-width: 168px;
 }
 .thStatus {
   width: 88px;
@@ -235,10 +248,6 @@
 }
 .thActions {
   width: 244px;
-}
-.accentMono {
-  color: var(--accent);
-  font-family: monospace;
 }
 .logEntrySuccess {
   composes: logEntry;

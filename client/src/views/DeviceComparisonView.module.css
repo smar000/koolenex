@@ -74,6 +74,22 @@
   border-radius: 999px;
   box-shadow: 0 0 0 2px var(--chip-ring, var(--fg));
 }
+/* Groups a chip cluster with a small visible scope label ("raw memory" /
+   "named parameters") - without it, "8448/10433 bytes match" next to
+   "5201 match / 2 differ" reads as contradictory unless you already know
+   one is raw memory and the other is named parameters only. */
+.summaryGroup {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.summaryGroupLabel {
+  font-size: 9px;
+  color: var(--dim);
+  white-space: nowrap;
+  cursor: help;
+  border-bottom: 1px dotted var(--dim);
+}
 .summaryBadges {
   display: flex;
   align-items: center;

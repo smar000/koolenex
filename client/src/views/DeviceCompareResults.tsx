@@ -232,35 +232,60 @@ export function DeviceCompareResults({
             )}
 
             <div className={styles.summaryBadges}>
-              {decoded ? (
-                <button
-                  type="button"
-                  className={`${styles.filterChipBtn} ${rowFilter === 'all' ? styles.filterChipBtnActive : ''}`}
-                  style={
-                    {
-                      '--chip-ring': result.match ? 'var(--green)' : 'var(--amber)',
-                    } as React.CSSProperties
-                  }
-                  onClick={() => setRowFilter('all')}
-                  title={
-                    rowFilter === 'all'
-                      ? 'Showing all parameters (matching and differing)'
-                      : 'Show all parameters — clears the match/differ filter'
-                  }
-                >
+              {/* Two different scopes shown side by side, which reads as
+                  contradictory without knowing the difference (e.g. "5201
+                  match / 2 differ" as parameters next to "8448/10433 bytes
+                  match" as raw memory) - a visible "(raw memory)" /
+                  "(named parameters)" label on each cluster, plus a fuller
+                  tooltip, so that's clear without already knowing it. */}
+              <div className={styles.summaryGroup}>
+                {decoded ? (
+                  <button
+                    type="button"
+                    className={`${styles.filterChipBtn} ${rowFilter === 'all' ? styles.filterChipBtnActive : ''}`}
+                    style={
+                      {
+                        '--chip-ring': result.match
+                          ? 'var(--green)'
+                          : 'var(--amber)',
+                      } as React.CSSProperties
+                    }
+                    onClick={() => setRowFilter('all')}
+                    title={
+                      (rowFilter === 'all'
+                        ? 'Showing all parameters (matching and differing). '
+                        : 'Show all parameters — clears the match/differ filter. ') +
+                      'This count is the raw byte-level comparison across the full ' +
+                      `${result.totalBytes}-byte parameter memory segment, including ` +
+                      'padding/reserved bytes not tied to any named parameter - a ' +
+                      'different (larger) scope than the match/differ counts below, ' +
+                      'which only cover named parameters.'
+                    }
+                  >
+                    <Badge
+                      label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
+                      color={result.match ? 'var(--green)' : 'var(--amber)'}
+                    />
+                  </button>
+                ) : (
                   <Badge
                     label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
                     color={result.match ? 'var(--green)' : 'var(--amber)'}
                   />
-                </button>
-              ) : (
-                <Badge
-                  label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
-                  color={result.match ? 'var(--green)' : 'var(--amber)'}
-                />
-              )}
+                )}
+                <span
+                  className={styles.summaryGroupLabel}
+                  title={
+                    'Every byte of the raw parameter memory segment, including padding/reserved ' +
+                    'bytes with no named parameter behind them - usually a much larger, coarser ' +
+                    'number than the parameter-level counts to the right.'
+                  }
+                >
+                  raw memory
+                </span>
+              </div>
               {decoded && (
-                <>
+                <div className={styles.summaryGroup}>
                   <button
                     type="button"
                     className={`${styles.filterChipBtn} ${rowFilter === 'match' ? styles.filterChipBtnActive : ''}`}
@@ -269,9 +294,12 @@ export function DeviceCompareResults({
                       setRowFilter(rowFilter === 'match' ? 'all' : 'match')
                     }
                     title={
-                      rowFilter === 'match'
-                        ? 'Showing only matching parameters — click to show all'
-                        : 'Show only matching parameters'
+                      (rowFilter === 'match'
+                        ? 'Showing only matching parameters — click to show all. '
+                        : 'Show only matching parameters. ') +
+                      'Named, project-configurable parameters only - a smaller, more ' +
+                      'precise scope than the raw byte count on the left, which also ' +
+                      'includes unmapped/padding bytes.'
                     }
                   >
                     <Badge label={`${matchCount} match`} color="var(--green)" />
@@ -305,7 +333,17 @@ export function DeviceCompareResults({
                       />
                     </button>
                   )}
-                </>
+                  <span
+                    className={styles.summaryGroupLabel}
+                    title={
+                      'Only bytes ETS maps to a named, project-configurable parameter - excludes ' +
+                      'padding/reserved bytes, so this is usually a much smaller, more precise ' +
+                      'count than the raw memory total to the left.'
+                    }
+                  >
+                    named parameters
+                  </span>
+                </div>
               )}
             </div>
           </div>

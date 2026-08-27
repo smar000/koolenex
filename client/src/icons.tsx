@@ -479,6 +479,48 @@ export function IconMonitor({ size = 14 }: SizeOnlyProps) {
   );
 }
 
+export function IconDeviceCompare({ size = 14 }: SizeOnlyProps) {
+  // Two side-by-side columns with a checkmark - project vs device comparison
+  return (
+    <_SvgIcon size={size}>
+      <rect
+        x="0.5"
+        y="1.5"
+        width="5.5"
+        height="11"
+        rx="0.8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.1"
+      />
+      <rect
+        x="8"
+        y="1.5"
+        width="5.5"
+        height="11"
+        rx="0.8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.1"
+      />
+      <path
+        d="M2 5 L4 5 M2 7 L4 7 M2 9 L4 9"
+        stroke="currentColor"
+        strokeWidth="1"
+        strokeLinecap="round"
+      />
+      <path
+        d="M9.3 6.7 L10.4 7.9 L12.5 5.3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </_SvgIcon>
+  );
+}
+
 export function IconScan({ size = 14 }: SizeOnlyProps) {
   // Radar screen
   return (

@@ -269,10 +269,16 @@ class KnxBusManager extends EventEmitter {
     deviceAddr: string,
     regions: Array<{ address: number; length: number }>,
     chunkSize?: number,
+    onChunk?: (bytesRead: number) => void,
   ): Promise<Buffer[]> {
     if (!this.connection || !this.connected)
       return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.readMemoryMany(deviceAddr, regions, chunkSize);
+    return this.connection.readMemoryMany(
+      deviceAddr,
+      regions,
+      chunkSize,
+      onChunk,
+    );
   }
 
   // Extended memory read (A_MemoryExtended_Read, 0x1FD) for System B / System 7

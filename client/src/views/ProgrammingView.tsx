@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { STATUS_COLOR } from '../theme.ts';
 import {
   Btn,
@@ -11,12 +11,18 @@ import {
 } from '../primitives.tsx';
 import { DeviceTypeIcon } from '../icons.tsx';
 import { api } from '../api.ts';
-import { useAppData, useBusActions } from '../contexts.ts';
+import { useAppData, useBusActions, useVerifyCache } from '../contexts.ts';
+import { DeviceCompareResults } from './DeviceCompareResults.tsx';
 import styles from './ProgrammingView.module.css';
 
 export function ProgrammingView() {
   const { projectData: data } = useAppData();
   const { deviceStatus: onDeviceStatus } = useBusActions();
+  const {
+    cache: verifyCache,
+    setResult: setVerifyResult,
+    progress: verifyProgress,
+  } = useVerifyCache();
   const COLMAP: Record<string, string> = {
     actuator: 'var(--actuator)',
     sensor: 'var(--sensor)',
@@ -27,7 +33,59 @@ export function ProgrammingView() {
     Record<string, { state: string; pct: number }>
   >({});
   const [log, setLog] = useState<string[]>([]);
+  const [verifyingIds, setVerifyingIds] = useState<Set<number>>(new Set());
+  const [slideOverDevice, setSlideOverDevice] = useState<any | null>(null);
   const { devices = [] } = data || {};
+
+  // ── Log sidebar: width-resizable via a drag handle on its left edge.
+  // Width persists in localStorage so it survives reloads/navigation.
+  const SIDEBAR_MIN = 180;
+  const SIDEBAR_MAX = 520;
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem('programmingLogWidth'));
+      if (saved >= SIDEBAR_MIN && saved <= SIDEBAR_MAX) return saved;
+    } catch {}
+    return 220;
+  });
+  const widthRef = useRef(sidebarWidth);
+  const [resizing, setResizing] = useState(false);
+
+  const onResizerMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      setResizing(true);
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'col-resize';
+      const startX = e.clientX;
+      const startWidth = sidebarWidth;
+      const onMove = (ev: MouseEvent) => {
+        const delta = startX - ev.clientX; // sidebar is on the right - dragging left widens it
+        const next = Math.min(
+          SIDEBAR_MAX,
+          Math.max(SIDEBAR_MIN, startWidth + delta),
+        );
+        widthRef.current = next;
+        setSidebarWidth(next);
+      };
+      const onUp = () => {
+        setResizing(false);
+        document.body.style.userSelect = '';
+        document.body.style.cursor = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        try {
+          localStorage.setItem(
+            'programmingLogWidth',
+            String(widthRef.current),
+          );
+        } catch {}
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [sidebarWidth],
+  );
 
   const programDevice = async (deviceId: any, devAddr: string) => {
     setProgress((p) => ({ ...p, [deviceId]: { state: 'running', pct: 5 } }));
@@ -61,6 +119,7 @@ export function ProgrammingView() {
   };
 
   const verifyDevice = async (deviceId: any, devAddr: string) => {
+    setVerifyingIds((s) => new Set(s).add(deviceId));
     setLog((l) => [
       `[${new Date().toLocaleTimeString()}] Verifying (read-only) → ${devAddr}`,
       ...l,
@@ -68,16 +127,31 @@ export function ProgrammingView() {
     try {
       const pid = data?.project?.id;
       const r = await api.busVerifyDevice(devAddr, pid!, deviceId);
+      setVerifyResult(deviceId, r);
       const msg = r.match
         ? `✓ ${devAddr} — matches computed image (${r.totalBytes} bytes)`
         : `≠ ${devAddr} — ${r.totalDiffering}/${r.totalBytes} bytes differ from computed image`;
       setLog((l) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...l]);
+      // Slide over to show the full comparison as soon as the read completes.
+      const dev = devices.find((d: any) => d.id === deviceId) ?? null;
+      setSlideOverDevice(dev);
     } catch (err: any) {
       setLog((l) => [
         `[${new Date().toLocaleTimeString()}] ✗ ${devAddr} — verify failed: ${err.message}`,
         ...l,
       ]);
+    } finally {
+      setVerifyingIds((s) => {
+        const next = new Set(s);
+        next.delete(deviceId);
+        return next;
+      });
     }
+  };
+
+  const openComparison = (deviceId: any) => {
+    const dev = devices.find((d: any) => d.id === deviceId) ?? null;
+    setSlideOverDevice(dev);
   };
 
   const programmAll = () =>
@@ -139,6 +213,8 @@ export function ProgrammingView() {
             <tbody>
               {devices.map((d: any) => {
                 const prog = progress[d.id];
+                const verifying = verifyingIds.has(d.id);
+                const liveVerifyProgress = verifyProgress[d.individual_address];
                 return (
                   <tr key={d.id} className="rh">
                     <TD>
@@ -206,15 +282,66 @@ export function ProgrammingView() {
                     </TD>
                     <TD>
                       <div className={styles.rowActions}>
-                        <Btn
-                          onClick={() =>
-                            verifyDevice(d.id, d.individual_address)
-                          }
-                          disabled={prog?.state === 'running'}
-                          title="Read the device and compare to the computed image — no writes"
-                        >
-                          Verify
-                        </Btn>
+                        <div className={styles.verifyBtnWrap}>
+                          {verifyCache[d.id] ? (
+                            <div className={styles.verifySplit}>
+                              <Btn
+                                onClick={() => openComparison(d.id)}
+                                disabled={verifying}
+                                title="View the last comparison result — no bus read"
+                                color="var(--muted)"
+                                bg="var(--bg)"
+                              >
+                                View
+                              </Btn>
+                              <Btn
+                                onClick={() =>
+                                  verifyDevice(d.id, d.individual_address)
+                                }
+                                disabled={prog?.state === 'running' || verifying}
+                                title="Read the device again and compare to the computed image — no writes"
+                              >
+                                {verifying ? <Spinner /> : 'Re-verify'}
+                              </Btn>
+                            </div>
+                          ) : (
+                            <Btn
+                              onClick={() =>
+                                verifyDevice(d.id, d.individual_address)
+                              }
+                              disabled={prog?.state === 'running' || verifying}
+                              title="Read the device and compare to the computed image — no writes"
+                            >
+                              {verifying ? <Spinner /> : 'Verify'}
+                            </Btn>
+                          )}
+                          {verifying && (
+                            <div className={styles.verifyPopover}>
+                              {liveVerifyProgress ? (
+                                <>
+                                  <div className={styles.progressTrack}>
+                                    <div
+                                      className={styles.progressBar}
+                                      style={{
+                                        width: `${liveVerifyProgress.pct}%`,
+                                        background: 'var(--accent)',
+                                      }}
+                                    />
+                                  </div>
+                                  <span className={styles.verifyPopoverText}>
+                                    {liveVerifyProgress.bytesRead}/
+                                    {liveVerifyProgress.totalBytes} bytes (
+                                    {liveVerifyProgress.pct}%)
+                                  </span>
+                                </>
+                              ) : (
+                                <span className={styles.verifyPopoverText}>
+                                  Reading device…
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
                         <Btn
                           onClick={() =>
                             programDevice(d.id, d.individual_address)
@@ -240,7 +367,15 @@ export function ProgrammingView() {
           </table>
         </div>
       </div>
-      <div className={styles.sidebar}>
+      <div
+        className={styles.resizer}
+        onMouseDown={onResizerMouseDown}
+        title="Drag to resize"
+      />
+      <div
+        className={`${styles.sidebar} ${resizing ? styles.sidebarResizing : ''}`}
+        style={{ width: sidebarWidth }}
+      >
         <div className={styles.logHeader}>LOG</div>
         <div className={styles.logBody}>
           {log.length === 0 ? (
@@ -271,6 +406,51 @@ export function ProgrammingView() {
           </Btn>
         </div>
       </div>
+
+      {/* Slide-over: opens automatically once a Verify read completes,
+          showing the full device-vs-project comparison. Same
+          DeviceCompareResults component the standalone "Device vs Project"
+          page uses, reading the same shared verify cache - no separate
+          fetch, no duplicated rendering logic. */}
+      <div
+        className={`${styles.slideOver} ${slideOverDevice ? styles.slideOverOpen : ''}`}
+      >
+        {slideOverDevice && (
+          <>
+            <div className={styles.slideOverHeader}>
+              <span className={styles.slideOverTitle}>
+                <DeviceTypeIcon
+                  type={slideOverDevice.device_type}
+                  style={{
+                    color:
+                      COLMAP[slideOverDevice.device_type] || 'var(--muted)',
+                  }}
+                />
+                {slideOverDevice.individual_address} — {slideOverDevice.name}
+              </span>
+              <button
+                className={styles.slideOverClose}
+                onClick={() => setSlideOverDevice(null)}
+                title="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className={styles.slideOverBody}>
+              <DeviceCompareResults
+                device={slideOverDevice}
+                showDeviceLabel={false}
+              />
+            </div>
+          </>
+        )}
+      </div>
+      {slideOverDevice && (
+        <div
+          className={styles.slideOverScrim}
+          onClick={() => setSlideOverDevice(null)}
+        />
+      )}
     </div>
   );
 }

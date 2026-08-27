@@ -24,14 +24,21 @@ import {
   UndoCtx,
   AppDataCtx,
   LiveDataCtx,
+  VerifyCacheCtx,
 } from './contexts.ts';
+import type { VerifyCache, VerifyProgress } from './contexts.ts';
 import {
   setI18nT,
   setI18nLang as setI18nLangGlobal,
   setDptInfo,
   setSpaceUsages,
 } from './dpt.ts';
-import { initialState, reducer } from './state.ts';
+import {
+  initialState,
+  reducer,
+  loadVerifyCache,
+  saveVerifyCache,
+} from './state.ts';
 import type { BusTelegram } from '../../shared/types.ts';
 import { useProjectHandlers } from './hooks/useProjectHandlers.ts';
 import { useBusHandlers } from './hooks/useBusHandlers.ts';
@@ -63,7 +70,26 @@ export default function App() {
   };
 
   const [state, dispatch] = useReducer(reducer, initialState);
+  // Persist verify results across reloads - see loadVerifyCache/saveVerifyCache
+  // in state.ts (IndexedDB, not localStorage - a single device's decoded
+  // result routinely exceeds localStorage's whole quota). Both are async;
+  // load once on mount, save (fire-and-forget) on every change thereafter.
+  useEffect(() => {
+    loadVerifyCache().then((cache) =>
+      dispatch({ type: 'HYDRATE_VERIFY_CACHE', cache }),
+    );
+  }, []);
+  useEffect(() => {
+    saveVerifyCache(state.verifyCache);
+  }, [state.verifyCache]);
   const wsRef = useRef<{ close: () => void } | null>(null);
+  // Live verify-read progress, keyed by device address. Transient/high-
+  // frequency (one WS message per bus chunk, up to ~900 per relmem verify) -
+  // kept out of the main reducer deliberately so it doesn't churn state
+  // updates that unrelated views would also re-render for.
+  const [verifyProgress, setVerifyProgress] = useState<
+    Record<string, VerifyProgress>
+  >({});
   const [mediumTypes, setMediumTypes] = useState<Record<string, any>>({});
   const [maskVersions, setMaskVersions] = useState<Record<string, any>>({});
   const [i18nLang, setI18nLang] = useState<string>(
@@ -172,6 +198,16 @@ export default function App() {
           type: 'SET_BUS',
           status: { connected: false, host: null, hasLib: true },
         });
+      } else if (msg.type === 'verify:progress') {
+        const deviceAddress = msg.deviceAddress as string;
+        setVerifyProgress((p) => ({
+          ...p,
+          [deviceAddress]: {
+            bytesRead: msg.bytesRead as number,
+            totalBytes: msg.totalBytes as number,
+            pct: msg.pct as number,
+          },
+        }));
       } else if (msg.type === 'scan:progress') {
         dispatch({
           type: 'SCAN_PROGRESS',
@@ -347,6 +383,16 @@ export default function App() {
     [state.busStatus, state.telegrams],
   );
 
+  const verifyCache: VerifyCache = useMemo(
+    () => ({
+      cache: state.verifyCache,
+      setResult: (deviceId, result) =>
+        dispatch({ type: 'SET_VERIFY_RESULT', deviceId, result }),
+      progress: verifyProgress,
+    }),
+    [state.verifyCache, verifyProgress],
+  );
+
   const shellProps = {
     state,
     dispatch,
@@ -366,27 +412,32 @@ export default function App() {
           <I18nCtx.Provider value={i18n}>
             <AppDataCtx.Provider value={appData}>
               <LiveDataCtx.Provider value={liveData}>
-                <ProjectActionsCtx.Provider value={projectActions}>
-                  <BusActionsCtx.Provider value={busActions}>
-                    <UndoCtx.Provider value={undoActions}>
-                      <Routes>
-                        <Route
-                          path="/"
-                          element={<AppShell {...shellProps} />}
-                        />
-                        <Route
-                          path="/settings"
-                          element={<AppShell {...shellProps} />}
-                        />
-                        <Route
-                          path="/projects/:id/*"
-                          element={<ProjectLoader {...shellProps} />}
-                        />
-                        <Route path="*" element={<Navigate to="/" replace />} />
-                      </Routes>
-                    </UndoCtx.Provider>
-                  </BusActionsCtx.Provider>
-                </ProjectActionsCtx.Provider>
+                <VerifyCacheCtx.Provider value={verifyCache}>
+                  <ProjectActionsCtx.Provider value={projectActions}>
+                    <BusActionsCtx.Provider value={busActions}>
+                      <UndoCtx.Provider value={undoActions}>
+                        <Routes>
+                          <Route
+                            path="/"
+                            element={<AppShell {...shellProps} />}
+                          />
+                          <Route
+                            path="/settings"
+                            element={<AppShell {...shellProps} />}
+                          />
+                          <Route
+                            path="/projects/:id/*"
+                            element={<ProjectLoader {...shellProps} />}
+                          />
+                          <Route
+                            path="*"
+                            element={<Navigate to="/" replace />}
+                          />
+                        </Routes>
+                      </UndoCtx.Provider>
+                    </BusActionsCtx.Provider>
+                  </ProjectActionsCtx.Provider>
+                </VerifyCacheCtx.Provider>
               </LiveDataCtx.Provider>
             </AppDataCtx.Provider>
           </I18nCtx.Provider>

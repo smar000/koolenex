@@ -80,12 +80,26 @@
   color: var(--dim);
   font-size: 10px;
 }
+.resizer {
+  width: 5px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+}
+.resizer:hover,
+.resizer:active {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
 .sidebar {
-  width: 220px;
+  flex-shrink: 0;
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+.sidebarResizing {
+  user-select: none;
 }
 .logHeader {
   padding: 10px 14px;
@@ -127,7 +141,7 @@
   width: 200px;
 }
 .thActions {
-  width: 110px;
+  width: 230px;
 }
 .accentMono {
   color: var(--accent);
@@ -146,4 +160,105 @@
   display: flex;
   gap: 6px;
   align-items: center;
+}
+
+/* ── Verify progress popover: a small readout under the Verify button
+   while a read is in flight, using the same live progress data the
+   Device vs Project page's loading banner shows. ── */
+.verifyBtnWrap {
+  position: relative;
+}
+.verifySplit {
+  display: flex;
+  gap: 4px;
+}
+.verifySplit :global(button),
+.rowActions :global(button) {
+  white-space: nowrap;
+}
+.verifyPopover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  width: 200px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+}
+.verifyPopoverText {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* ── Slide-over: opens automatically once a Verify read completes, covering
+   the whole viewport so it isn't fighting the app's own sidebar/nav for
+   z-index. A scrim behind it closes it on click, same as the X button. ── */
+.slideOverScrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 90;
+}
+.slideOver {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(900px, 92vw);
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.5);
+  z-index: 91;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.22s ease-out;
+}
+.slideOverOpen {
+  transform: translateX(0);
+}
+.slideOverHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.slideOverTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  font-size: 14px;
+}
+.slideOverClose {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+}
+.slideOverClose:hover {
+  color: var(--fg);
+  border-color: var(--dim);
+}
+.slideOverBody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
 }

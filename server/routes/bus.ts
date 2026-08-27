@@ -979,11 +979,28 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
 
     // Read every region/property for this device inside ONE management session
     // (one Connect/Disconnect for the whole verify), instead of churning a
-    // fresh connection-oriented session per read.
+    // fresh connection-oriented session per read. The total byte count is
+    // known upfront (it's the same computed-image size "expected" is built
+    // from), so real progress can be broadcast as chunks come in rather than
+    // only reporting done/not-done - the UI no longer has to guess.
+    const progressTotal = plan.mem.reduce(
+      (sum, r) => sum + r.expected.length,
+      0,
+    );
     const memActuals = plan.mem.length
       ? await b.readMemoryMany(
           deviceAddress,
           plan.mem.map((r) => ({ address: r.addr, length: r.expected.length })),
+          undefined,
+          (bytesRead) =>
+            b.broadcast('verify:progress', {
+              deviceAddress,
+              bytesRead,
+              totalBytes: progressTotal,
+              pct: progressTotal
+                ? Math.min(100, Math.round((bytesRead / progressTotal) * 100))
+                : 0,
+            }),
         )
       : [];
     for (let i = 0; i < plan.mem.length; i++) {

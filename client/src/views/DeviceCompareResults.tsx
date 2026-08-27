@@ -1,0 +1,486 @@
+import { useState, useMemo, useRef, useEffect } from 'react';
+import { Btn, Badge, SearchBox, Empty } from '../primitives.tsx';
+import { DeviceTypeIcon } from '../icons.tsx';
+import type { VerifyDecodedParam } from '../api.ts';
+import { useLiveData, useVerifyCache } from '../contexts.ts';
+import styles from './DeviceComparisonView.module.css';
+
+/** Deterministic hue (0-359) from a section name, for the per-section tint. */
+function hueForSection(name: string): number {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return h % 360;
+}
+
+function sectionId(name: string): string {
+  return 'sec-' + name.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+}
+
+export function timeAgo(ts: number): string {
+  const s = Math.round((Date.now() - ts) / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  return `${h}h ago`;
+}
+
+interface DeviceLike {
+  id: number;
+  individual_address: string;
+  name: string;
+  device_type: string;
+}
+
+/**
+ * Displays a device's cached verify-device result (decoded parameters or
+ * raw properties) side-by-side with what the project expects, plus the
+ * live in-progress read state if one is running. Pure display + filtering -
+ * does NOT trigger a bus read itself; the host (the standalone Device vs
+ * Project page, or Programming's slide-over) is responsible for that via
+ * the shared VerifyCacheCtx, so this component works identically embedded
+ * either way.
+ */
+export function DeviceCompareResults({
+  device,
+  showDeviceLabel = true,
+}: {
+  device: DeviceLike | null;
+  /** Hide the device name/icon row when the host already shows it
+   * elsewhere (e.g. the slide-over's own header). */
+  showDeviceLabel?: boolean;
+}) {
+  const { busStatus } = useLiveData();
+  const { cache, progress } = useVerifyCache();
+
+  const [search, setSearch] = useState('');
+  const [onlyDiffering, setOnlyDiffering] = useState(false);
+  const [onlyNamed, setOnlyNamed] = useState(true);
+  const [showGroupCol, setShowGroupCol] = useState(false);
+  const [sectionsOpen, setSectionsOpen] = useState(false);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const sectionsPopoverRef = useRef<HTMLDivElement | null>(null);
+
+  const cacheEntry = device ? cache[device.id] : undefined;
+  const result = cacheEntry?.result ?? null;
+  const liveProgress = device ? progress[device.individual_address] : undefined;
+  const loading = !!liveProgress && !cacheEntry;
+
+  const decoded = result?.decoded ?? null;
+
+  // Smart default: when a fresh result comes in (new device selected, or a
+  // re-verify completes) with any differing parameter, default to showing
+  // ALL differences including unnamed ones - that's almost certainly what
+  // you want to see first. With no differences, default back to the
+  // original "only named" view instead of an empty differing-only table.
+  // Only applies once per distinct result (tracked by device+fetchedAt) so
+  // it never fights a filter toggle you made by hand.
+  const appliedDefaultKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!decoded || !device) return;
+    const key = `${device.id}:${cacheEntry?.fetchedAt ?? ''}`;
+    if (appliedDefaultKeyRef.current === key) return;
+    appliedDefaultKeyRef.current = key;
+    const hasMismatch = decoded.some((d) => d.match === false);
+    setOnlyDiffering(hasMismatch);
+    setOnlyNamed(!hasMismatch);
+  }, [decoded, device, cacheEntry]);
+  const q = search.trim().toLowerCase();
+  const filtered = useMemo(
+    () =>
+      (decoded ?? []).filter((d) => {
+        if (onlyDiffering && d.match !== false) return false;
+        if (onlyNamed && d.label === d.key) return false;
+        if (!q) return true;
+        return (
+          d.label.toLowerCase().includes(q) ||
+          d.section.toLowerCase().includes(q) ||
+          d.group.toLowerCase().includes(q)
+        );
+      }),
+    [decoded, onlyDiffering, onlyNamed, q],
+  );
+
+  const bySection = useMemo(() => {
+    const m = new Map<string, VerifyDecodedParam[]>();
+    for (const row of filtered) {
+      const key = row.section || '(Ungrouped)';
+      if (!m.has(key)) m.set(key, []);
+      m.get(key)!.push(row);
+    }
+    return m;
+  }, [filtered]);
+
+  const sections = Array.from(bySection.keys()).sort((a, b) =>
+    a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }),
+  );
+
+  const matchCount = decoded
+    ? decoded.filter((d) => d.match === true).length
+    : 0;
+  const mismatchCount = decoded
+    ? decoded.filter((d) => d.match === false).length
+    : 0;
+  // How many of those mismatches the current filters (search / only-named)
+  // are hiding from the table below - the summary badges below count every
+  // decoded parameter, not just the filtered/visible ones, so this makes
+  // that gap visible instead of leaving "4 differ" looking wrong next to a
+  // 3-row table.
+  const shownMismatchCount = filtered.filter((d) => d.match === false).length;
+  const hiddenMismatchCount = mismatchCount - shownMismatchCount;
+
+  const jumpTo = (name: string) => {
+    const el = bodyRef.current?.querySelector(
+      `#${CSS.escape(sectionId(name))}`,
+    );
+    el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setSectionsOpen(false);
+  };
+
+  // Close the sections popover on outside click.
+  useEffect(() => {
+    if (!sectionsOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!sectionsPopoverRef.current?.contains(e.target as Node)) {
+        setSectionsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [sectionsOpen]);
+
+  return (
+    <div className={styles.root}>
+      <div className={styles.toolbar}>
+        {result && (
+          <div className={styles.toolbarRow}>
+            {showDeviceLabel && device && (
+              <span className={styles.devLabel}>
+                <DeviceTypeIcon type={device.device_type} />
+                {device.individual_address} — {device.name}
+              </span>
+            )}
+            {cacheEntry && (
+              <span
+                className={styles.cacheNote}
+                title={new Date(cacheEntry.fetchedAt).toLocaleString()}
+              >
+                cached · read {timeAgo(cacheEntry.fetchedAt)}
+              </span>
+            )}
+
+            {decoded && decoded.length > 0 && sections.length > 1 && (
+              <div className={styles.sectionsNav} ref={sectionsPopoverRef}>
+                <Btn
+                  onClick={() => setSectionsOpen((o) => !o)}
+                  color="var(--muted)"
+                  bg="var(--surface)"
+                >
+                  Sections ({sections.length}) {sectionsOpen ? '▴' : '▾'}
+                </Btn>
+                {sectionsOpen && (
+                  <div className={styles.sectionsPopover}>
+                    {sections.map((s) => {
+                      const hue = hueForSection(s);
+                      return (
+                        <button
+                          key={s}
+                          onClick={() => jumpTo(s)}
+                          className={styles.jumpChip}
+                          style={{ '--chip-hue': hue } as React.CSSProperties}
+                        >
+                          {s}
+                          <span className={styles.jumpChipCount}>
+                            {bySection.get(s)!.length}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className={styles.summaryBadges}>
+              <Badge
+                label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
+                color={result.match ? 'var(--green)' : 'var(--amber)'}
+              />
+              {decoded && (
+                <>
+                  <Badge label={`${matchCount} match`} color="var(--green)" />
+                  {mismatchCount > 0 &&
+                    (hiddenMismatchCount > 0 ? (
+                      <button
+                        type="button"
+                        className={styles.hiddenDiffBadgeBtn}
+                        onClick={() => {
+                          setOnlyNamed(false);
+                          setOnlyDiffering(true);
+                        }}
+                        title={`${hiddenMismatchCount} differing parameter${hiddenMismatchCount === 1 ? ' is' : 's are'} unnamed (raw key) and hidden by "Only named parameters" — click to reveal ${hiddenMismatchCount === 1 ? 'it' : 'them'}`}
+                      >
+                        <Badge
+                          label={`${mismatchCount} differ (${hiddenMismatchCount} hidden — click to show)`}
+                          color="var(--red)"
+                        />
+                      </button>
+                    ) : (
+                      <Badge
+                        label={`${mismatchCount} differ`}
+                        color="var(--red)"
+                      />
+                    ))}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {result && decoded && decoded.length > 0 && (
+          <div className={styles.toolbarRow}>
+            <div className={styles.filterBar}>
+              <SearchBox
+                value={search}
+                onChange={setSearch}
+                placeholder="Filter parameters…"
+              />
+              <label className={styles.checkToggle}>
+                <input
+                  type="checkbox"
+                  checked={onlyDiffering}
+                  onChange={(e) => setOnlyDiffering(e.target.checked)}
+                />
+                Only differing
+              </label>
+              <label className={styles.checkToggle}>
+                <input
+                  type="checkbox"
+                  checked={onlyNamed}
+                  onChange={(e) => setOnlyNamed(e.target.checked)}
+                />
+                Only named parameters
+              </label>
+              <label
+                className={styles.checkToggle}
+                title={
+                  'Raw per-instance label from the product database (e.g. "Dimming channel 2 ({{0:...}})"). ' +
+                  'The {{0:...}} is a template placeholder real ETS substitutes at render time - koolenex ' +
+                  "doesn't resolve it yet, so it's shown exactly as parsed."
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={showGroupCol}
+                  onChange={(e) => setShowGroupCol(e.target.checked)}
+                />
+                Show group column ⓘ
+              </label>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className={styles.body} ref={bodyRef}>
+        {busStatus?.connected === false && (
+          <div className={styles.warnBanner}>
+            Bus not connected — connect to a router/interface first.
+          </div>
+        )}
+
+        {!result && !loading && (
+          <Empty
+            icon="⇄"
+            msg="No verify result for this device yet — run Verify to read it over the bus."
+          />
+        )}
+
+        {loading && liveProgress && (
+          <div className={styles.loadingBanner}>
+            <div className={styles.progressRow}>
+              <div className={styles.progressTrack}>
+                <div
+                  className={styles.progressFill}
+                  style={{ width: `${liveProgress.pct}%` }}
+                />
+              </div>
+              <span className={styles.progressPct}>{liveProgress.pct}%</span>
+            </div>
+            <span className={styles.loadingText}>
+              Reading device memory over the bus — {liveProgress.bytesRead}/
+              {liveProgress.totalBytes} bytes
+            </span>
+          </div>
+        )}
+
+        {result && decoded && decoded.length > 0 && (
+          <>
+            {filtered.length === 0 ? (
+              <Empty msg="No parameters match the current filter." />
+            ) : (
+              Array.from(bySection.entries()).map(([section, rows]) => {
+                const hue = hueForSection(section);
+                return (
+                  <div
+                    key={section}
+                    id={sectionId(section)}
+                    className={styles.sectionBlock}
+                    style={{ '--section-hue': hue } as React.CSSProperties}
+                  >
+                    <div className={styles.sectionTitle}>
+                      {section}
+                      <span className={styles.sectionCount}>{rows.length}</span>
+                    </div>
+                    <table className={styles.table}>
+                      <colgroup>
+                        <col style={{ width: showGroupCol ? '38%' : '48%' }} />
+                        {showGroupCol && <col style={{ width: '22%' }} />}
+                        <col style={{ width: showGroupCol ? '15%' : '17%' }} />
+                        <col style={{ width: showGroupCol ? '15%' : '17%' }} />
+                        <col style={{ width: '10%' }} />
+                      </colgroup>
+                      <thead>
+                        <tr>
+                          <th className={styles.th}>Parameter</th>
+                          {showGroupCol && (
+                            <th className={styles.th}>Group (raw)</th>
+                          )}
+                          <th className={styles.th}>Project</th>
+                          <th className={styles.th}>Device</th>
+                          <th className={styles.th}>Match</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((r) => (
+                          <tr
+                            key={r.key}
+                            className={
+                              r.match === false ? styles.rowDiffer : styles.row
+                            }
+                          >
+                            <td className={styles.td}>
+                              <span className={styles.tip} data-tip={r.key}>
+                                <span className={styles.tipText}>
+                                  {r.label}
+                                </span>
+                              </span>
+                            </td>
+                            {showGroupCol && (
+                              <td
+                                className={`${styles.td} ${styles.groupCell}`}
+                              >
+                                <span
+                                  className={styles.tip}
+                                  data-tip={r.group || undefined}
+                                >
+                                  <span className={styles.tipText}>
+                                    {r.group || '—'}
+                                  </span>
+                                </span>
+                              </td>
+                            )}
+                            <td className={`${styles.td} ${styles.mono}`}>
+                              <span
+                                className={styles.tip}
+                                data-tip={r.expectedValue}
+                              >
+                                <span className={styles.tipText}>
+                                  {r.expectedValue}
+                                </span>
+                              </span>
+                            </td>
+                            <td className={`${styles.td} ${styles.mono}`}>
+                              <span
+                                className={styles.tip}
+                                data-tip={r.actualValue ?? undefined}
+                              >
+                                <span className={styles.tipText}>
+                                  {r.actualValue ?? '—'}
+                                </span>
+                              </span>
+                            </td>
+                            <td className={styles.td}>
+                              {r.match === true && (
+                                <Badge label="MATCH" color="var(--green)" />
+                              )}
+                              {r.match === false && (
+                                <Badge label="DIFFERS" color="var(--red)" />
+                              )}
+                              {r.match === null && (
+                                <Badge label="N/A" color="var(--dim)" />
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })
+            )}
+          </>
+        )}
+
+        {result && !decoded && result.props && result.props.length > 0 && (
+          <div
+            className={styles.sectionBlock}
+            style={{ '--section-hue': 210 } as React.CSSProperties}
+          >
+            <div className={styles.sectionTitle}>
+              Properties ({result.family} — no decodable parameter memory for
+              this device family)
+            </div>
+            <table className={styles.table}>
+              <colgroup>
+                <col style={{ width: '48%' }} />
+                <col style={{ width: '17%' }} />
+                <col style={{ width: '17%' }} />
+                <col style={{ width: '10%' }} />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th className={styles.th}>Property</th>
+                  <th className={styles.th}>Project (hex)</th>
+                  <th className={styles.th}>Device (hex)</th>
+                  <th className={styles.th}>Match</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.props.map((p, i) => (
+                  <tr
+                    key={i}
+                    className={!p.match ? styles.rowDiffer : styles.row}
+                  >
+                    <td className={styles.td}>
+                      obj={p.obj} pid={p.pid}
+                    </td>
+                    <td className={`${styles.td} ${styles.mono}`}>
+                      <span className={styles.tip} data-tip={p.expectedHex}>
+                        <span className={styles.tipText}>{p.expectedHex}</span>
+                      </span>
+                    </td>
+                    <td className={`${styles.td} ${styles.mono}`}>
+                      <span className={styles.tip} data-tip={p.actualHex}>
+                        <span className={styles.tipText}>{p.actualHex}</span>
+                      </span>
+                    </td>
+                    <td className={styles.td}>
+                      <Badge
+                        label={p.match ? 'MATCH' : 'DIFFERS'}
+                        color={p.match ? 'var(--green)' : 'var(--red)'}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {result && !decoded && (!result.props || result.props.length === 0) && (
+          <Empty msg="No decodable parameters or properties were returned for this device." />
+        )}
+      </div>
+    </div>
+  );
+}

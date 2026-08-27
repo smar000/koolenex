@@ -1,7 +1,7 @@
 // ── App state reducer ─────────────────────────────────────────────────────────
 
 import { buildGAMaps } from '../../shared/ga-maps.ts';
-import type { ImportSummary } from './api.ts';
+import type { ImportSummary, VerifyDeviceResult } from './api.ts';
 import type {
   Project,
   Device,
@@ -37,6 +37,64 @@ export const saveWindows = (pid: number | null, w: WindowEntry[]): void => {
     );
   } catch {}
 };
+
+// Verify-device results (Programming's "Verify" button, the Device vs
+// Project comparison page) persisted across reloads - a relmem read takes
+// up to ~2 minutes, so losing it to a page refresh is worth avoiding. Each
+// entry already carries its own fetchedAt so staleness stays visible
+// ("cached · read Xm ago") regardless of storage lifetime.
+//
+// Uses IndexedDB, not localStorage: a single device's decoded result is
+// routinely >1MB (confirmed empirically - a full relmem decode came to
+// ~1.4MB), and localStorage's ~5MB-per-origin quota was silently exceeded
+// with just a couple of devices cached (writes failed inside a swallowed
+// try/catch, so the cache appeared to "never persist" with no visible
+// error). IndexedDB's quota is effectively hundreds of MB, more than
+// sufficient here.
+const VERIFY_DB_NAME = 'knx-verify-cache';
+const VERIFY_STORE = 'results';
+const VERIFY_DB_KEY = 'all'; // one record holding the whole cache map
+
+function openVerifyDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(VERIFY_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(VERIFY_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function loadVerifyCache(): Promise<
+  Record<number, VerifyCacheEntry>
+> {
+  try {
+    const db = await openVerifyDb();
+    return await new Promise((resolve) => {
+      const tx = db.transaction(VERIFY_STORE, 'readonly');
+      const req = tx.objectStore(VERIFY_STORE).get(VERIFY_DB_KEY);
+      req.onsuccess = () => resolve(req.result || {});
+      req.onerror = () => resolve({});
+    });
+  } catch {
+    return {};
+  }
+}
+
+export async function saveVerifyCache(
+  cache: Record<number, VerifyCacheEntry>,
+): Promise<void> {
+  try {
+    const db = await openVerifyDb();
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(VERIFY_STORE, 'readwrite');
+      tx.objectStore(VERIFY_STORE).put(cache, VERIFY_DB_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  } catch {}
+}
 
 interface ScanProgress {
   address?: string;
@@ -93,6 +151,11 @@ interface BusStatus {
   path?: string;
 }
 
+export interface VerifyCacheEntry {
+  result: VerifyDeviceResult;
+  fetchedAt: number;
+}
+
 export interface AppState {
   projects: Project[];
   activeProjectId: number | null;
@@ -104,6 +167,11 @@ export interface AppState {
   windows: WindowEntry[];
   scan: ScanState;
   import: ImportState;
+  // Last /bus/verify-device result per device id, shared across every view
+  // that can trigger a verify (Programming's "Verify" button, the Device vs
+  // Project comparison page) so re-selecting a device doesn't force a fresh
+  // ~2-minute bus read unless explicitly requested.
+  verifyCache: Record<number, VerifyCacheEntry>;
 }
 
 const initialImportState: ImportState = {
@@ -128,6 +196,7 @@ export const initialState: AppState = {
   windows: [],
   scan: { results: [], running: false, progress: null },
   import: initialImportState,
+  verifyCache: {},
 };
 
 export const GROUP_WTYPES = {
@@ -154,6 +223,15 @@ export type Action =
       patch: Partial<ProjectFull> & Record<string, unknown>;
     }
   | { type: 'SET_DEVICE_STATUS'; deviceId: number; status: DeviceStatus }
+  | {
+      type: 'SET_VERIFY_RESULT';
+      deviceId: number;
+      result: VerifyDeviceResult;
+    }
+  | {
+      type: 'HYDRATE_VERIFY_CACHE';
+      cache: Record<number, VerifyCacheEntry>;
+    }
   | { type: 'PATCH_DEVICE'; id: number; patch: Partial<Device> }
   | { type: 'PATCH_GA'; id: number; patch: Partial<EnrichedGA> }
   | {
@@ -265,6 +343,21 @@ export function reducer(state: AppState, action: Action): AppState {
         projectData: state.projectData
           ? { ...state.projectData, ...action.patch }
           : state.projectData,
+      };
+    case 'SET_VERIFY_RESULT':
+      return {
+        ...state,
+        verifyCache: {
+          ...state.verifyCache,
+          [action.deviceId]: { result: action.result, fetchedAt: Date.now() },
+        },
+      };
+    case 'HYDRATE_VERIFY_CACHE':
+      // Loading from IndexedDB is async, so this lands after mount - merge
+      // rather than overwrite in case a verify somehow completed first.
+      return {
+        ...state,
+        verifyCache: { ...action.cache, ...state.verifyCache },
       };
     case 'SET_DEVICE_STATUS': {
       if (!state.projectData) return state;

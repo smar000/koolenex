@@ -25,6 +25,47 @@ interface BusStatusResponse {
   path?: string;
 }
 
+export interface VerifyDecodedParam {
+  key: string;
+  label: string;
+  section: string;
+  group: string;
+  unit: string;
+  offset: number;
+  bitOffset: number;
+  bitSize: number;
+  rawValue: number | string;
+  expectedValue: string;
+  actualValue: string | null;
+  match: boolean | null;
+}
+
+export interface VerifyDeviceResult {
+  deviceAddress: string;
+  family: string;
+  match: boolean;
+  totalBytes: number;
+  totalDiffering: number;
+  segments: Array<{
+    label: string;
+    offset: number;
+    size: number;
+    matching: number;
+    differing: number;
+    expectedHex: string;
+    actualHex: string;
+  }>;
+  props: Array<{
+    label: string;
+    obj: number;
+    pid: number;
+    match: boolean;
+    expectedHex: string;
+    actualHex: string;
+  }>;
+  decoded?: VerifyDecodedParam[];
+}
+
 export interface ImportSummary {
   devices: number;
   groupAddresses: number;
@@ -328,18 +369,11 @@ export const api = {
     projectId: number,
     deviceId: number,
   ) =>
-    req<{
-      deviceAddress: string;
-      match: boolean;
-      totalBytes: number;
-      totalDiffering: number;
-      segments: Array<{
-        offset: number;
-        size: number;
-        matching: number;
-        differing: number;
-      }>;
-    }>('POST', '/bus/verify-device', { deviceAddress, projectId, deviceId }),
+    req<VerifyDeviceResult>('POST', '/bus/verify-device', {
+      deviceAddress,
+      projectId,
+      deviceId,
+    }),
 
   // Settings
   getSettings: () => req<Setting[]>('GET', '/settings'),

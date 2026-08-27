@@ -5,6 +5,8 @@ import type {
   ProjectFull,
   BusTelegram,
 } from '../../shared/types.ts';
+import type { VerifyDeviceResult } from './api.ts';
+import type { VerifyCacheEntry } from './state.ts';
 
 export type DptMode = 'numeric' | 'formal' | 'friendly';
 
@@ -175,5 +177,35 @@ export const LiveDataCtx = createContext<LiveData | null>(null);
 export function useLiveData(): LiveData {
   const ctx = useContext(LiveDataCtx);
   if (!ctx) throw new Error('useLiveData must be used within LiveDataCtx');
+  return ctx;
+}
+
+// ── Verify-result cache — shared across every view that can trigger a
+// /bus/verify-device call (Programming's "Verify" button, the Device vs
+// Project comparison page), keyed by device id, so switching devices or
+// views reuses the last real read instead of forcing a fresh ~2-minute bus
+// read. Callers decide when to force a refresh (e.g. an explicit button).
+export interface VerifyProgress {
+  bytesRead: number;
+  totalBytes: number;
+  pct: number;
+}
+
+export interface VerifyCache {
+  cache: Record<number, VerifyCacheEntry>;
+  setResult: (deviceId: number, result: VerifyDeviceResult) => void;
+  // Live progress while a verify read is in flight, keyed by device
+  // *address* (progress events only carry the address, not the id) - not
+  // persisted like `cache`, just transient UI state updated from the
+  // verify:progress WebSocket messages a verify-device call now broadcasts.
+  progress: Record<string, VerifyProgress>;
+}
+
+export const VerifyCacheCtx = createContext<VerifyCache | null>(null);
+
+export function useVerifyCache(): VerifyCache {
+  const ctx = useContext(VerifyCacheCtx);
+  if (!ctx)
+    throw new Error('useVerifyCache must be used within VerifyCacheCtx');
   return ctx;
 }

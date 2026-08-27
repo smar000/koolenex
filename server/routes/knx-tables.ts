@@ -352,6 +352,139 @@ export function writeBits(
   buf[byteOffset] = (buf[byteOffset]! & ~bmask) | ((value << shift) & bmask);
 }
 
+// Read `bitSize` bits from buf at byte `byteOffset`, starting from bit
+// `bitOffset` (KNX convention: bitOffset=0 is bit 7 of the byte, i.e. MSB
+// first). Exact structural mirror of writeBits() above - same recursion for
+// the sub-byte-spanning-two-bytes case, same big-endian byte order for
+// byte-aligned multi-byte fields. Out-of-range bytes read as 0 rather than
+// throwing, matching writeBits()'s silent-clamp behavior.
+export function readBits(
+  buf: Buffer,
+  byteOffset: number,
+  bitOffset: number,
+  bitSize: number,
+): number {
+  if (bitSize <= 0) return 0;
+  if (bitOffset === 0 && bitSize % 8 === 0) {
+    const byteCount = bitSize / 8;
+    let value = 0;
+    for (let i = 0; i < byteCount; i++) {
+      const bIdx = byteOffset + i;
+      const byte = bIdx < buf.length ? buf[bIdx]! : 0;
+      value = value * 256 + byte;
+    }
+    return value;
+  }
+  if (bitOffset + bitSize > 8) {
+    const bitsInFirstByte = 8 - bitOffset;
+    const high = readBits(buf, byteOffset, bitOffset, bitsInFirstByte);
+    const low = readBits(buf, byteOffset + 1, 0, bitSize - bitsInFirstByte);
+    return high * 2 ** (bitSize - bitsInFirstByte) + low;
+  }
+  const shift = 8 - bitOffset - bitSize;
+  const mask = ((1 << bitSize) - 1) << shift;
+  const byte = byteOffset < buf.length ? buf[byteOffset]! : 0;
+  return (byte & mask) >>> shift;
+}
+
+// Decode a DPT 9 (2-byte KNX float) value. Exact inverse of
+// writeKnxFloat16() above.
+export function readKnxFloat16(buf: Buffer, byteOffset: number): number {
+  if (byteOffset + 2 > buf.length) return 0;
+  const raw = (buf[byteOffset]! << 8) | buf[byteOffset + 1]!;
+  const sign = (raw >> 15) & 0x1;
+  const exp = (raw >> 11) & 0xf;
+  let mantissa = raw & 0x7ff;
+  if (sign) mantissa = mantissa - 2048;
+  return (mantissa * 2 ** exp) / 100;
+}
+
+export interface DecodedParam {
+  key: string;
+  label: string;
+  section: string;
+  group: string;
+  unit: string;
+  offset: number;
+  bitOffset: number;
+  bitSize: number;
+  rawValue: number | string;
+  value: string;
+}
+
+/**
+ * Decode a raw parameter-memory buffer (as read back from a device, e.g. via
+ * /bus/verify-device's actualHex) into human-readable parameter values -
+ * the inverse of buildParamMem(). Reuses the SAME paramMemLayout/params
+ * definitions used to build the download image and to compute verify's
+ * "expected" value, so a decoded reading is directly comparable to what
+ * that machinery already asserts. Does not re-read the bus - operates
+ * purely on a buffer already fetched.
+ *
+ * Every entry with a resolvable byte offset is decoded, regardless of the
+ * fromMemoryChild/conditional-activation gating buildParamMem() applies when
+ * WRITING - a decode reflects "what these bits currently contain", not
+ * "would this parameter have been written". Callers that want to mirror the
+ * write-time gating should cross-reference the same conditionallyActive
+ * logic on the output themselves.
+ */
+export function decodeParamMem(
+  buf: Buffer,
+  paramMemLayout: Record<string, ParamMemEntry>,
+  params: Record<string, ParamDef> | null,
+): DecodedParam[] {
+  const out: DecodedParam[] = [];
+  for (const [key, info] of Object.entries(paramMemLayout)) {
+    if (info.offset === null || info.offset === undefined) continue;
+    const def = params?.[key];
+    const label = (def?.label as string) ?? key;
+    const section = (def?.section as string) ?? '';
+    const group = (def?.group as string) ?? '';
+    const unit = (def?.unit as string) ?? '';
+    const enums = (def?.enums as Record<string, string> | undefined) ?? {};
+
+    let rawValue: number | string;
+    let value: string;
+
+    if (info.isText) {
+      const byteSize = Math.floor(info.bitSize / 8);
+      const strBuf = buf.subarray(info.offset, info.offset + byteSize);
+      const text = strBuf.toString('latin1').replace(/\0+$/, '');
+      rawValue = text;
+      value = text;
+    } else if (info.isFloat) {
+      let f: number;
+      if (info.bitSize === 16) f = readKnxFloat16(buf, info.offset);
+      else if (info.bitSize === 32) f = buf.readFloatBE(info.offset);
+      else if (info.bitSize === 64) f = buf.readDoubleBE(info.offset);
+      else f = 0;
+      const scaled = info.coefficient ? f * info.coefficient : f;
+      rawValue = scaled;
+      value = unit ? `${scaled}${unit}` : String(scaled);
+    } else {
+      const raw = readBits(buf, info.offset, info.bitOffset, info.bitSize);
+      const scaled = info.coefficient ? raw * info.coefficient : raw;
+      rawValue = scaled;
+      const enumLabel = enums[String(raw)];
+      value = enumLabel ?? (unit ? `${scaled}${unit}` : String(scaled));
+    }
+
+    out.push({
+      key,
+      label,
+      section,
+      group,
+      unit,
+      offset: info.offset,
+      bitOffset: info.bitOffset,
+      bitSize: info.bitSize,
+      rawValue,
+      value,
+    });
+  }
+  return out;
+}
+
 export interface DynAssign {
   target: string;
   source: string | null;

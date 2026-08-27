@@ -14,6 +14,7 @@ import {
   resolveParamSegment,
   buildParamMem,
   diffMemory,
+  decodeParamMem,
 } from './knx-tables.ts';
 import type {
   Setting,
@@ -695,6 +696,8 @@ type DeviceProgramming =
       paramBase: number | null;
       absSegData: Record<number, { size: number; hex?: string | null }>;
       appId: string;
+      paramMemLayout: Record<string, unknown>;
+      params: Record<string, unknown> | null;
     }
   | { ok: false; status: number; body: Record<string, unknown> };
 
@@ -808,6 +811,8 @@ function buildDeviceProgramming(dev: Device): DeviceProgramming {
     paramBase,
     absSegData: model.absSegData ?? {},
     appId: model.appId ?? dev.app_ref,
+    paramMemLayout: model.paramMemLayout ?? {},
+    params: model.params ?? null,
   };
 }
 
@@ -914,8 +919,17 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
 
   const built = buildDeviceProgramming(dev);
   if (!built.ok) return res.status(built.status).json(built.body);
-  const { steps, gaTable, assocTable, paramMem, paramBase, absSegData, appId } =
-    built;
+  const {
+    steps,
+    gaTable,
+    assocTable,
+    paramMem,
+    paramBase,
+    absSegData,
+    appId,
+    paramMemLayout,
+    params: paramDefs,
+  } = built;
 
   // Derive the read-back plan from the SAME artifacts the download would use.
   // planVerify covers every device family we own:
@@ -1018,6 +1032,48 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
       });
     }
 
+    // Decode the raw relmem bytes just read/compared into human-readable
+    // parameter values, purely as an additional view on data already
+    // fetched above — no extra bus reads. Reuses the exact same
+    // paramMemLayout/params definitions used to build the download image and
+    // to compute "expected", so decoded expected/actual values are directly
+    // comparable to (and should explain) the byte-level diff in `segments`.
+    // relmem-family only for now (single contiguous buffer to decode
+    // against one paramMemLayout); prop-family devices have no equivalent
+    // memory image to decode.
+    type DecodedComparison = Omit<
+      ReturnType<typeof decodeParamMem>[number],
+      'value'
+    > & {
+      expectedValue: string;
+      actualValue: string | null;
+      match: boolean | null;
+    };
+    let decoded: DecodedComparison[] | undefined;
+    if (
+      plan.family === 'relmem' &&
+      segments.length === 1 &&
+      paramMemLayout &&
+      Object.keys(paramMemLayout).length
+    ) {
+      const expectedBuf = Buffer.from(segments[0]!.expectedHex, 'hex');
+      const actualBuf = Buffer.from(segments[0]!.actualHex, 'hex');
+      const layout = paramMemLayout as Parameters<typeof decodeParamMem>[1];
+      const defs = paramDefs as Parameters<typeof decodeParamMem>[2];
+      const expectedDecoded = decodeParamMem(expectedBuf, layout, defs);
+      const actualDecoded = decodeParamMem(actualBuf, layout, defs);
+      const actualByKey = new Map(actualDecoded.map((d) => [d.key, d]));
+      decoded = expectedDecoded.map(({ value, ...exp }) => {
+        const act = actualByKey.get(exp.key);
+        return {
+          ...exp,
+          expectedValue: value,
+          actualValue: act?.value ?? null,
+          match: act ? act.value === value : null,
+        };
+      });
+    }
+
     res.json({
       deviceAddress,
       family: plan.family,
@@ -1026,6 +1082,7 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
       totalDiffering,
       segments,
       props,
+      ...(decoded ? { decoded } : {}),
     });
   } catch (e) {
     res

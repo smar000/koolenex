@@ -3,6 +3,12 @@
   display: flex;
   flex: 1;
   overflow: hidden;
+  /* Positioning root for the slide-over/scrim below - keeps both scoped to
+     this page's own content area (to the right of the app's sidebar)
+     instead of the full browser viewport, so resizing the window shrinks
+     them correctly without ever covering the sidebar. */
+  position: relative;
+  min-width: 0;
 }
 .main {
   flex: 1;
@@ -198,22 +204,31 @@
   white-space: nowrap;
 }
 
-/* ── Slide-over: opens automatically once a Verify read completes, covering
-   the whole viewport so it isn't fighting the app's own sidebar/nav for
-   z-index. A scrim behind it closes it on click, same as the X button. ── */
+/* ── Slide-over: opens automatically once a Verify read completes.
+   position:absolute against .root (not position:fixed against the
+   viewport) so both the scrim and the panel are scoped to this page's own
+   content area - to the right of the app's own sidebar - and never cover
+   it. Width is a percentage of THAT container (not the viewport), so it
+   shrinks continuously as the window (or the app sidebar) resizes, down to
+   a floor beyond which the content inside scrolls horizontally instead. ── */
 .slideOverScrim {
-  position: fixed;
+  position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
   z-index: 90;
 }
 .slideOver {
-  position: fixed;
+  position: absolute;
   top: 0;
   right: 0;
   bottom: 0;
-  width: min(900px, 92vw);
-  background: var(--bg);
+  width: min(900px, 96%);
+  min-width: 320px;
+  max-width: 100%;
+  /* Distinct from the page's own --bg (visible in the sliver of Programming
+     still showing to the left) so the panel unmistakably reads as a layer
+     on top, not just more of the same page. */
+  background: var(--surface);
   border-left: 1px solid var(--border);
   box-shadow: -12px 0 32px rgba(0, 0, 0, 0.5);
   z-index: 91;
@@ -260,5 +275,6 @@
 .slideOverBody {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: flex;
 }

@@ -55,7 +55,11 @@
   color: var(--dim);
   white-space: nowrap;
 }
-.hiddenDiffBadgeBtn {
+/* Summary chips ("N match" / "N differ") double as row filters - click one
+   to filter the table to that outcome, click again to return to all rows.
+   filterChipBtnActive adds a visible ring so the active filter is obvious
+   at a glance (the badge's own color alone doesn't change on click). */
+.filterChipBtn {
   background: none;
   border: none;
   padding: 0;
@@ -63,8 +67,12 @@
   font-family: inherit;
   border-radius: 999px;
 }
-.hiddenDiffBadgeBtn:hover {
+.filterChipBtn:hover {
   filter: brightness(1.25);
+}
+.filterChipBtnActive {
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px var(--chip-ring, var(--fg));
 }
 .summaryBadges {
   display: flex;
@@ -285,6 +293,16 @@
 .mono {
   font-family: monospace;
   font-size: 9px;
+}
+/* Match/differ glyph replacing the old MATCH/DIFFERS text badge in the
+   narrow MATCH column - a fixed small size that never needs to shrink, so
+   it can't overflow its cell the way a padded text badge did once the
+   column's percentage width dropped below the badge's own minimum width. */
+.matchIcon {
+  display: block;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 /* Custom hover tooltip for truncated cell text - deliberately NOT relying

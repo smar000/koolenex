@@ -16,6 +16,30 @@ function sectionId(name: string): string {
   return 'sec-' + name.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
 }
 
+/** Compact match/differ glyph for the per-row MATCH column - a text Badge
+ * ("MATCH"/"DIFFERS") has a fixed minimum width from its own padding, which
+ * overflowed its cell once the MATCH column's percentage width shrank below
+ * that on a narrow panel. A small fixed-size icon has no such floor. */
+function MatchIcon({ match }: { match: boolean | null }) {
+  if (match === true)
+    return (
+      <span className={styles.matchIcon} style={{ color: 'var(--green)' }} title="Match">
+        ✓
+      </span>
+    );
+  if (match === false)
+    return (
+      <span className={styles.matchIcon} style={{ color: 'var(--red)' }} title="Differs">
+        ✕
+      </span>
+    );
+  return (
+    <span className={styles.matchIcon} style={{ color: 'var(--dim)' }} title="Not applicable">
+      –
+    </span>
+  );
+}
+
 export function timeAgo(ts: number): string {
   const s = Math.round((Date.now() - ts) / 1000);
   if (s < 60) return `${s}s ago`;
@@ -54,7 +78,12 @@ export function DeviceCompareResults({
   const { cache, progress } = useVerifyCache();
 
   const [search, setSearch] = useState('');
-  const [onlyDiffering, setOnlyDiffering] = useState(false);
+  // Row filter driven by the summary chips above the table ("N match" / "N
+  // differ") instead of a separate checkbox - clicking a chip filters to
+  // that outcome, clicking it again (or the same state) returns to 'all'.
+  const [rowFilter, setRowFilter] = useState<'all' | 'differ' | 'match'>(
+    'all',
+  );
   const [onlyNamed, setOnlyNamed] = useState(true);
   const [showGroupCol, setShowGroupCol] = useState(false);
   const [sectionsOpen, setSectionsOpen] = useState(false);
@@ -82,14 +111,15 @@ export function DeviceCompareResults({
     if (appliedDefaultKeyRef.current === key) return;
     appliedDefaultKeyRef.current = key;
     const hasMismatch = decoded.some((d) => d.match === false);
-    setOnlyDiffering(hasMismatch);
+    setRowFilter(hasMismatch ? 'differ' : 'all');
     setOnlyNamed(!hasMismatch);
   }, [decoded, device, cacheEntry]);
   const q = search.trim().toLowerCase();
   const filtered = useMemo(
     () =>
       (decoded ?? []).filter((d) => {
-        if (onlyDiffering && d.match !== false) return false;
+        if (rowFilter === 'differ' && d.match !== false) return false;
+        if (rowFilter === 'match' && d.match !== true) return false;
         if (onlyNamed && d.label === d.key) return false;
         if (!q) return true;
         return (
@@ -98,7 +128,7 @@ export function DeviceCompareResults({
           d.group.toLowerCase().includes(q)
         );
       }),
-    [decoded, onlyDiffering, onlyNamed, q],
+    [decoded, rowFilter, onlyNamed, q],
   );
 
   const bySection = useMemo(() => {
@@ -202,35 +232,79 @@ export function DeviceCompareResults({
             )}
 
             <div className={styles.summaryBadges}>
-              <Badge
-                label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
-                color={result.match ? 'var(--green)' : 'var(--amber)'}
-              />
+              {decoded ? (
+                <button
+                  type="button"
+                  className={`${styles.filterChipBtn} ${rowFilter === 'all' ? styles.filterChipBtnActive : ''}`}
+                  style={
+                    {
+                      '--chip-ring': result.match ? 'var(--green)' : 'var(--amber)',
+                    } as React.CSSProperties
+                  }
+                  onClick={() => setRowFilter('all')}
+                  title={
+                    rowFilter === 'all'
+                      ? 'Showing all parameters (matching and differing)'
+                      : 'Show all parameters — clears the match/differ filter'
+                  }
+                >
+                  <Badge
+                    label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
+                    color={result.match ? 'var(--green)' : 'var(--amber)'}
+                  />
+                </button>
+              ) : (
+                <Badge
+                  label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
+                  color={result.match ? 'var(--green)' : 'var(--amber)'}
+                />
+              )}
               {decoded && (
                 <>
-                  <Badge label={`${matchCount} match`} color="var(--green)" />
-                  {mismatchCount > 0 &&
-                    (hiddenMismatchCount > 0 ? (
-                      <button
-                        type="button"
-                        className={styles.hiddenDiffBadgeBtn}
-                        onClick={() => {
+                  <button
+                    type="button"
+                    className={`${styles.filterChipBtn} ${rowFilter === 'match' ? styles.filterChipBtnActive : ''}`}
+                    style={{ '--chip-ring': 'var(--green)' } as React.CSSProperties}
+                    onClick={() =>
+                      setRowFilter(rowFilter === 'match' ? 'all' : 'match')
+                    }
+                    title={
+                      rowFilter === 'match'
+                        ? 'Showing only matching parameters — click to show all'
+                        : 'Show only matching parameters'
+                    }
+                  >
+                    <Badge label={`${matchCount} match`} color="var(--green)" />
+                  </button>
+                  {mismatchCount > 0 && (
+                    <button
+                      type="button"
+                      className={`${styles.filterChipBtn} ${rowFilter === 'differ' ? styles.filterChipBtnActive : ''}`}
+                      style={{ '--chip-ring': 'var(--red)' } as React.CSSProperties}
+                      onClick={() => {
+                        const next = rowFilter === 'differ' ? 'all' : 'differ';
+                        setRowFilter(next);
+                        if (next === 'differ' && hiddenMismatchCount > 0)
                           setOnlyNamed(false);
-                          setOnlyDiffering(true);
-                        }}
-                        title={`${hiddenMismatchCount} differing parameter${hiddenMismatchCount === 1 ? ' is' : 's are'} unnamed (raw key) and hidden by "Only named parameters" — click to reveal ${hiddenMismatchCount === 1 ? 'it' : 'them'}`}
-                      >
-                        <Badge
-                          label={`${mismatchCount} differ (${hiddenMismatchCount} hidden — click to show)`}
-                          color="var(--red)"
-                        />
-                      </button>
-                    ) : (
+                      }}
+                      title={
+                        rowFilter === 'differ'
+                          ? 'Showing only differing parameters — click to show all'
+                          : hiddenMismatchCount > 0
+                            ? `Show only differing parameters (including ${hiddenMismatchCount} unnamed one${hiddenMismatchCount === 1 ? '' : 's'} normally hidden by "Only named parameters")`
+                            : 'Show only differing parameters'
+                      }
+                    >
                       <Badge
-                        label={`${mismatchCount} differ`}
+                        label={
+                          hiddenMismatchCount > 0
+                            ? `${mismatchCount} differ (${hiddenMismatchCount} hidden)`
+                            : `${mismatchCount} differ`
+                        }
                         color="var(--red)"
                       />
-                    ))}
+                    </button>
+                  )}
                 </>
               )}
             </div>
@@ -245,14 +319,6 @@ export function DeviceCompareResults({
                 onChange={setSearch}
                 placeholder="Filter parameters…"
               />
-              <label className={styles.checkToggle}>
-                <input
-                  type="checkbox"
-                  checked={onlyDiffering}
-                  onChange={(e) => setOnlyDiffering(e.target.checked)}
-                />
-                Only differing
-              </label>
               <label className={styles.checkToggle}>
                 <input
                   type="checkbox"
@@ -333,11 +399,11 @@ export function DeviceCompareResults({
                     </div>
                     <table className={styles.table}>
                       <colgroup>
-                        <col style={{ width: showGroupCol ? '38%' : '48%' }} />
+                        <col style={{ width: showGroupCol ? '42%' : '52%' }} />
                         {showGroupCol && <col style={{ width: '22%' }} />}
-                        <col style={{ width: showGroupCol ? '15%' : '17%' }} />
-                        <col style={{ width: showGroupCol ? '15%' : '17%' }} />
-                        <col style={{ width: '10%' }} />
+                        <col style={{ width: showGroupCol ? '16%' : '19%' }} />
+                        <col style={{ width: showGroupCol ? '16%' : '19%' }} />
+                        <col style={{ width: '4%' }} />
                       </colgroup>
                       <thead>
                         <tr>
@@ -347,7 +413,9 @@ export function DeviceCompareResults({
                           )}
                           <th className={styles.th}>Project</th>
                           <th className={styles.th}>Device</th>
-                          <th className={styles.th}>Match</th>
+                          <th className={styles.th} title="Match">
+                            ✓
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
@@ -400,15 +468,7 @@ export function DeviceCompareResults({
                               </span>
                             </td>
                             <td className={styles.td}>
-                              {r.match === true && (
-                                <Badge label="MATCH" color="var(--green)" />
-                              )}
-                              {r.match === false && (
-                                <Badge label="DIFFERS" color="var(--red)" />
-                              )}
-                              {r.match === null && (
-                                <Badge label="N/A" color="var(--dim)" />
-                              )}
+                              <MatchIcon match={r.match} />
                             </td>
                           </tr>
                         ))}
@@ -432,10 +492,10 @@ export function DeviceCompareResults({
             </div>
             <table className={styles.table}>
               <colgroup>
-                <col style={{ width: '48%' }} />
-                <col style={{ width: '17%' }} />
-                <col style={{ width: '17%' }} />
-                <col style={{ width: '10%' }} />
+                <col style={{ width: '52%' }} />
+                <col style={{ width: '19%' }} />
+                <col style={{ width: '19%' }} />
+                <col style={{ width: '4%' }} />
               </colgroup>
               <thead>
                 <tr>
@@ -465,10 +525,7 @@ export function DeviceCompareResults({
                       </span>
                     </td>
                     <td className={styles.td}>
-                      <Badge
-                        label={p.match ? 'MATCH' : 'DIFFERS'}
-                        color={p.match ? 'var(--green)' : 'var(--red)'}
-                      />
+                      <MatchIcon match={p.match} />
                     </td>
                   </tr>
                 ))}

@@ -11,7 +11,6 @@ import {
   IconMonitor,
   IconScan,
   IconProgramming,
-  IconDeviceCompare,
   IconManufacturers,
   DeviceTypeIcon,
   IconProject,
@@ -31,7 +30,6 @@ import { ComObjectsView } from './views/ComObjectsView.tsx';
 import { ManufacturersView } from './views/ManufacturersView.tsx';
 import { BusMonitorView } from './views/BusMonitorView.tsx';
 import { ProgrammingView } from './views/ProgrammingView.tsx';
-import { DeviceComparisonView } from './views/DeviceComparisonView.tsx';
 import { SettingsView } from './views/SettingsView.tsx';
 import { ProjectInfoView } from './views/ProjectInfoView.tsx';
 import { LocationsView } from './views/LocationsView.tsx';
@@ -98,12 +96,6 @@ const VIEWS: ViewEntry[] = [
     Icon: IconProgramming,
     label: 'Programming',
     wip: true,
-  },
-  {
-    id: 'compareLive',
-    slug: 'compareLive',
-    Icon: IconDeviceCompare,
-    label: 'Device vs Project',
   },
 ];
 
@@ -656,9 +648,6 @@ export function AppShell(props: AppShellProps) {
             {activeView === 'catalog' && hasProject && <CatalogView />}
             {activeView === 'printlabels' && hasProject && <PrintLabelsView />}
             {activeView === 'programming' && hasProject && <ProgrammingView />}
-            {activeView === 'compareLive' && hasProject && (
-              <DeviceComparisonView />
-            )}
             {activeView === 'pin' && hasProject && activePinKey && (
               <PinDetailView pinKey={activePinKey} />
             )}

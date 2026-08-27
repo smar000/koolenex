@@ -15,7 +15,6 @@ const SEG_TO_VIEW: Record<string, string> = {
   monitor: 'monitor',
   scan: 'scan',
   programming: 'programming',
-  compareLive: 'compareLive',
   info: 'project',
   labels: 'printlabels',
   compare: 'pin',

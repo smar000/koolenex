@@ -500,6 +500,61 @@ describe('KnxConnection.downloadDevice', () => {
     assert.ok(progress.includes('Download complete'));
   });
 
+  it('uses legacy Memory_Write when the resolved address fits in 16 bits', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const paramMem = Buffer.alloc(8, 0xaa);
+    const steps: DownloadStep[] = [
+      { type: 'WriteRelMem', objIdx: 0, propId: 0, size: 8, offset: 0x100 },
+    ];
+    // No resolvedBases entry → base defaults to 0, so addr = 0x100, well
+    // under 0xFFFF - must keep using the legacy service.
+    await conn.downloadDevice('1.1.2', steps, null, null, paramMem, undefined);
+
+    const writes = conn.sent
+      .map((c) => parseCEMI(c))
+      .filter((f) => f && f.apciName === 'Memory_Write');
+    assert.equal(writes.length, 1);
+    const extWrites = conn.sent
+      .map((c) => parseCEMI(c))
+      .filter((f) => f && f.apciName === 'MemoryExtended_Write');
+    assert.equal(extWrites.length, 0);
+  });
+
+  it('switches to MemoryExtended_Write when the resolved relmem base pushes the address above 0xFFFF', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const paramMem = Buffer.alloc(8, 0xaa);
+    const steps: DownloadStep[] = [
+      { type: 'WriteRelMem', objIdx: 0, propId: 0, size: 8, offset: 0x100 },
+    ];
+    // base 0x10000 + offset 0x100 = 0x10100 - doesn't fit in 16 bits.
+    await conn.downloadDevice('1.1.2', steps, null, null, paramMem, undefined, {
+      resolvedBases: { 0: 0x10000 },
+    });
+
+    const frames = conn.sent.map((c) => parseCEMI(c));
+    const extWrites = frames.filter(
+      (f) => f && f.apciName === 'MemoryExtended_Write',
+    );
+    assert.equal(extWrites.length, 1);
+    assert.equal(
+      frames.filter((f) => f && f.apciName === 'Memory_Write').length,
+      0,
+    );
+    // Verify the address actually encoded is the resolved 0x10100, not a
+    // 16-bit-truncated 0x0100 - this is the exact failure mode being fixed:
+    // the legacy service would have silently written to the wrong address.
+    const extApduData = extWrites[0]!.apduData;
+    const encodedAddr =
+      (extApduData[1]! << 16) | (extApduData[2]! << 8) | extApduData[3]!;
+    assert.equal(encodedAddr, 0x10100);
+  });
+
   it('throws on WriteRelMem without paramMem', async () => {
     const conn = new TestKnxConnection();
     conn.connected = true;

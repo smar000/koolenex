@@ -19,7 +19,7 @@
 .content {
   overflow: auto;
   flex: 1;
-  padding: 20px;
+  padding: 20px 14px 20px 20px;
   /* A little thicker than the global 4px default so the horizontal
      scrollbar is clearly visible when the table doesn't fully fit
      (narrow window, log pane open) instead of easy to miss. */
@@ -62,11 +62,16 @@
      the matching floor so the table (not the DEVICE column) is what
      shrinks/scrolls once the log pane leaves too little room, rather than
      squeezing DEVICE toward zero again. */
-  /* other columns' widths (68+100+120+244=532) + thDevice's own 160px
+  /* other columns' widths (46+88+55+244=433) + thDevice's own 122px
      min-width, below - table-layout:fixed derives DEVICE's actual share
      from (this min-width minus the other columns' widths), not from its
-     own min-width directly, so this has to stay in sync with both. */
-  min-width: 692px;
+     own min-width directly, so this has to stay in sync with both.
+     Trimmed as far as still legible (esp. the PROGRAMMED/etc. status
+     badge and the address text) so the table needs less extra width than
+     it used to before falling back to horizontal scroll, since scroll is
+     otherwise the common case once the log pane is open too. Also .content
+     above got its right padding trimmed 20px -> 14px for the same reason. */
+  min-width: 555px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -217,16 +222,16 @@
   width: 100%;
 }
 .thAddr {
-  width: 68px;
+  width: 46px;
 }
 .thDevice {
-  min-width: 160px;
+  min-width: 122px;
 }
 .thStatus {
-  width: 100px;
+  width: 88px;
 }
 .thProgress {
-  width: 120px;
+  width: 55px;
 }
 .thActions {
   width: 244px;

@@ -55,6 +55,10 @@ export function ProgrammingView() {
   // yet) for a log that's empty most of the time. Auto-opens itself the
   // moment there's something to show (a Verify or Program click).
   const [logOpen, setLogOpen] = useState(false);
+  // How much width the log panel/collapsed strip currently reserves on the
+  // right, so the slide-over (and its scrim) can stop short of it instead
+  // of covering it - see the comment at the slide-over below.
+  const logPanelWidth = logOpen ? sidebarWidth + 5 : 28;
 
   const onResizerMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -452,9 +456,48 @@ export function ProgrammingView() {
           showing the full device-vs-project comparison. Same
           DeviceCompareResults component the standalone "Device vs Project"
           page uses, reading the same shared verify cache - no separate
-          fetch, no duplicated rendering logic. */}
+          fetch, no duplicated rendering logic.
+
+          Both the slide-over and its scrim stop short of the log
+          panel/collapsed strip (right: <its current width> instead of a
+          flat 0) rather than covering it - both anchor from .root's right
+          edge, so a flat right:0 would render the slide-over directly on
+          top of the log, making it look like the log "disappeared" the
+          moment a verify completes and the slide-over opens (it isn't
+          cleared - see logOpen/log state above - just hidden behind a
+          higher-stacked, opaque sibling).
+
+          Only while OPEN, though: this div stays mounted (with
+          transform:translateX(100%)) even when closed so the slide-in/out
+          animation has something to animate, and that transform pushes it
+          offscreen by 100% of ITS OWN box - which starts from `right`, not
+          from the true viewport edge. Give it a non-zero `right` even
+          while closed and the "offscreen" resting position shifts left by
+          that same amount, leaving a sliver of the (empty) panel visible
+          over the log instead of nothing - which is exactly what covering
+          the log's own collapse/expand button looked like. Closed always
+          reverts to right:0 so it goes fully offscreen as before.
+
+          width is ALSO overridden inline while open, not left at its CSS
+          default of min(900px, 96%) - that 96% is 96% of .root's FULL
+          width, independent of `right`, so right (up to ~525px for a
+          widened log panel) plus that width could exceed .root's actual
+          width, pushing the panel's left edge negative and clipping away
+          everything but a sliver near its own right edge (exactly what a
+          too-wide log panel looked like: only a fragment of a summary
+          chip visible, header/table clipped off). calc(96% - Rpx) instead
+          of a flat 96% keeps right + width always <= 96% of .root's
+          width, however wide the log panel's own reserved space gets. */}
       <div
         className={`${styles.slideOver} ${slideOverDevice ? styles.slideOverOpen : ''}`}
+        style={
+          slideOverDevice
+            ? {
+                right: logPanelWidth,
+                width: `min(900px, max(320px, calc(96% - ${logPanelWidth}px)))`,
+              }
+            : { right: 0 }
+        }
       >
         {slideOverDevice && (
           <>
@@ -489,6 +532,7 @@ export function ProgrammingView() {
       {slideOverDevice && (
         <div
           className={styles.slideOverScrim}
+          style={{ right: logPanelWidth }}
           onClick={() => setSlideOverDevice(null)}
         />
       )}

@@ -50,6 +50,11 @@ export function ProgrammingView() {
   });
   const widthRef = useRef(sidebarWidth);
   const [resizing, setResizing] = useState(false);
+  // Collapsed by default - the log pane was eating real width from the
+  // device table (which isn't responsive enough to give it up gracefully
+  // yet) for a log that's empty most of the time. Auto-opens itself the
+  // moment there's something to show (a Verify or Program click).
+  const [logOpen, setLogOpen] = useState(false);
 
   const onResizerMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -88,6 +93,7 @@ export function ProgrammingView() {
   );
 
   const programDevice = async (deviceId: any, devAddr: string) => {
+    setLogOpen(true);
     setProgress((p) => ({ ...p, [deviceId]: { state: 'running', pct: 5 } }));
     setLog((l) => [
       `[${new Date().toLocaleTimeString()}] Downloading → ${devAddr}`,
@@ -119,6 +125,7 @@ export function ProgrammingView() {
   };
 
   const verifyDevice = async (deviceId: any, devAddr: string) => {
+    setLogOpen(true);
     setVerifyingIds((s) => new Set(s).add(deviceId));
     setLog((l) => [
       `[${new Date().toLocaleTimeString()}] Verifying (read-only) → ${devAddr}`,
@@ -204,7 +211,7 @@ export function ProgrammingView() {
             <thead>
               <tr>
                 <TH className={styles.thAddr}>ADDRESS</TH>
-                <TH>DEVICE</TH>
+                <TH className={styles.thDevice}>DEVICE</TH>
                 <TH className={styles.thStatus}>STATUS</TH>
                 <TH className={styles.thProgress}>PROGRESS</TH>
                 <TH className={styles.thActions}></TH>
@@ -282,39 +289,46 @@ export function ProgrammingView() {
                     </TD>
                     <TD>
                       <div className={styles.rowActions}>
-                        <div className={styles.verifyBtnWrap}>
-                          {verifyCache[d.id] ? (
-                            <div className={styles.verifySplit}>
-                              <Btn
-                                onClick={() => openComparison(d.id)}
-                                disabled={verifying}
-                                title="View the last comparison result — no bus read"
-                                color="var(--muted)"
-                                bg="var(--bg)"
-                              >
-                                View
-                              </Btn>
-                              <Btn
-                                onClick={() =>
-                                  verifyDevice(d.id, d.individual_address)
-                                }
-                                disabled={prog?.state === 'running' || verifying}
-                                title="Read the device again and compare to the computed image — no writes"
-                              >
-                                {verifying ? <Spinner /> : 'Re-verify'}
-                              </Btn>
-                            </div>
-                          ) : (
-                            <Btn
-                              onClick={() =>
-                                verifyDevice(d.id, d.individual_address)
-                              }
-                              disabled={prog?.state === 'running' || verifying}
-                              title="Read the device and compare to the computed image — no writes"
+                        {/* Fixed-width slot, always rendered (empty when
+                            there's no cached result yet) so Verify/Program
+                            start at the same x position on every row -
+                            View used to sit inline before Re-verify, which
+                            pushed everything right only on rows that had a
+                            cached result. */}
+                        <div className={styles.viewSlot}>
+                          {verifyCache[d.id] && (
+                            <button
+                              type="button"
+                              className={styles.viewChipBtn}
+                              onClick={() => openComparison(d.id)}
+                              disabled={verifying}
+                              title="View the last comparison result — no bus read"
                             >
-                              {verifying ? <Spinner /> : 'Verify'}
-                            </Btn>
+                              View
+                            </button>
                           )}
+                        </div>
+                        <div className={styles.verifyBtnWrap}>
+                          <Btn
+                            className={styles.actionBtn}
+                            onClick={() =>
+                              verifyDevice(d.id, d.individual_address)
+                            }
+                            disabled={prog?.state === 'running' || verifying}
+                            title={
+                              verifyCache[d.id]
+                                ? 'Read the device again and compare to the computed image — no writes'
+                                : 'Read the device and compare to the computed image — no writes'
+                            }
+                          >
+                            {verifying ? (
+                              <Spinner />
+                            ) : verifyCache[d.id] ? (
+                              'Re-verify'
+                            ) : (
+                              'Verify'
+                            )}
+                          </Btn>
                           {verifying && (
                             <div className={styles.verifyPopover}>
                               {liveVerifyProgress ? (
@@ -343,6 +357,7 @@ export function ProgrammingView() {
                           )}
                         </div>
                         <Btn
+                          className={styles.actionBtn}
                           onClick={() =>
                             programDevice(d.id, d.individual_address)
                           }
@@ -367,45 +382,71 @@ export function ProgrammingView() {
           </table>
         </div>
       </div>
-      <div
-        className={styles.resizer}
-        onMouseDown={onResizerMouseDown}
-        title="Drag to resize"
-      />
-      <div
-        className={`${styles.sidebar} ${resizing ? styles.sidebarResizing : ''}`}
-        style={{ width: sidebarWidth }}
-      >
-        <div className={styles.logHeader}>LOG</div>
-        <div className={styles.logBody}>
-          {log.length === 0 ? (
-            <span className={styles.logEmpty}>No operations yet</span>
-          ) : (
-            log.map((l, i) => (
-              <div
-                key={i}
-                className={
-                  l.includes('✓')
-                    ? styles.logEntrySuccess
-                    : styles.logEntryNormal
-                }
-              >
-                {l}
-              </div>
-            ))
-          )}
-        </div>
-        <div className={styles.logFooter}>
-          <Btn
-            onClick={() => setLog([])}
-            color="var(--dim)"
-            bg="var(--bg)"
-            className={styles.logFooterBtn}
+      {logOpen ? (
+        <>
+          <div
+            className={styles.resizer}
+            onMouseDown={onResizerMouseDown}
+            title="Drag to resize"
+          />
+          <div
+            className={`${styles.sidebar} ${resizing ? styles.sidebarResizing : ''}`}
+            style={{ width: sidebarWidth }}
           >
-            Clear Log
-          </Btn>
-        </div>
-      </div>
+            <div className={styles.logHeader}>
+              LOG
+              <button
+                type="button"
+                className={styles.logCollapseBtn}
+                onClick={() => setLogOpen(false)}
+                title="Collapse log"
+              >
+                ▸
+              </button>
+            </div>
+            <div className={styles.logBody}>
+              {log.length === 0 ? (
+                <span className={styles.logEmpty}>No operations yet</span>
+              ) : (
+                log.map((l, i) => (
+                  <div
+                    key={i}
+                    className={
+                      l.includes('✓')
+                        ? styles.logEntrySuccess
+                        : styles.logEntryNormal
+                    }
+                  >
+                    {l}
+                  </div>
+                ))
+              )}
+            </div>
+            <div className={styles.logFooter}>
+              <Btn
+                onClick={() => setLog([])}
+                color="var(--dim)"
+                bg="var(--bg)"
+                className={styles.logFooterBtn}
+              >
+                Clear Log
+              </Btn>
+            </div>
+          </div>
+        </>
+      ) : (
+        <button
+          type="button"
+          className={styles.logCollapsedStrip}
+          onClick={() => setLogOpen(true)}
+          title="Open log"
+        >
+          <span className={styles.logCollapsedLabel}>LOG</span>
+          {log.length > 0 && (
+            <span className={styles.logCollapsedCount}>{log.length}</span>
+          )}
+        </button>
+      )}
 
       {/* Slide-over: opens automatically once a Verify read completes,
           showing the full device-vs-project comparison. Same

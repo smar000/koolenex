@@ -265,6 +265,33 @@ class KnxBusManager extends EventEmitter {
     return this.connection.readMemory(deviceAddr, address, length, chunkSize);
   }
 
+  /**
+   * Replay a literal sequence of raw CEMI frame bytes, completely verbatim
+   * - no automatic T_Connect/T_Disconnect wrapping, no APDU reconstruction.
+   * The caller is expected to include the real captured Connect/Disconnect
+   * control frames as part of `frames` itself (extracted straight from a
+   * real ETS capture) - this method just fires each buffer through
+   * sendCEMI() in order, nothing more. Debug-only, built 2026-08-28 to test
+   * whether a real captured ETS Partial Download's exact bytes actually
+   * persist a write, bypassing koolenex's own step/APDU reconstruction
+   * entirely. See docs/follow-ups/2026-08-28-write-path-missing-load-
+   * sequence.md.
+   */
+  async replayFrames(
+    _deviceAddr: string,
+    frames: Buffer[],
+    delayMs: number = 30,
+    onProgress?: (i: number, total: number) => void,
+  ): Promise<void> {
+    if (!this.connection || !this.connected)
+      throw new Error('Not connected to KNX bus');
+    for (let i = 0; i < frames.length; i++) {
+      await this.connection.sendCEMI(frames[i]!);
+      if (onProgress) onProgress(i + 1, frames.length);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+
   readMemoryMany(
     deviceAddr: string,
     regions: Array<{ address: number; length: number }>,

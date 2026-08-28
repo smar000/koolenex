@@ -739,6 +739,36 @@ router.post('/bus/write-memory', async (req: Request, res: Response) => {
   }
 });
 
+// Replay a literal sequence of raw CEMI frames, verbatim - no APDU
+// reconstruction, no automatic Connect/Disconnect. Debug-only, writes to
+// real hardware - built to test whether a real captured ETS session's exact
+// bytes actually persist a write, bypassing koolenex's own step/APDU
+// reconstruction entirely (see docs/follow-ups/2026-08-28-write-path-
+// missing-load-sequence.md). Caller supplies the real captured frames
+// (including any Connect/Disconnect control frames) as an ordered array of
+// hex strings, extracted straight from a real capture.
+router.post('/bus/replay-frames', async (req: Request, res: Response) => {
+  const b = requireBus(res);
+  if (!b) return;
+  const body = validateBody(
+    req,
+    z.object({
+      deviceAddress: z.string().min(1),
+      frames: z.array(z.string().regex(/^[0-9a-fA-F]+$/)).min(1).max(500),
+      delayMs: z.number().int().min(0).max(5000).default(30),
+    }),
+  );
+  const { deviceAddress, frames, delayMs } = body;
+  if (!b.connected) return res.status(409).json({ error: 'Not connected' });
+  try {
+    const buffers = frames.map((h) => Buffer.from(h, 'hex'));
+    await b.replayFrames(deviceAddress, buffers, delayMs);
+    res.json({ deviceAddress, frameCount: buffers.length });
+  } catch (e) {
+    res.status(502).json({ error: safeError('bus', 'Frame replay failed', e) });
+  }
+});
+
 // Read an arbitrary interface-object property. Read-only debug helper - built
 // to check whether other interface objects (e.g. the Address/Association
 // tables, objIdx 1/2) resolve their own PID 7 (PID_TABLE_REFERENCE) base to a

@@ -100,10 +100,14 @@ export function DeviceCompareResults({
   // Smart default: when a fresh result comes in (new device selected, or a
   // re-verify completes) with any differing parameter, default to showing
   // ALL differences including unnamed ones - that's almost certainly what
-  // you want to see first. With no differences, default back to the
-  // original "only named" view instead of an empty differing-only table.
-  // Only applies once per distinct result (tracked by device+fetchedAt) so
-  // it never fights a filter toggle you made by hand.
+  // you want to see first. With no differences, default to the "match"
+  // filter instead of "all" - functionally the same set of rows (nothing
+  // differs), but it also puts the active-filter ring on the named-
+  // parameters "All N matched" chip instead of the (deliberately muted)
+  // raw-memory chip, which otherwise looked like the "selected"/important
+  // one by accident of this default. Only applies once per distinct result
+  // (tracked by device+fetchedAt) so it never fights a filter toggle you
+  // made by hand.
   const appliedDefaultKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!decoded || !device) return;
@@ -111,7 +115,7 @@ export function DeviceCompareResults({
     if (appliedDefaultKeyRef.current === key) return;
     appliedDefaultKeyRef.current = key;
     const hasMismatch = decoded.some((d) => d.match === false);
-    setRowFilter(hasMismatch ? 'differ' : 'all');
+    setRowFilter(hasMismatch ? 'differ' : 'match');
     setOnlyNamed(!hasMismatch);
   }, [decoded, device, cacheEntry]);
   const q = search.trim().toLowerCase();
@@ -270,7 +274,7 @@ export function DeviceCompareResults({
                     <Badge
                       label={
                         mismatchCount === 0
-                          ? `All ${matchCount} matched`
+                          ? `All ${matchCount} params matched`
                           : `${matchCount} match`
                       }
                       color="var(--green)"
@@ -305,16 +309,23 @@ export function DeviceCompareResults({
                       />
                     </button>
                   )}
-                  <span
-                    className={styles.summaryGroupLabel}
-                    title={
-                      'Only bytes ETS maps to a named, project-configurable parameter - excludes ' +
-                      'padding/reserved bytes, so this is usually a much smaller, more precise ' +
-                      'count than the raw memory total to the right.'
-                    }
-                  >
-                    named parameters
-                  </span>
+                  {/* Redundant once the badge itself says "All N params
+                      matched" - the label's whole job was disambiguating
+                      "params" vs "raw memory" scope, which the wording
+                      change above already does inline. Only shown when
+                      there's an actual match/differ split to clarify. */}
+                  {mismatchCount > 0 && (
+                    <span
+                      className={styles.summaryGroupLabel}
+                      title={
+                        'Only bytes ETS maps to a named, project-configurable parameter - excludes ' +
+                        'padding/reserved bytes, so this is usually a much smaller, more precise ' +
+                        'count than the raw memory total to the right.'
+                      }
+                    >
+                      named parameters
+                    </span>
+                  )}
                 </div>
               )}
               <div className={styles.summaryGroup}>
@@ -325,9 +336,6 @@ export function DeviceCompareResults({
                     style={{ '--chip-ring': 'var(--dim)' } as React.CSSProperties}
                     onClick={() => setRowFilter('all')}
                     title={
-                      (rowFilter === 'all'
-                        ? 'Showing all parameters (matching and differing). '
-                        : 'Show all parameters — clears the match/differ filter. ') +
                       'This count is the raw byte-level comparison across the full ' +
                       `${result.totalBytes}-byte parameter memory segment, including ` +
                       'padding/reserved bytes not tied to any named parameter - a ' +

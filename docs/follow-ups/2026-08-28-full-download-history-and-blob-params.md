@@ -19,6 +19,15 @@ of discovery, including a self-corrected "99.2%" framing that turned out to be t
    at all, silently defaulting every such parameter to 1 byte. Confirmed directly against the real
    `.knxproj` XML (`<TypeRawData MaxSize="516" />`), not just inferred from behavior.
 
+**Plus one explicitly PARKED, not-resolved side-track** (Finding 4): a closer look at Object 3
+(written during the comprehensive rewrite) established several new, real facts (its true size for
+1.1.10 - 942 bytes, correcting nothing about 1.1.9's separately-real 98-byte figure; its base
+address; its KNX standard object type, `9`, read live; that it correlates with Full Downloads
+following a reconnect/uncertain state, never Partial Downloads or routine same-session Full
+Downloads) - but the causal story connecting it to application-version management or to Part 8's
+detection mechanism is deliberately left as unresolved speculation, per explicit user instruction,
+not treated as settled.
+
 ## Why this came up
 
 Closing out the property-27/`WriteRelMem` work (see `2026-08-29-property27-ga-write-wiring-and-ui.md`),
@@ -174,19 +183,68 @@ genuinely different blob shape not yet seen, rather than assuming this framing i
 regions. The gap is fully closed, not just 99.2% of it - the earlier "16 remaining bytes, still
 open" framing in Part 9's first draft was itself premature; corrected the same day.
 
+## Finding 4: Object 3, revisited - real facts established, causal story explicitly parked as speculation
+
+Since Object 3 got written during the comprehensive rewrite (Finding 1), and the original
+"skip-unmapped-bytes" task this whole investigation grew out of was about to resume, it was worth
+a closer look before treating it as fully out of scope.
+
+**Corrected a real, longstanding wrong assumption along the way**: this project's docs have
+carried "Object 3, 98 bytes, unidentified" since 2026-08-27 (`2026-08-27-relmem-write-scope-
+investigation.md`). Checking the real `LoadData` declaration for 1.1.10 directly
+(`PropValueWrite OX=3 P=5 $030B000003AE...`) decodes to size `0x03AE` = **942 bytes** - a real,
+confirmed figure for *this* device. Checked carefully before treating this as a "correction": the
+98-byte figure is from 1.1.9, a different device/app entirely - both numbers are likely correct,
+for their respective devices, since object 3's presence is universal/mask-defined but its content
+is evidently per-app.
+
+**Read `PID_OBJECT_TYPE` (property 1) live from the real device** - a standard KNX property every
+interface object reports, giving a direct, unambiguous identifier rather than inferring one from
+behavior: object 3 reports type `9`, distinct from objIdx 1/2/4's `1`/`2`/`3` (which correctly
+match Address table / Association table / Application Program - confirming the read itself is
+trustworthy). Type `9`'s real standard name wasn't confirmed - no reliable local KNX standard
+reference was available, and the session's own memory of the standard object-type table wasn't
+trusted enough to assert a name outright (per [[dont_jump_to_conclusions]]).
+
+**A real ETS screenshot from the user surfaced a plausible connection, then needed correcting
+once, then partly reinstated**: the "Change Application Program" dropdown initially looked like it
+might tie to a device-side "application management" object (supporting the object-type-9 guess).
+The user first clarified this was just an ETS-side local-file picker (weakening that link), then
+corrected further: it genuinely supports loading a *different* application version onto
+already-commissioned hardware (a real device-level capability, not just a project-editing
+convenience) - which does plausibly need device-side infrastructure to support, partially
+reinstating the connection, though still unconfirmed.
+
+**Checked whether Object 3 activity correlates with Full vs. Partial Download** (a much simpler,
+already-established distinction) - genuinely tested, not assumed: swept every saved capture in
+the project for `OX=3 P=5` activity. Every Partial Download capture: zero. But *not* every Full
+Download either - within today's own capture, only the two comprehensive-rewrite sessions touched
+it, not the two routine flag-toggle Full Downloads earlier in the same session. Every *other*
+capture showing Object 3 activity (2026-08-27, two from 2026-08-28) is a first-download-of-a-
+session or post-reconnect/post-failed-attempt capture - consistent with, not proof of, "written
+when ETS has reason to be uncertain about device state."
+
+**Explicit instruction from the user**: document the real, checked facts (size, base, object
+type, universal/undeclared nature, the Full/Partial correlation) as confirmed, but treat the
+causal story built on top of them (application-identity tracking, tied to the Part 8 detection
+mechanism) as genuine speculation requiring further investigation - not close to well-supported.
+Parked, not investigated further today; keep watching for it on future real write tests.
+
 ## What's still genuinely open
 
 - The exact mechanism by which ETS detects "this device's state doesn't match what I expect" and
   triggers the comprehensive rewrite (Findings 1-2) - confirmed to exist and to be triggered by
   *any* intervening non-ETS write (tested with both an incomplete and a complete RelSegment
   declaration), but the underlying signal is unknown. No live memory read occurs in any capture,
-  so it isn't a read-then-diff mechanism at the byte level.
+  so it isn't a read-then-diff mechanism at the byte level. Object 3 (Finding 4) is a real,
+  checked lead here - **explicitly not confirmed**, parked pending future evidence.
 - Whether the `TypeRawData`/length-prefix framing generalizes beyond this one app's
   "Characteristic curve value domain" parameters - confirmed for this one shape only;
   `buildParamMem()`'s fallback path is a deliberate unknown-shape safety net, not assumed correct
   for other manufacturers/parameter types.
-- Object 3's identity (`0x0C2000` region) - written in the comprehensive rewrite, still
-  unidentified, unrelated to this investigation's scope.
+- Object 3's real identity (KNX object type `9`'s standard name; whether it relates to
+  application-version management) - genuinely open, deliberately left as speculation, not
+  resolved.
 
 ## Sources
 

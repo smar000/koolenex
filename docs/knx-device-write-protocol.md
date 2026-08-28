@@ -382,7 +382,8 @@ Consolidated from throughout this document, for visibility:
 
 1. Why does the NTP-parameter write differ in byte count (5 bytes for "off" vs 1 byte for "on")
    between the two otherwise-identical Partial Download captures? (§1.2)
-2. What object 3 (98 bytes) actually represents. (§2.7)
+2. What object 3 actually represents (§2.7 - 1.1.9's instance, 98 bytes; see also Part 10 for
+   1.1.10's instance, 942 bytes - a different device/app, not a correction of this figure).
 3. Whether the mask-version gate (§3) generalizes beyond System B, or whether a real legacy
    device needs something different — untested, no legacy hardware available.
 4. Whether the LoadData `mode` byte's Full/Partial meaning holds for objects other than OX=4 —
@@ -460,7 +461,7 @@ happens to exist as an attribute on several of these objects here:
 |---|---|
 | 1 | Group Address table |
 | 2 | Association table |
-| 3 | Unidentified (98 bytes) - still an open question, see Part 5 item 2 |
+| 3 | Unidentified (KNX object type `9`, confirmed live) - real size is per-app (98 bytes for 1.1.9, 942 for 1.1.10); see Part 5 item 2 and Part 10 |
 | 4 | The application/parameter memory object - the real device settings |
 
 So it isn't its own memory area - it's a per-object "content status/checksum" attribute that
@@ -570,8 +571,59 @@ deliberate safety net for an unverified shape, not assumed correct. The Part 8 d
 mechanism question (how ETS decides a comprehensive rewrite is needed) remains open and is
 unrelated to this fix.
 
+## Part 10 — Object 3, revisited for 1.1.10: partial identification, still genuinely speculative (PARKED 2026-08-28)
+
+**Explicitly not a resolved finding** - the user asked for this to be recorded as speculation
+requiring further investigation, not treated as settled. Parked here as a running item to watch
+for in future write tests, not acted on.
+
+🟢 **Confirmed, directly, no speculation involved**:
+- Real size for 1.1.10: **942 bytes** (`LoadData` size field `0x03AE`, matching the real chunked
+  write total exactly) - a different figure from §2.7's 98 bytes for 1.1.9, because it's a
+  **different device/app**, not a correction of that earlier number. Object 3's content is
+  evidently per-app, even though the object's presence is universal/mask-defined (§Part 6's
+  established pattern).
+- Real base address: `0x0C2000` (`PID_TABLE_REFERENCE`, confirmed twice, stable across sessions).
+- **`PID_OBJECT_TYPE` (property 1), read live from the real device**: object 3 reports type `9`,
+  distinct from objIdx 1/2/4's types `1`/`2`/`3` (Address table / Association table / Application
+  Program - all match KNX-standard expectations). Type `9`'s real standard name is not confirmed
+  here - no reliable local KNX standard reference was available to verify it, so it is
+  deliberately left as a number, not a guessed name.
+- Not declared anywhere in 1.1.10's own app XML (checked directly against the real `.knxproj`) -
+  same "universal, app doesn't need to declare it" pattern as GA/Association tables.
+- Content is almost entirely zero-filled - only ~30 meaningful bytes (a small structure repeating
+  4 times, channel-shaped like everything else on this device) out of 942 total.
+- **Only written during two of the four real Full Downloads captured in one session** (the two
+  following an out-of-band, non-ETS write to the device) - never during the two routine Full
+  Downloads earlier in the same session, and never during any Partial Download captured anywhere
+  in this project. Checked across every other saved capture showing object-3 activity
+  (2026-08-27, 2026-08-28 x2): all are first-Full-Download-of-a-session or post-reconnect/
+  post-failed-attempt sessions, consistent with (not proof of) the same pattern.
+
+🔴 **Speculative, not supported beyond the co-occurrence above**:
+- That object 3 holds some form of application-identity/version-tracking data ETS re-establishes
+  specifically when it can't be confident about a device's current state - motivated by (a) the
+  correlation just described, (b) a real ETS UI capability (user-confirmed: the "Change
+  Application Program" dropdown genuinely supports loading a different application version onto
+  already-commissioned hardware, not just picking a local file at project-edit time - a real
+  device-level capability that plausibly needs device-side tracking to support), and (c) object
+  3's `PID_OBJECT_TYPE=9` being consistent with (not proof of) a KNX-standard secondary
+  application-management object. **None of this has been independently verified** - the
+  co-occurrence is a real, checked fact; the causal story built on top of it is not.
+- Whether this same object could be *the* mechanism behind Part 8's still-unexplained
+  "comprehensive rewrite" trigger - plausible, unproven, and not the only possible explanation.
+
+**Explicitly parked, not investigated further today.** Revisit if a future real write test
+surfaces more evidence either way - in particular, whether object 3 gets touched again on any
+future "first download of a session" vs. "routine, mid-session" download, and whether its content
+ever differs meaningfully between those cases.
+
 ## Sources
 
+- `docs/data/captures/2026-08-28-ets-full-download-history-and-blob-params-1.1.10.pcapng`,
+  cross-checked against every other saved capture (`grep -c "OX=3 P=5"` across
+  `docs/data/captures/*.pcapng`) and a live `PID_OBJECT_TYPE`/`PID_TABLE_REFERENCE` read via
+  `POST /bus/read-property` — primary source for Part 10.
 - `docs/data/captures/2026-08-28-ets-1-full-download-1.1.9.pcapng` — primary source for Part 1.1
   and most of Part 2.
 - `docs/data/captures/2026-08-28-ets-2-partial-download-ntp-off-1.1.9.pcapng` and

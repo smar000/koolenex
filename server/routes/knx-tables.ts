@@ -173,20 +173,42 @@ export function diffMemory(
   return { total, matching: total - differing, differing, chunks };
 }
 
+// GA table wire format: [count:2 BE][GA:2 BE]*count. Corrected 2026-08-29 -
+// previously used a 1-byte count field (`buf[0] = count & 0xff`), which
+// doesn't match what real ETS actually writes (confirmed via direct byte
+// decode of a real captured Full Download - see
+// docs/knx-device-write-protocol.md §2.6/§1.1's Stage 3 table: a real
+// captured write of `000249014904` decodes cleanly as
+// `[count=2][GA 9/1/1][GA 9/1/4]` with a 2-byte count, never as a 1-byte
+// count). Found by testing this exact function's real output against real
+// hardware for the first time (2026-08-29, alongside the fix that made
+// koolenex write these tables at all for apps that don't declare their own
+// LoadProcedure step for them - see downloadDevice()'s WriteRelMem case) -
+// the per-GA byte packing itself (`b0`/`b1` below) was already correct, only
+// the count field width was wrong.
 export function buildGATable(gaLinks: GaLink[]): Buffer {
   const count = gaLinks.length;
-  const buf = Buffer.alloc(1 + count * 2);
-  buf[0] = count & 0xff;
+  const buf = Buffer.alloc(2 + count * 2);
+  buf.writeUInt16BE(count & 0xffff, 0);
   gaLinks.forEach((ga, i) => {
     const b0 = ((ga.main_g & 0x1f) << 3) | (ga.middle_g & 0x07);
     const b1 = ga.sub_g & 0xff;
-    buf[1 + i * 2] = b0;
-    buf[2 + i * 2] = b1;
+    buf[2 + i * 2] = b0;
+    buf[3 + i * 2] = b1;
   });
   return buf;
 }
 
-// Build association table bytes: [count(1)] + [CO_num(1), GA_idx(1)] x count
+// Association table wire format: [count:2 BE][gaIndex:2 BE][coNumber:2 BE]
+// x count (GA index first, then com-object number - both 2-byte fields).
+// Corrected 2026-08-29 alongside buildGATable() above, same real-hardware
+// evidence and same root cause: this previously used a 1-byte count field
+// and 1-byte [CO_num, GA_idx] entries (CO first) - matches neither the real
+// field widths nor the real field order. Confirmed via direct byte decode
+// of a real captured Full Download (docs/knx-device-write-protocol.md
+// §2.6/§1.1: `00020001000500020008` decodes as
+// `[count=2][gaIndex=1,coNumber=5][gaIndex=2,coNumber=8]`, all 2-byte BE
+// fields, gaIndex before coNumber).
 export function buildAssocTable(coRows: CoRow[], gaLinks: GaLink[]): Buffer {
   const gaIndexMap: Record<string, number> = {};
   gaLinks.forEach((ga, i) => {
@@ -198,16 +220,17 @@ export function buildAssocTable(coRows: CoRow[], gaLinks: GaLink[]): Buffer {
     const gas = (co.ga_address || '').split(/\s+/).filter(Boolean);
     for (const gaAddr of gas) {
       const gaIdx = gaIndexMap[gaAddr];
-      if (gaIdx != null) entries.push([co.object_number & 0xff, gaIdx & 0xff]);
+      // Real table is 1-based (gaIndex 0 in our own array -> real index 1).
+      if (gaIdx != null) entries.push([gaIdx + 1, co.object_number]);
     }
   }
 
-  entries.sort((a, b) => a[1] - b[1] || a[0] - b[0]);
-  const buf = Buffer.alloc(1 + entries.length * 2);
-  buf[0] = entries.length & 0xff;
-  entries.forEach(([co, ga], i) => {
-    buf[1 + i * 2] = co;
-    buf[2 + i * 2] = ga;
+  entries.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const buf = Buffer.alloc(2 + entries.length * 4);
+  buf.writeUInt16BE(entries.length & 0xffff, 0);
+  entries.forEach(([gaIdx, co], i) => {
+    buf.writeUInt16BE(gaIdx & 0xffff, 2 + i * 4);
+    buf.writeUInt16BE(co & 0xffff, 4 + i * 4);
   });
   return buf;
 }

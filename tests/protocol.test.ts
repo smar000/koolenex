@@ -384,6 +384,13 @@ describe('APDU: apduPropertyValueWrite', () => {
 import { buildGATable, buildAssocTable } from '../server/routes/index.ts';
 
 describe('buildGATable', () => {
+  // Wire format corrected 2026-08-29: [count:2 BE][GA:2 BE]*count - was
+  // previously a 1-byte count field, which doesn't match what real ETS
+  // actually writes. Found and fixed by testing this function's real
+  // output against real hardware for the first time (see
+  // docs/knx-device-write-protocol.md §2.6/§1.1 - a real captured write of
+  // `000249014904` decodes cleanly as `[count=2][GA 9/1/1][GA 9/1/4]` with
+  // a 2-byte count, never a 1-byte one).
   it('encodes group addresses into binary table', () => {
     const gaLinks: any[] = [
       { main_g: 1, middle_g: 0, sub_g: 0 },
@@ -391,27 +398,35 @@ describe('buildGATable', () => {
       { main_g: 11, middle_g: 0, sub_g: 0 },
     ];
     const buf = buildGATable(gaLinks);
-    assert.equal(buf[0], 3); // count
-    assert.equal(buf.length, 1 + 3 * 2);
+    assert.equal(buf.readUInt16BE(0), 3); // count (2-byte BE)
+    assert.equal(buf.length, 2 + 3 * 2);
     // GA 1/0/0 = 0x08, 0x00
-    assert.equal(buf[1], 0x08);
-    assert.equal(buf[2], 0x00);
+    assert.equal(buf[2], 0x08);
+    assert.equal(buf[3], 0x00);
     // GA 1/0/1 = 0x08, 0x01
-    assert.equal(buf[3], 0x08);
-    assert.equal(buf[4], 0x01);
+    assert.equal(buf[4], 0x08);
+    assert.equal(buf[5], 0x01);
     // GA 11/0/0 = 0x58, 0x00
-    assert.equal(buf[5], 0x58);
-    assert.equal(buf[6], 0x00);
+    assert.equal(buf[6], 0x58);
+    assert.equal(buf[7], 0x00);
   });
 
   it('handles empty list', () => {
     const buf = buildGATable([]);
-    assert.equal(buf.length, 1);
-    assert.equal(buf[0], 0);
+    assert.equal(buf.length, 2);
+    assert.equal(buf.readUInt16BE(0), 0);
   });
 });
 
 describe('buildAssocTable', () => {
+  // Wire format corrected 2026-08-29: [count:2 BE][gaIndex:2 BE]
+  // [coNumber:2 BE]*count (GA index BEFORE com-object number, both 2-byte
+  // fields, 1-based gaIndex) - was previously a 1-byte count field and
+  // 1-byte [CO_num, GA_idx] entries with CO first, matching neither the
+  // real field widths nor the real field order. Confirmed via direct byte
+  // decode of a real captured Full Download - see
+  // docs/knx-device-write-protocol.md §2.6/§1.1 (`00020001000500020008`
+  // decodes as `[count=2][gaIndex=1,coNumber=5][gaIndex=2,coNumber=8]`).
   it('builds sorted association entries', () => {
     const gaLinks: any[] = [
       { address: '1/0/0', main_g: 1, middle_g: 0, sub_g: 0 },
@@ -422,23 +437,23 @@ describe('buildAssocTable', () => {
       { object_number: 8, ga_address: '1/0/0' },
     ];
     const buf = buildAssocTable(coRows, gaLinks);
-    assert.equal(buf[0], 3); // 3 entries: CO7→GA0, CO8→GA0, CO7→GA1
-    assert.equal(buf.length, 1 + 3 * 2);
-    // Sorted by GA index then CO number
-    // GA index 0 (1/0/0): CO 7 and CO 8
-    assert.equal(buf[1], 7); // CO 7
-    assert.equal(buf[2], 0); // GA index 0
-    assert.equal(buf[3], 8); // CO 8
-    assert.equal(buf[4], 0); // GA index 0
-    // GA index 1 (1/0/1): CO 7
-    assert.equal(buf[5], 7); // CO 7
-    assert.equal(buf[6], 1); // GA index 1
+    assert.equal(buf.readUInt16BE(0), 3); // 3 entries: GA1→CO7, GA1→CO8, GA2→CO7
+    assert.equal(buf.length, 2 + 3 * 4);
+    // Sorted by GA index (1-based) then CO number.
+    // GA index 1 (1/0/0): CO 7 and CO 8
+    assert.equal(buf.readUInt16BE(2), 1); // gaIndex 1
+    assert.equal(buf.readUInt16BE(4), 7); // coNumber 7
+    assert.equal(buf.readUInt16BE(6), 1); // gaIndex 1
+    assert.equal(buf.readUInt16BE(8), 8); // coNumber 8
+    // GA index 2 (1/0/1): CO 7
+    assert.equal(buf.readUInt16BE(10), 2); // gaIndex 2
+    assert.equal(buf.readUInt16BE(12), 7); // coNumber 7
   });
 
   it('handles empty inputs', () => {
     const buf = buildAssocTable([], []);
-    assert.equal(buf.length, 1);
-    assert.equal(buf[0], 0);
+    assert.equal(buf.length, 2);
+    assert.equal(buf.readUInt16BE(0), 0);
   });
 
   it('skips GAs not in the link table', () => {
@@ -447,7 +462,7 @@ describe('buildAssocTable', () => {
     ];
     const coRows: any[] = [{ object_number: 1, ga_address: '1/0/0 9/9/9' }];
     const buf = buildAssocTable(coRows, gaLinks);
-    assert.equal(buf[0], 1); // only 1/0/0 matched
+    assert.equal(buf.readUInt16BE(0), 1); // only 1/0/0 matched
   });
 });
 

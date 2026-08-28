@@ -87,6 +87,13 @@ export interface DownloadStep {
   data?: Buffer;
   size?: number;
   offset?: number;
+  // RelSegment (ABB/System-7-style) fields — see the RelSegment/WriteRelMem
+  // handling in downloadDevice() below. mode is a comma-joined string when
+  // a segment has both "full" and "par" RelSegment declarations for the
+  // same lsmIdx (e.g. "full,par" on the WriteRelMem step); fill is the
+  // segment's declared fill byte.
+  mode?: string;
+  fill?: number;
   // AbsoluteSegment (MDT-style) load-procedure fields — see knx-download-plan.ts
   lsmIdx?: number;
   address?: number;
@@ -724,6 +731,74 @@ export class KnxConnection extends EventEmitter {
         await delay(50);
       };
 
+      // ── Load State Machine transitions (PID_LOAD_STATE_CONTROL = property
+      // 5) around a RelSegment/WriteRelMem write. Real device firmware
+      // silently ignores memory writes to an interface object outside
+      // "Loading" state - koolenex used to send WriteRelMem completely raw,
+      // with no load-state transition at all, so every such write was a
+      // silent no-op regardless of address correctness. Root-caused
+      // 2026-08-28 via a real hardware test (a manually-targeted single-byte
+      // write had zero effect) and confirmed against koolenex's own real
+      // wire traffic - see docs/follow-ups/2026-08-28-write-path-missing-
+      // load-sequence.md for the full decode. Event/state codes and the
+      // LoadData wire format below are transcribed directly from that real
+      // capture (four independent real examples, sizes matched exactly),
+      // not derived from the KNX spec in the abstract - treat as verified
+      // for RelSegment/ABB-style (System 7) apps specifically.
+      const LSM_EVENT = {
+        UNLOAD: 0x04,
+        START_LOADING: 0x01,
+        LOAD_DATA: 0x03,
+        LOAD_COMPLETED: 0x02,
+      } as const;
+      const lsmWrite = async (
+        objIdx: number,
+        event: number,
+        extraBytes: Buffer = Buffer.alloc(9),
+      ): Promise<void> => {
+        await propWrite(objIdx, 5, Buffer.concat([Buffer.from([event]), extraBytes]));
+      };
+      // LoadData's real wire shape: [event=03][SCF=0x0B][rsvd:2][size:2 BE]
+      // [combinedFullPar:1][fill:1][rsvd:2] - `combined` is set when the
+      // model declares both a "full" and a "par" RelSegment for the same
+      // object (only ever observed for the parameter object so far; every
+      // other object's real example had combined=0).
+      const loadDataExtra = (
+        size: number,
+        fill: number,
+        combined: boolean,
+      ): Buffer => {
+        // Layout (9 bytes, after the leading event byte lsmWrite prepends):
+        // [SCF=0x0B][rsvd:2][size:2 BE][mode:1][fill:1][rsvd:2] - verified
+        // byte-for-byte against 4 independent real captures (offsets 1-9 of
+        // the real 10-byte PropValueWrite value), see the doc referenced
+        // above.
+        const b = Buffer.alloc(9);
+        b.writeUInt8(0x0b, 0);
+        b.writeUInt16BE(size, 3);
+        b.writeUInt8(combined ? 1 : 0, 5);
+        b.writeUInt8(fill, 6);
+        return b;
+      };
+      // Real relSeg info (size/fill/combined) per object, from the model's
+      // own RelSegment step(s) - one step per mode ("full"/"par"), same
+      // lsmIdx, real devices only need ONE combined LoadData either way.
+      const relSegByObj = new Map<
+        number,
+        { size: number; fill: number; combined: boolean }
+      >();
+      for (const s of steps) {
+        if (s.type !== 'RelSegment' || s.lsmIdx == null || s.size == null)
+          continue;
+        const existing = relSegByObj.get(s.lsmIdx);
+        relSegByObj.set(s.lsmIdx, {
+          size: s.size,
+          fill: s.fill ?? 0,
+          combined: !!existing, // a second RelSegment for the same object -> combined
+        });
+      }
+      let anyRelSegmentLoaded = false;
+
       for (const step of steps) {
         switch (step.type) {
           case 'WriteProp': {
@@ -740,7 +815,22 @@ export class KnxConnection extends EventEmitter {
           case 'WriteRelMem': {
             log(`WriteRelMem ObjIdx=${step.objIdx} Size=${step.size}`);
             if (!paramMem) throw new Error('Parameter memory not available');
-            const base = extra?.resolvedBases?.[step.objIdx ?? 4] ?? 0;
+            const objIdx = step.objIdx ?? 4;
+            const relSeg = relSegByObj.get(objIdx);
+            if (relSeg) {
+              log(`Unload ObjIdx=${objIdx}`);
+              await lsmWrite(objIdx, LSM_EVENT.UNLOAD);
+              log(`StartLoading ObjIdx=${objIdx}`);
+              await lsmWrite(objIdx, LSM_EVENT.START_LOADING);
+              log(`LoadData ObjIdx=${objIdx} Size=${relSeg.size}`);
+              await lsmWrite(
+                objIdx,
+                LSM_EVENT.LOAD_DATA,
+                loadDataExtra(relSeg.size, relSeg.fill, relSeg.combined),
+              );
+              anyRelSegmentLoaded = true;
+            }
+            const base = extra?.resolvedBases?.[objIdx] ?? 0;
             const mem = paramMem.slice(0, step.size);
             for (let off = 0; off < mem.length; off += MEM_CHUNK) {
               const chunk = mem.slice(off, off + MEM_CHUNK);
@@ -781,6 +871,10 @@ export class KnxConnection extends EventEmitter {
                   pct: (off / mem.length) * 80,
                 });
             }
+            if (relSeg) {
+              log(`LoadCompleted ObjIdx=${objIdx}`);
+              await lsmWrite(objIdx, LSM_EVENT.LOAD_COMPLETED);
+            }
             break;
           }
           case 'LoadImageProp': {
@@ -795,6 +889,20 @@ export class KnxConnection extends EventEmitter {
             break;
           }
         }
+      }
+
+      // Real ETS ends a RelSegment-driven download with a device Restart
+      // once every loaded object has been marked LoadCompleted - without it
+      // a freshly-loaded segment isn't confirmed to actually apply
+      // functionally, per the real capture this fix is based on. Only sent
+      // if we actually did a load cycle above (nothing to restart for a
+      // pure WriteProp/CompareProp/LoadImageProp download).
+      if (anyRelSegmentLoaded) {
+        log('Restart');
+        const seq = nextSeq();
+        const apdu = apduConnected(seq, 'Restart');
+        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+        await this.sendCEMI(cemi);
       }
 
       log('Download complete');

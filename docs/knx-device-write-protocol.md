@@ -393,10 +393,10 @@ Consolidated from throughout this document, for visibility:
    sub-byte-packed parameter as `1` instead of the real device's `0`) — root-caused, not fixed,
    unrelated to the write-path findings in this document but affects write *correctness* once
    the write-path itself works.
-7. Whether these findings hold for 1.1.10 specifically re-tested against the current fixed code
-   — the 2026-08-26 "write path proven correct" finding for 1.1.10 predates all six fixes in
-   this document's Part 3/`docs/follow-ups/2026-08-28-write-path-missing-load-sequence.md` and
-   should not be cited as still valid until re-run.
+7. ~~Whether these findings hold for 1.1.10 specifically re-tested against the current fixed
+   code~~ — **RESOLVED 2026-08-29, see Part 8**: re-tested with a fresh 3-download session;
+   confirmed the universal GA/Association mechanism a second time and surfaced a real,
+   previously-unverified `LoadImageProp` bug (now fixed).
 
 ## Part 6 — GA table / Association table writes were never wired up at all (RESOLVED 2026-08-29)
 
@@ -514,6 +514,52 @@ count when something differs) - per the user's observation that the page shows b
 together with no real filtering distinction between them, so two badges was pure redundancy
 once neither had anything to report. Commit `6f0bff0`.
 
+## Part 8 — 1.1.10 re-baselined, and `LoadImageProp`'s real semantics were wrong (RESOLVED 2026-08-29)
+
+Item 7 of Part 5's open questions flagged that 1.1.10 (the only app in this project declaring
+`LoadImageProp`, per Part 6) had never been re-tested against the six write-path fixes in Part 3
+- its earlier "write path proven correct" finding predated all of them. Closed with a fresh
+3-download real-hardware session (Full + 2 Partials, one flipping a boolean status-indicator
+flag, one reverting it) against 1.1.10 specifically.
+
+**Confirms Part 6's universal GA/Association mechanism a second time**: 1.1.10 writes both
+tables via the identical RelSegment Unload/StartLoading/LoadData/write/LoadCompleted sequence
+already established for 1.1.9 - independent real-hardware confirmation, still only two devices/
+one manufacturer.
+
+**New finding: `LoadImageProp`'s real semantics are not "write the image to this property"**,
+despite the step name (🟢 confirmed, 3 independent real downloads):
+
+- objIdx 1/2/3: ETS only ever **reads** this property (property 27) - byte-identical value
+  before and after the load cycle, every time. Never writes it.
+- objIdx 4 only: **is** written, but not with table/image bytes. ETS reads a 2-element,
+  8-byte-per-element array, then writes each element back *separately* (element 1 with no
+  explicit index, element 2 with an explicit `startIndex=2`), each with its own trailing 2 bytes
+  zeroed. The device recomputes and returns a real, content-dependent checksum there on the next
+  read - confirmed directly: the checksum tracked the actual parameter change end to end
+  (baseline `0a1a` → `7948` after the flag-true write → back to `0a1a` once the flag-false
+  download reverted the change).
+
+koolenex's pre-existing `LoadImageProp` handler (in place before this finding, never previously
+exercised against real hardware since 1.1.10 is the only app that declares this step) got this
+backwards: it blindly wrote for *every* declared object - GA-table bytes to objIdx1, Association-
+table bytes to objIdx2, a stray single `0x04` byte to objIdx3 - none of which real ETS ever does,
+and for objIdx4 it wrote a single fabricated `0x04` byte rather than the real 2-element,
+read-then-zero-trailer pattern.
+
+**Fixed** (koolenex, `test/relmem-real-device-fixtures` branch, commit `563dbe3`): objIdx 1/2/3
+are now read-only, matching real ETS; objIdx4 now reads the current array value and writes it
+back with only the trailing 2 bytes of each element zeroed, preserving the real leading content
+bytes rather than fabricating them (this executor has no independent source for what those bytes
+should be). `apduPropertyValueWrite`/`apduPropertyValueRead` (`server/knx-cemi.ts`) gained an
+optional `count`/`startIndex` pair so element 2 can be addressed explicitly - previously hardcoded
+to a single element at index 1. New coverage in `tests/knx-connection.test.ts`.
+
+**Still open**: only one app/device has ever declared `LoadImageProp` at all, so the objIdx4
+"array of 2, trailing-2-bytes-is-a-checksum" shape is confirmed for this one property/app
+combination, not proven as a general pattern for other array-style properties or other apps that
+might declare this step differently.
+
 ## Sources
 
 - `docs/data/captures/2026-08-28-ets-1-full-download-1.1.9.pcapng` — primary source for Part 1.1
@@ -527,6 +573,8 @@ once neither had anything to report. Commit `6f0bff0`.
 - `docs/data/captures/2026-08-27-full-download-1.1.9-1.1.10.pcapng` and
   `2026-08-28-ga-wire-format-1.1.9-1.1.10.pcapng` — source for Part 2.6 (GA/Association table
   formats), not independently re-derived in this document.
+- `docs/data/captures/2026-08-29-ets-0-failed-connection-attempts-1.1.10.pcapng` and
+  `2026-08-29-ets-1/2/3-...-1.1.10.pcapng` (knx-ets-manager repo) — primary source for Part 8.
 - `docs/follow-ups/2026-08-27-relmem-write-scope-investigation.md`,
   `docs/follow-ups/2026-08-28-write-path-missing-load-sequence.md` (koolenex repo) — the dated
   investigation logs this document consolidates. Read those for the full narrative, including

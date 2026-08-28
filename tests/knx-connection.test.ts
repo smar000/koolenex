@@ -500,7 +500,7 @@ describe('KnxConnection.downloadDevice', () => {
     assert.ok(progress.includes('Download complete'));
   });
 
-  it('uses MemoryExtended_Write even when the resolved address fits in 16 bits', async () => {
+  it('falls back to legacy Memory_Write for a 16-bit-fitting address when the device never answers DeviceDescriptor_Read', async () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
@@ -510,25 +510,28 @@ describe('KnxConnection.downloadDevice', () => {
       { type: 'WriteRelMem', objIdx: 0, propId: 0, size: 8, offset: 0x100 },
     ];
     // No resolvedBases entry → base defaults to 0, so addr = 0x100, well
-    // under 0xFFFF. Originally this asserted the legacy service was kept for
-    // addresses that fit in 16 bits - 2026-08-28 correction: a real captured
-    // ETS Partial Download against 1.1.9 (address 0x5F53, also well within
-    // 16 bits) still used A_MemoryExtended_Write exclusively, and koolenex's
-    // own legacy write for that same address (byte-identical count/address/
-    // data otherwise) was confirmed on real hardware, twice reproducibly, to
-    // silently fail to persist - see knx-connection.ts's WriteRelMem case.
-    // WriteRelMem now always uses the extended service, regardless of
-    // address size.
+    // under 0xFFFF. WriteRelMem now reads the device's real mask version
+    // (A_DeviceDescriptor_Read) and only forces A_MemoryExtended_Write
+    // unconditionally for a confirmed System B device (mask 0x07B0) - a
+    // real captured ETS Partial Download against 1.1.9, address 0x5F53,
+    // also well within 16 bits, still used the extended service exclusively
+    // there (see knx-connection.ts's WriteRelMem case and the dedicated
+    // mask-gating tests in tests/relmem-write-protocol.test.ts). This
+    // `TestKnxConnection` never answers the descriptor read at all, so this
+    // test exercises the fallback path specifically: the original
+    // conservative address-size heuristic (legacy service for an address
+    // that fits in 16 bits) applies when the mask is unknown, rather than
+    // assuming "always extended" generalizes to every device.
     await conn.downloadDevice('1.1.2', steps, null, null, paramMem, undefined);
 
     const writes = conn.sent
       .map((c) => parseCEMI(c))
       .filter((f) => f && f.apciName === 'Memory_Write');
-    assert.equal(writes.length, 0);
+    assert.equal(writes.length, 1);
     const extWrites = conn.sent
       .map((c) => parseCEMI(c))
       .filter((f) => f && f.apciName === 'MemoryExtended_Write');
-    assert.equal(extWrites.length, 1);
+    assert.equal(extWrites.length, 0);
   });
 
   it('uses MemoryExtended_Write when the resolved relmem base pushes the address above 0xFFFF (address encoded correctly, not truncated)', async () => {

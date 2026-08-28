@@ -27,7 +27,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { parseCEMI, buildCEMI, apduConnectedFull, APCI_EXT } from '../server/knx-cemi.ts';
+import { parseCEMI, buildCEMI, apduConnectedFull, apduGroup, APCI_EXT } from '../server/knx-cemi.ts';
 import { KnxConnection } from '../server/knx-connection.ts';
 import type { DownloadStep } from '../server/knx-connection.ts';
 
@@ -52,18 +52,38 @@ class FakeWritableMemoryDevice extends KnxConnection {
   sent: Buffer[] = [];
   memory: Buffer;
   private readonly deviceAddr: string;
-  constructor(deviceAddr: string, memory: Buffer) {
+  // Real mask version this fake device reports on A_DeviceDescriptor_Read -
+  // see the 2026-08-28 "gate on real mask version, not a blanket rule" fix
+  // in knx-connection.ts's WriteRelMem case. Defaults to `0x07B0` (System B)
+  // matching the real device (1.1.10) this test's fixtures were captured
+  // from; pass `null` to simulate a device that never answers the
+  // descriptor read at all (exercises the fallback address-size heuristic).
+  private readonly maskVersion: number | null;
+  constructor(deviceAddr: string, memory: Buffer, maskVersion: number | null = 0x07b0) {
     super();
     this.deviceAddr = deviceAddr;
     this.memory = memory;
     this.connected = true;
     this.localAddr = '1.0.1';
+    this.maskVersion = maskVersion;
   }
 
   sendCEMI(cemi: Buffer): Promise<void> {
     this.sent.push(cemi);
     const frame = parseCEMI(cemi);
     if (!frame) return Promise.resolve();
+
+    if (frame.apciName === 'DeviceDescriptor_Read') {
+      if (this.maskVersion == null) return Promise.resolve(); // simulate no response
+      const maskBuf = Buffer.alloc(2);
+      maskBuf.writeUInt16BE(this.maskVersion);
+      const respApdu = apduGroup('DeviceDescriptor_Response', 0, maskBuf);
+      const resp = parseCEMI(
+        buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+      )!;
+      setImmediate(() => this._onCEMI(resp));
+      return Promise.resolve();
+    }
 
     // downloadDevice() now sends A_Authorize_Request before any RelSegment-
     // driven writes (see the 2026-08-28 authorization fix) and waits for
@@ -228,21 +248,28 @@ describe('WriteRelMem protocol-level test — 1.1.10 (real captured memory, base
     }
   });
 
-  it('a chunk straddling the 0xFFFF boundary still resolves to the correct address (sanity on chunk math)', async () => {
-    // Originally this asserted the write path's old conditional behavior
-    // (legacy Memory_Write for chunks whose address fit in 16 bits,
-    // A_MemoryExtended_Write only once it didn't). 2026-08-28 correction:
-    // WriteRelMem now always uses A_MemoryExtended_Write regardless of
-    // address size - a real captured ETS Partial Download against 1.1.9
-    // (address 0x5F53, well within 16 bits) still used the extended service
-    // exclusively, and koolenex's own legacy write for that same address
-    // (byte-identical count/address/data otherwise) was confirmed on real
-    // hardware, twice reproducibly, to silently fail to persist - see
-    // knx-connection.ts's WriteRelMem case and koolenex-reference memory.
-    // This test now only sanity-checks the chunk-address math itself (not
-    // which service gets picked, since it's unconditional now).
+  it('a chunk straddling the 0xFFFF boundary still resolves to the correct address, via the fallback heuristic (device never answers DeviceDescriptor_Read)', async () => {
+    // Originally this asserted the write path's unconditional legacy-vs-
+    // extended split by address size. 2026-08-28 correction #1: WriteRelMem
+    // briefly always used A_MemoryExtended_Write regardless of address size
+    // (a real captured ETS Partial Download against 1.1.9, address 0x5F53,
+    // well within 16 bits, still used the extended service exclusively, and
+    // koolenex's own legacy write for that same address silently failed to
+    // persist on real hardware, twice reproducibly). 2026-08-28 correction
+    // #2 (same day, user pushed back on generalizing from a two-device
+    // same-family sample): both real devices this project has tested turned
+    // out to be System B (`0x07B0`) by mask version, so "always extended"
+    // happened to be right for them specifically, not necessarily for every
+    // device. The real fix gates on the device's actual mask version (see
+    // knx-connection.ts's WriteRelMem case) - extended unconditionally for
+    // a confirmed System B device, falling back to this original address-
+    // size heuristic when the mask is unread/unrecognized. This test now
+    // specifically exercises that fallback path (`maskVersion: null` below
+    // simulates a device that never answers the descriptor read) - see the
+    // dedicated mask-gating test further down for the System-B-confirmed
+    // case.
     const backing = Buffer.alloc(0x10100);
-    const dev = new FakeWritableMemoryDevice('1.1.10', backing);
+    const dev = new FakeWritableMemoryDevice('1.1.10', backing, null);
     const payload = Buffer.alloc(16, 0xaa);
 
     const steps: DownloadStep[] = [
@@ -257,13 +284,61 @@ describe('WriteRelMem protocol-level test — 1.1.10 (real captured memory, base
 
     const sentWrites = dev.writesSent();
     assert.equal(sentWrites.length, 2, 'expected 2 chunks for a 16-byte write at MEM_CHUNK=10');
-    assert.equal(sentWrites[0]!.extended, true, 'always A_MemoryExtended_Write now, regardless of address size');
+    assert.equal(sentWrites[0]!.extended, false, 'fallback heuristic: first chunk (0xFFF8) fits in 16 bits');
     assert.equal(sentWrites[0]!.address, 0xfff8);
-    assert.equal(sentWrites[1]!.extended, true, 'always A_MemoryExtended_Write now, regardless of address size');
+    assert.equal(sentWrites[1]!.extended, true, 'fallback heuristic: second chunk (0x10002) does not fit');
     assert.equal(sentWrites[1]!.address, 0x10002);
     assert.deepEqual(
       [...dev.memory.subarray(0xfff8, 0xfff8 + 16)],
       [...payload],
     );
+  });
+
+  it('gates on the device\'s real mask version: System B (0x07B0) always uses A_MemoryExtended_Write, even for a 16-bit-fitting address', async () => {
+    // The specific real-hardware finding this test locks in: a real
+    // captured ETS Partial Download against 1.1.9 (mask 0x07B0, confirmed
+    // via a live A_DeviceDescriptor_Read against the real device, address
+    // 0x5F53, well within 16 bits) still used A_MemoryExtended_Write
+    // exclusively - see knx-connection.ts's WriteRelMem case.
+    const backing = Buffer.alloc(0x10000);
+    const dev = new FakeWritableMemoryDevice('1.1.9', backing, 0x07b0);
+    const payload = Buffer.alloc(5, 0xaa);
+
+    const steps: DownloadStep[] = [
+      { type: 'WriteRelMem', objIdx: 4, propId: 0, size: payload.length, offset: 0 },
+    ];
+    await dev.downloadDevice('1.1.9', steps, null, null, payload, undefined, {
+      resolvedBases: { 4: 0x5f53 }, // well within 16 bits
+    });
+
+    const sentWrites = dev.writesSent();
+    assert.equal(sentWrites.length, 1);
+    assert.equal(sentWrites[0]!.extended, true, 'System B device: extended even though the address fits in 16 bits');
+    assert.equal(sentWrites[0]!.address, 0x5f53);
+  });
+
+  it('gates on the device\'s real mask version: a legacy (non-System-B) device falls back to the address-size heuristic', async () => {
+    // Sanity check for the other side of the gate - a device that reports a
+    // real, recognized, but non-System-B mask (e.g. 0x0020 = BCU2, per this
+    // project's own bundled KNX Master Data, data/knx_master_*.xml) should
+    // NOT be forced onto the extended service for a low address - this has
+    // never been confirmed on real hardware (this project's only two tested
+    // devices are both System B), so the fallback must stay conservative
+    // rather than assuming "always extended" generalizes.
+    const backing = Buffer.alloc(0x10000);
+    const dev = new FakeWritableMemoryDevice('1.1.1', backing, 0x0020);
+    const payload = Buffer.alloc(5, 0xaa);
+
+    const steps: DownloadStep[] = [
+      { type: 'WriteRelMem', objIdx: 4, propId: 0, size: payload.length, offset: 0 },
+    ];
+    await dev.downloadDevice('1.1.1', steps, null, null, payload, undefined, {
+      resolvedBases: { 4: 0x5f53 },
+    });
+
+    const sentWrites = dev.writesSent();
+    assert.equal(sentWrites.length, 1);
+    assert.equal(sentWrites[0]!.extended, false, 'BCU2 (non-System-B): address fits in 16 bits, so legacy Memory_Write');
+    assert.equal(sentWrites[0]!.address, 0x5f53);
   });
 });

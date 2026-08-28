@@ -770,6 +770,51 @@ export class KnxConnection extends EventEmitter {
         }
       };
 
+      // Which memory-write service this device actually requires -
+      // determined from its real mask version (A_DeviceDescriptor_Read),
+      // not assumed. 2026-08-28: WriteRelMem was briefly changed to always
+      // use A_MemoryExtended_Write unconditionally, based on real-hardware
+      // evidence from exactly two devices (1.1.9, 1.1.10) - both real
+      // mask-version reads on this testbed came back `0x07B0` ("System B"
+      // per this project's own bundled KNX Master Data,
+      // `data/knx_master_*.xml`'s `<MaskVersion>` table: `ManagementModel`
+      // "SystemB" for masks `07B0`/`17B0`/`27B0`/`57B0`, vs. legacy
+      // `Bcu1`/`Bcu2`/`BimM112`/`PropertyBased` families for older masks).
+      // The user correctly pushed back on generalizing "always extended"
+      // from a same-family two-device sample - a genuinely older
+      // Bcu1/Bcu2/System-7 device could still require the legacy service.
+      // Real ETS itself reads the device descriptor as the very first frame
+      // of every download session (confirmed in every real capture this
+      // project has) - almost certainly for exactly this reason. Mirror
+      // that: read it here, and gate on the mask's low byte being `0xB0`
+      // (true for every SystemB medium variant in the master table) rather
+      // than hardcoding a blanket choice. If the read fails or the device
+      // isn't in a recognized family, fall back to the original,
+      // conservative address-size heuristic (extended only when the
+      // resolved address doesn't fit in 16 bits) rather than guessing.
+      let useExtendedMemory: boolean | null = null;
+      {
+        const apdu = apduGroup('DeviceDescriptor_Read');
+        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+        const respP = waitResponse('DeviceDescriptor_Response', 3000);
+        await this.sendCEMI(cemi);
+        try {
+          const resp = await respP;
+          const mask = resp.apduData.length >= 2
+            ? (resp.apduData[0]! << 8) | resp.apduData[1]!
+            : null;
+          if (mask != null) {
+            useExtendedMemory = (mask & 0xff) === 0xb0;
+            log(
+              `DeviceDescriptor mask=0x${mask.toString(16).padStart(4, '0')} ` +
+                `(${useExtendedMemory ? 'SystemB family - extended memory writes' : 'legacy family - address-size heuristic applies'})`,
+            );
+          }
+        } catch (_e) {
+          log('No DeviceDescriptor_Response received (falling back to address-size heuristic for memory writes)');
+        }
+      }
+
       // A_Authorize_Request with the well-known/default key - real ETS
       // sends this near the start of every download session, before any
       // property/memory writes, and koolenex never has (any code path).
@@ -917,11 +962,33 @@ export class KnxConnection extends EventEmitter {
               // real hardware, while koolenex's own reconstruction (legacy
               // Memory_Write for this same address, otherwise byte-identical
               // count/address/data) silently failed to persist, twice,
-              // reproducibly. This device/app appears to only honor
-              // A_MemoryExtended_Write on the RelSegment-gated download path,
-              // regardless of whether the address fits in 16 bits - always
-              // use the extended service here.
-              const apdu = apduMemoryExtendedWrite(seq, addr, chunk);
+              // reproducibly. Root cause: this is a SystemB-family device
+              // (mask 0x07B0), which apparently only honors
+              // A_MemoryExtended_Write on the RelSegment-gated download path
+              // regardless of address size. Not a universal rule though -
+              // gate on `useExtendedMemory` (the device's real mask version,
+              // read above) rather than hardcoding "always extended": use
+              // extended unconditionally for a confirmed SystemB device,
+              // fall back to the original per-chunk address-size heuristic
+              // for anything else (unrecognized/unread mask, or a genuine
+              // legacy Bcu1/Bcu2/System-7 device, which real hardware has
+              // never confirmed either way for this specific write path).
+              const useExtendedForThisChunk =
+                useExtendedMemory ?? addr > 0xffff;
+              const apdu = useExtendedForThisChunk
+                ? apduMemoryExtendedWrite(seq, addr, chunk)
+                : apduConnected(
+                    seq,
+                    'Memory_Write',
+                    Buffer.concat([
+                      Buffer.from([
+                        chunk.length,
+                        (addr >> 8) & 0xff,
+                        addr & 0xff,
+                      ]),
+                      chunk,
+                    ]),
+                  );
               const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
               await this.sendCEMI(cemi);
               await delay(30);

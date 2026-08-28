@@ -20,7 +20,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseCEMI, buildCEMI, apduConnectedFull, APCI_EXT } from '../server/knx-cemi.ts';
+import { parseCEMI, buildCEMI, apduConnectedFull, apduGroup, APCI_EXT } from '../server/knx-cemi.ts';
 import { KnxConnection } from '../server/knx-connection.ts';
 import type { DownloadStep } from '../server/knx-connection.ts';
 
@@ -50,6 +50,23 @@ class LoadGatedFakeDevice extends KnxConnection {
     this.sent.push(cemi);
     const frame = parseCEMI(cemi);
     if (!frame) return Promise.resolve();
+
+    // downloadDevice() now reads the device's mask version via
+    // A_DeviceDescriptor_Read at the start of every RelSegment-driven
+    // session, to gate legacy-vs-extended memory writes on the real device
+    // family instead of a blanket rule - see the 2026-08-28 "gate on real
+    // mask version" fix in knx-connection.ts's WriteRelMem case. Respond
+    // with 0x07B0 (System B), matching the real device (1.1.9) this test's
+    // scenario is modeled on.
+    if (frame.apciName === 'DeviceDescriptor_Read') {
+      const maskBuf = Buffer.from([0x07, 0xb0]);
+      const respApdu = apduGroup('DeviceDescriptor_Response', 0, maskBuf);
+      const resp = parseCEMI(
+        buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+      )!;
+      setImmediate(() => this._onCEMI(resp));
+      return Promise.resolve();
+    }
 
     // parseCEMI() doesn't register PropertyValue_Write/Read (0x3D7/0x3D5) in
     // its extended-APCI name table (only the MemoryExtended_* ones are) -

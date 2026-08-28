@@ -356,16 +356,10 @@ export function DeviceCompareResults({
                     color="var(--dim)"
                   />
                 )}
-                <span
-                  className={styles.summaryGroupLabel}
-                  title={
-                    'Every byte of the raw parameter memory segment, including padding/reserved ' +
-                    'bytes with no named parameter behind them - usually a much larger, coarser ' +
-                    'number than the parameter-level counts to the left.'
-                  }
-                >
-                  raw memory
-                </span>
+                {/* No separate "raw memory" label here (unlike the named-
+                    parameters group above) - the badge's own "bytes match"
+                    wording already says what it's counting, and the full
+                    explanation is in its tooltip. */}
               </div>
             </div>
           </div>

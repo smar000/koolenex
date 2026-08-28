@@ -488,6 +488,68 @@ so while the *shape* of both facts above is now backed by many different manufac
 data in `data/apps/*.json`, the actual live wire confirmation is still one real device. Object 3's
 identity (Part 5 item 2) remains unresolved.
 
+## Part 8 — Full Download isn't purely history-independent-and-minimal; it falls back to a comprehensive rewrite (RESOLVED 2026-08-28)
+
+Part 7 established that ETS only writes named-parameter bytes that differ from a file-derivable
+target - raising a real question: could a device carrying stale content from elsewhere (a
+different, discarded project; a factory reset) keep that content forever, if it happens to already
+match what the *current* project's target computation predicts needs no write? Tested directly
+against real hardware rather than reasoned about from file data alone (see the follow-up log for
+full methodology, including two self-caught mistakes along the way).
+
+🟢 **Confirmed: no.** A value written directly into device memory bypassing ETS entirely (via
+koolenex's own debug write route, simulating stale/foreign content) was detected on the very next
+real Full Download - but not via a minimal, targeted correction. ETS instead performed a
+**comprehensive rewrite**: nearly the entire 10433-byte parameter segment (offset ~12 through
+~1650), a separate block covering objIdx3's still-unidentified region, the offset-10432 marker,
+and both the GA and Association tables - essentially everything, not a delta. Reproduced twice,
+with the injected write declared two different ways (an incomplete RelSegment mode, then the
+complete `full,par` pair matching real ETS's own declared shape exactly) - both produced the
+identical comprehensive-rewrite response, ruling out "the intervening write's own protocol
+correctness" as the trigger.
+
+🟡 **Inferred, not confirmed**: any write to the device from something other than ETS's own last
+session appears to trigger this fallback. The actual detection mechanism is unknown - 🟢
+confirmed there is no live memory read anywhere in any capture this project has (which would be
+the obvious way to detect a mismatch), so whatever signal ETS uses is something else entirely.
+
+**The comprehensive rewrite's content is correct, not a blind reset** - checked byte-for-byte
+against real, previously-captured device values (e.g. a byte with real value `2` was written back
+as `2`, not reset to the segment's static default). This directly enabled Part 9's finding below.
+
+## Part 9 — The "1984-byte gap" is a parser bug (manufacturer-shipped blob parameters), not device-internal state (RESOLVED 2026-08-28)
+
+An earlier working theory (Part 6/relmem-fixtures test comments, now corrected) held that the
+~1984-byte mismatch between koolenex's computed parameter image and the real device was opaque,
+device-internal operational/calibration state outside ETS's own writable scope. That theory was
+never rigorously tested - it was retired once the Part 8 finding above showed ETS's comprehensive
+rewrite writes *real, correct* values into this exact region, not a static default, which isn't
+consistent with "ETS never touches this."
+
+🟢 **Confirmed root cause**: `paramMemLayout` (koolenex's own extracted parameter data) already
+declares parameters in this region - labeled "Characteristic curve value domain" - but
+under-declares their size. Each is recorded as 1 byte (`bitSize: 8`), while its real
+`defaultValue` is a base64-encoded blob that decodes to **512 bytes**. These are ordinary
+manufacturer-declared parameters (this device's app declares 6 conditional alternates per
+dimming channel - almost certainly a "curve type" selector, one alternate active per channel) -
+nothing ETS computes dynamically. `buildParamMem()` has no code path to apply a multi-hundred-byte
+blob default (only scalar/text/float value types), so this region silently fell through to the
+segment's fill/default in koolenex's own computed image.
+
+**Verified at project scale**: swept every `paramMemLayout` entry for this pattern (declared size
+far smaller than its real base64-decoded `defaultValue` length). Found 24 such entries - 4
+channels x 6 alternates - at four offsets exactly 532 bytes apart. Cross-checked against the real
+1984-byte diff list: these four 512-byte ranges account for **1968 of 1984 diffs (99.2%)**.
+
+**Remaining 16 bytes** (4 bytes at an identical relative offset right after each blob, all 4
+channels): a separate, smaller, still-open gap - no `paramMemLayout` entry covers them at all, and
+their real device value is a fixed constant (`0F EF 0F FF`) in every channel. Not yet traced to a
+declared parameter; low-stakes (0.15% of the segment) given its determinism.
+
+**Still open**: which of each channel's 6 curve-type alternates is genuinely active for a given
+project (needs the same conditional-activation logic already used for Part 7's offset-172 case,
+not yet applied here); the 16-byte fixed-constant gap; the Part 8 detection-mechanism question.
+
 ## Sources
 
 - `docs/data/captures/2026-08-28-ets-1-full-download-1.1.9.pcapng` — primary source for Part 1.1
@@ -503,9 +565,12 @@ identity (Part 5 item 2) remains unresolved.
   formats), not independently re-derived in this document.
 - `docs/data/captures/2026-08-29-ets-0-failed-connection-attempts-1.1.10.pcapng` and
   `2026-08-29-ets-1/2/3-...-1.1.10.pcapng` (knx-ets-manager repo) — primary source for Part 7.
+- `docs/data/captures/2026-08-28-ets-full-download-history-and-blob-params-1.1.10.pcapng`
+  (knx-ets-manager repo) — primary source for Parts 8 and 9.
 - `docs/follow-ups/2026-08-27-relmem-write-scope-investigation.md`,
   `docs/follow-ups/2026-08-28-write-path-missing-load-sequence.md`,
-  `docs/follow-ups/2026-08-29-property27-ga-write-wiring-and-ui.md` (koolenex repo) — the dated
+  `docs/follow-ups/2026-08-29-property27-ga-write-wiring-and-ui.md`,
+  `docs/follow-ups/2026-08-28-full-download-history-and-blob-params.md` (koolenex repo) — the dated
   investigation logs this document consolidates. Read those for the full narrative, including
   dead ends, UI/implementation work, and the exact chronology of each fix.
 - `koolenex_reference` memory (knx-ets-manager repo's persistent memory) — broader project

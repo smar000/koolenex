@@ -398,6 +398,72 @@ Consolidated from throughout this document, for visibility:
    this document's Part 3/`docs/follow-ups/2026-08-28-write-path-missing-load-sequence.md` and
    should not be cited as still valid until re-run.
 
+## Part 6 — GA table / Association table writes were never wired up at all (RESOLVED 2026-08-29)
+
+Asked directly: *"Did we factor for GA writes anywhere?"* Answer at the time: **no** — 🟢
+confirmed by reading 1.1.9's real app model (`data/apps/M-0004_A-0025-10-1BA6-O00A6.json`)
+directly: its `loadProcedures` declares only objIdx 4 (parameters). No `RelSegment`/
+`WriteRelMem`/`LoadImageProp` step exists for objIdx 1 (GA table) or objIdx 2 (Association
+table) anywhere in the app's own `Static/LoadProcedures` XML, even though Part 1.1's Stage 3
+table above shows real ETS writes both objects, via the identical RelSegment mechanism used for
+parameters. koolenex's model-extraction code (`server/ets-app.ts`) parses `LoadProcedures`
+faithfully - no synthesis - so this reflects the real app XML, not a parsing bug. 1.1.10's app
+is shaped differently: it declares `LoadImageProp` for objIdx 1/2/3/4 explicitly (a different
+mechanism, property 27, already honored). 🟡 **INFERRED**: real ETS's GA/Association table
+loading is apparently a universal, mask-defined procedure some apps don't need to declare
+explicitly - not confirmed from spec text, only from this one real app's absence of a
+declaration combined with the wire evidence that ETS writes it anyway.
+
+**Fixed** (koolenex commit `2227b40`): `downloadDevice()` now synthesizes the missing Unload/
+StartLoading/LoadData/write/LoadCompleted sequence for objIdx 1/2 whenever the model hasn't
+already handled them some other way, using the caller-supplied `gaTable`/`assocTable` buffers
+directly as the write payload (their own `.length` supplies the `LoadData` size - no extra
+metadata needed, confirmed to match exactly: 6 bytes for a 2-GA table, 10 bytes for a 2-entry
+association table).
+
+**A second, more serious bug found in the same real-hardware test** (koolenex commit
+`ca7729d`): the moment this fix made koolenex actually write these tables for the first time
+ever, the real device came back with the wrong bytes - `buildGATable()`/`buildAssocTable()`
+(`server/routes/knx-tables.ts`) used a 1-byte count field and, for the association table,
+1-byte `[CO_num, GA_idx]` entries with CO first - none of which matches the real wire format
+confirmed in §2.6/§1.1 (`[count:2][GA:2]...` and `[count:2][gaIndex:2][coNumber:2]...`
+respectively, both 2-byte BE fields, GA index before CO number). **This had never been exercised
+against real hardware before**, since koolenex never wrote these tables at all until the fix
+above landed. Real consequence: this briefly wrote the wrong format to the real testbed device
+(1.1.9), corrupting its on-device GA/Association tables (real data, wrong packing - not erased).
+Fixed and immediately re-verified: re-ran `program-device`, read back both tables, confirmed
+byte-for-byte identical to the real ETS-written format (`000249014904` /
+`00020001000500020008`).
+
+**How this bears on Part 5, item 3 above** (whether the mask-gating fix generalizes): unrelated
+- this was a pure data-formatting bug in the table builders, not a protocol/mask-family
+question. Both bugs are now covered by dedicated tests
+(`tests/ga-assoc-table-write.test.ts`, updated `tests/protocol.test.ts`).
+
+**Still open**: whether real ETS's GA/Association loading is *truly* universal across every
+mask family (only tested on two System B devices), and whether the "no declared step" fallback
+correctly generalizes to apps with more than 2 GAs or association entries beyond what's been
+tested here (small real samples throughout).
+
+## Part 7 — Parameters tab now cross-references communication objects (added 2026-08-29)
+
+A separate but related gap: the device detail panel's Parameters tab showed zero GA/
+communication-object information, even though the panel's own separate GROUP ADDRESSES/GROUP
+OBJECTS tabs have always covered this at the whole-device level. 🟢 **CONFIRMED, not
+speculative** - `server/ets-app.ts`'s `evalDynamic()` already computes, at import time, which
+channel each communication object belongs to (the same `<Channel>` grouping that structures the
+Parameters view itself), stored in each `com_objects` row's `channel` column. The client
+(`client/src/detail/DeviceParameters.tsx`) now fetches this via the existing
+`GET /projects/:id/comobjects` endpoint and renders a "COMMUNICATION OBJECTS" panel under
+whichever section is currently active, matched by channel name. Verified live: 1.1.9's "Timer
+configuration" section correctly shows all 6 Timer-channel com objects, including both real GA
+links.
+
+**Caveat, don't overclaim**: this is a channel-name match, not a true per-parameter link - KNX
+has no such concept. A section whose channel label doesn't exactly match any com object's
+`channel` string shows nothing, even if conceptually related. Not an issue for the one real app
+tested here, but worth remembering if a future app's channel naming is less consistent.
+
 ## Sources
 
 - `docs/data/captures/2026-08-28-ets-1-full-download-1.1.9.pcapng` — primary source for Part 1.1

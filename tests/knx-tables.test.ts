@@ -1114,4 +1114,103 @@ describe('buildParamMem', () => {
     );
     assert.equal(buf[0], 77);
   });
+
+  // TypeRawData-shaped defaults ("Characteristic curve value domain" and
+  // similar) - a manufacturer-shipped, pre-baked binary blob as the whole
+  // parameter value, rather than a scalar. Confirmed 2026-08-28 against a
+  // real device + its real .knxproj XML: the true wire format is a 4-byte
+  // big-endian length prefix followed by the payload (`declaredBytes ===
+  // blob.length + 4`, matching `<TypeRawData MaxSize="...">` in the
+  // source XML once ets-app.ts's TypeRawData handling reads it correctly -
+  // see docs/knx-device-write-protocol.md Part 9 and
+  // docs/follow-ups/2026-08-28-full-download-history-and-blob-params.md).
+  describe('blob-shaped (TypeRawData) default values', () => {
+    it('frames a blob with a 4-byte BE length prefix when declaredBytes matches payload+4', () => {
+      // Must decode to enough bytes that its base64 form is >=20 chars (the
+      // blob-detection heuristic's own threshold, guarding against
+      // mistaking an ordinary short scalar for a blob) - real curve tables
+      // are hundreds of bytes, this is just the smallest realistic size
+      // for a clean test.
+      const payload = Buffer.from(
+        Array.from({ length: 20 }, (_, i) => i * 3 + 1),
+      ); // 20 bytes
+      const layout: any = {
+        curve: {
+          offset: 2,
+          bitOffset: 0,
+          bitSize: (payload.length + 4) * 8, // real MaxSize-derived size
+          defaultValue: payload.toString('base64'),
+        },
+      };
+      const buf = buildParamMem(30, layout, {}, 0x00);
+      // [len:4 BE][payload] starting at offset 2
+      assert.equal(buf.readUInt32BE(2), payload.length);
+      assert.deepEqual(buf.subarray(6, 6 + payload.length), payload);
+    });
+
+    it('writes the raw payload with no framing when declaredBytes does not match a length-prefixed shape (e.g. a stale bitSize=8 cache)', () => {
+      const payload = Buffer.from(Array.from({ length: 30 }, (_, i) => i));
+      const layout: any = {
+        curve: {
+          offset: 1,
+          bitOffset: 0,
+          bitSize: 8, // pre-fix cached value - not payload.length+4
+          defaultValue: payload.toString('base64'),
+        },
+      };
+      const buf = buildParamMem(40, layout, {}, 0x00);
+      assert.deepEqual(buf.subarray(1, 1 + payload.length), payload);
+    });
+
+    it('a short base64-looking scalar (not a real blob) falls through to the generic numeric path unchanged', () => {
+      // "12345678901234567890" is >=20 chars and technically valid base64
+      // charset, but decodes to only a few bytes - must not be mistaken
+      // for a blob and must still be treated as a plain scalar value.
+      const layout: any = {
+        pr1: {
+          offset: 0,
+          bitOffset: 0,
+          bitSize: 8,
+          defaultValue: '99',
+        },
+      };
+      const buf = buildParamMem(4, layout, {}, 0xff);
+      assert.equal(buf[0], 99);
+    });
+
+    it('conditional-activation gate still governs which of several blob alternates gets written', () => {
+      // >=20 bytes each so their base64 form clears the blob-detection
+      // heuristic's own length threshold (see the first test above).
+      const payloadA = Buffer.from(Array.from({ length: 20 }, () => 0x01));
+      const payloadB = Buffer.from(Array.from({ length: 20 }, () => 0x04));
+      const layout: any = {
+        curveA: {
+          offset: 0,
+          bitOffset: 0,
+          bitSize: (payloadA.length + 4) * 8,
+          defaultValue: payloadA.toString('base64'),
+          fromMemoryChild: true,
+          isVisible: false,
+        },
+        curveB: {
+          offset: 0,
+          bitOffset: 0,
+          bitSize: (payloadB.length + 4) * 8,
+          defaultValue: payloadB.toString('base64'),
+          fromMemoryChild: true,
+          isVisible: false,
+        },
+      };
+      const dynTree: any = { main: { items: [] } };
+      const params: any = {
+        curveA: { defaultValue: payloadA.toString('base64') },
+        curveB: { defaultValue: payloadB.toString('base64') },
+      };
+      // Neither is unconditional and neither is explicitly set in
+      // currentValues, so neither passes the conditional gate - the
+      // segment should be left at its fill value, not either blob.
+      const buf = buildParamMem(20, layout, {}, 0x00, null, dynTree, params);
+      assert.equal(buf.readUInt32BE(0), 0);
+    });
+  });
 });

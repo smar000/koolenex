@@ -526,29 +526,49 @@ never rigorously tested - it was retired once the Part 8 finding above showed ET
 rewrite writes *real, correct* values into this exact region, not a static default, which isn't
 consistent with "ETS never touches this."
 
-🟢 **Confirmed root cause**: `paramMemLayout` (koolenex's own extracted parameter data) already
-declares parameters in this region - labeled "Characteristic curve value domain" - but
-under-declares their size. Each is recorded as 1 byte (`bitSize: 8`), while its real
-`defaultValue` is a base64-encoded blob that decodes to **512 bytes**. These are ordinary
-manufacturer-declared parameters (this device's app declares 6 conditional alternates per
-dimming channel - almost certainly a "curve type" selector, one alternate active per channel) -
-nothing ETS computes dynamically. `buildParamMem()` has no code path to apply a multi-hundred-byte
-blob default (only scalar/text/float value types), so this region silently fell through to the
-segment's fill/default in koolenex's own computed image.
+🟢 **Confirmed root cause, fully resolved (verified against the real .knxproj XML, not just
+inferred)**: `paramMemLayout` (koolenex's own extracted parameter data) already declares
+parameters in this region - labeled "Characteristic curve value domain" - but under-declares
+their size. Each was recorded as 1 byte (`bitSize: 8`), while its real `defaultValue` is a
+base64-encoded blob that decodes to **512 bytes**. These are ordinary manufacturer-declared
+parameters (this device's app declares 6 conditional alternates per dimming channel - a
+"curve type" selector, one alternate active per channel) - nothing ETS computes dynamically.
+`buildParamMem()` had no code path to apply a multi-hundred-byte blob default (only scalar/
+text/float value types), so this region silently fell through to the segment's fill/default in
+koolenex's own computed image.
 
-**Verified at project scale**: swept every `paramMemLayout` entry for this pattern (declared size
-far smaller than its real base64-decoded `defaultValue` length). Found 24 such entries - 4
-channels x 6 alternates - at four offsets exactly 532 bytes apart. Cross-checked against the real
-1984-byte diff list: these four 512-byte ranges account for **1968 of 1984 diffs (99.2%)**.
+**The real wire format, confirmed directly against a real `.knxproj`'s raw XML** (a different,
+older export of the same project - the app definitions inside a `.knxproj` are identical across
+exports of the same product/app version, so this is valid evidence for the live project too):
+`<ParameterType><TypeRawData MaxSize="516" /></ParameterType>` - koolenex's parser never handled
+`TypeRawData` at all (every branch checks for `TypeNumber`/`TypeFloat`/`TypeTime`/`TypeText`
+before falling through to a generic `TypeRestriction`-based branch that only reads
+*TypeRestriction's own* `SizeInBit` - absent here, hence the `bitSize=8` fallback). `MaxSize` is
+in **bytes**: 516 = 4 + 512, and the real device's own leading 4 bytes at each curve's offset
+decode as a big-endian `uint32` of `512` - exactly the payload length. **The real format is a
+4-byte big-endian length prefix followed by the payload**, not the raw 512-byte table alone -
+what first looked like an inexplicable "offset off by 4" (and, before that, a seemingly
+unrelated separate 16-byte gap after each blob) was actually the same length prefix the whole
+time, on both ends: the earlier "16 remaining unexplained bytes" (4 bytes after each naively-
+placed 512-byte window) was the table's own real tail, misplaced by the same 4 bytes.
 
-**Remaining 16 bytes** (4 bytes at an identical relative offset right after each blob, all 4
-channels): a separate, smaller, still-open gap - no `paramMemLayout` entry covers them at all, and
-their real device value is a fixed constant (`0F EF 0F FF`) in every channel. Not yet traced to a
-declared parameter; low-stakes (0.15% of the segment) given its determinism.
+**Verified at project scale, and fully closed**: swept every `paramMemLayout` entry for this
+under-declared-size pattern. Found 24 such entries - 4 channels x 6 alternates - at four offsets
+exactly 532 bytes apart (532 = 516 + 16, the per-channel unit including the small "curve
+correction" parameter that precedes it). Fixed in two places: `ets-app.ts` now reads
+`TypeRawData`'s `MaxSize` into `bitSize` (bytes, correctly), and `buildParamMem()` now emits the
+real `[4-byte BE length][payload]` framing whenever a blob's declared size matches that shape
+(falling back to writing the raw payload with no framing otherwise, for a stale pre-fix cache or
+a genuinely different blob shape not yet seen). **Result: 0 diffs across all four 516-byte
+regions** against the real device, confirmed with a fresh re-parse of the real XML - the ~1984-
+byte gap is fully resolved, not just mostly.
 
-**Still open**: which of each channel's 6 curve-type alternates is genuinely active for a given
-project (needs the same conditional-activation logic already used for Part 7's offset-172 case,
-not yet applied here); the 16-byte fixed-constant gap; the Part 8 detection-mechanism question.
+**Still open**: whether this `TypeRawData`/length-prefix framing generalizes to other blob-typed
+parameters or other manufacturers' apps - confirmed for this one app's "Characteristic curve
+value domain" parameters only; `buildParamMem()`'s fallback (raw payload, no framing) is a
+deliberate safety net for an unverified shape, not assumed correct. The Part 8 detection-
+mechanism question (how ETS decides a comprehensive rewrite is needed) remains open and is
+unrelated to this fix.
 
 ## Sources
 

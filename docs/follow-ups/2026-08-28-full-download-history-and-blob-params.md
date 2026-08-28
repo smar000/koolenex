@@ -1,7 +1,8 @@
 # Investigation: does a real ETS Full Download depend on device history, and what's actually in the "1984-byte gap"?
 
-**See also**: `docs/knx-device-write-protocol.md` Part 8 — the distilled protocol facts this investigation
-settled. This log is the full narrative (dead ends, corrected mistakes, exact order of discovery).
+**See also**: `docs/knx-device-write-protocol.md` Parts 8-9 — the distilled protocol facts this
+investigation settled. This log is the full narrative (dead ends, corrected mistakes, exact order
+of discovery, including a self-corrected "99.2%" framing that turned out to be the whole 100%).
 
 **Status: RESOLVED**, two separate questions, both closed with real-hardware evidence against 1.1.10:
 
@@ -11,10 +12,12 @@ settled. This log is the full narrative (dead ends, corrected mistakes, exact or
    segment rewrite, not a naive skip.
 2. What is the "1984-byte gap" between koolenex's computed parameter image and the real device
    (flagged as unexplained in `relmem-real-device-fixtures.test.ts` and `koolenex_reference` memory)?
-   **Not device-internal/opaque state** (an earlier, wrong guess from this same investigation) -
-   99.2% of it is a concrete, fixable bug: 24 manufacturer-declared "curve type" parameters (4
-   channels x 6 conditional alternates) whose real default is a 512-byte binary blob, mis-declared
-   by koolenex's parser as 1 byte each.
+   **Not device-internal/opaque state** (an earlier, wrong guess from this same investigation), and
+   **fully resolved, not just mostly**: 24 manufacturer-declared "curve type" parameters (4
+   channels x 6 conditional alternates), each a `TypeRawData`-typed parameter whose real wire
+   format is a 4-byte big-endian length prefix + payload - a type koolenex's parser never handled
+   at all, silently defaulting every such parameter to 1 byte. Confirmed directly against the real
+   `.knxproj` XML (`<TypeRawData MaxSize="516" />`), not just inferred from behavior.
 
 ## Why this came up
 
@@ -118,24 +121,70 @@ base64-looking `defaultValue` decoding to more bytes than its declared `bitSize`
 matching the device's 4 dimming channels exactly. Cross-checked against the real 1984-byte diff
 list: **1968 of 1984 diffs (99.2%) fall inside these four 512-byte blob ranges.**
 
-**The remaining 16 bytes** (4 bytes, at a consistent relative offset right after each 512-byte
-blob, in all 4 channels) are a genuinely separate, smaller gap: no `paramMemLayout` entry covers
-them at all. Their real device value is an identical, fixed constant in every channel (`0F EF 0F
-FF`) - deterministic, not project-configurable, but not yet traced to a declared parameter
-either. Left open as a minor, low-stakes follow-up (0.15% of the segment).
+## Finding 3: the fix was still 4 bytes off - and the real `.knxproj` XML settles it completely
+
+Implementing the "write the blob at its declared offset" fix (see Part 9 of the reference doc for
+the settled description; this section is the narrative of getting there) only closed 824 of the
+gap's bytes, not the expected ~1968. All four channels showed exactly the same 286/512 diff
+count - a strong signal of one systematic error, not four independent ones, but none of the 6
+declared alternates per channel was a byte-perfect match for the real device even after picking
+the closest one.
+
+**User pushed back again**, correctly: comparing against a fixture file frozen days earlier
+conflated the fix's real effect with unrelated project-config drift (the project has had many
+config changes across this whole multi-day investigation). Isolated properly (old code vs. new
+code, same live DB state) - the fix's own effect was real and cleanly scoped to the blob region,
+just incomplete.
+
+**Direct byte comparison found the actual pattern**: the real device's content matched the
+declared blob's template exactly once shifted forward by 4 bytes - 0 diffs across all 4 channels,
+full 512 bytes each, once correctly aligned. The 4 bytes *before* that shifted position were an
+undeclared, identical constant in every channel (`00 00 02 00`) - and this turned out to be the
+exact same 4 bytes as the earlier "16 remaining unexplained bytes" (right after each naively-
+placed 512-byte window) - not a second, separate gap at all, just the table's own real tail,
+misplaced by the same 4-byte error.
+
+**User asked directly whether the real project file was available** to check this at the source
+instead of continuing to infer it. It was - not the live project's own file (koolenex doesn't
+retain uploaded `.knxproj`s after parsing), but an older export of the *same* project found in a
+local email cache, which bundles the identical app/product XML (`.knxprod`-equivalent data is
+identical across exports of the same app version, independent of project-specific configuration).
+Extracting and reading `M-0004/M-0004_A-3030-23-F0EA-O000A.xml` directly settled it completely:
+
+```xml
+<ParameterType Id="..._PT-_DA_Kennlinie_Raw Data" Name="_DA_Kennlinie_Raw Data">
+  <TypeRawData MaxSize="516" />
+</ParameterType>
+```
+
+516 = 4 + 512. Decoding the real device's 4 "unexplained" header bytes as a big-endian `uint32`:
+`0x00000200` = 512 - exactly the payload length. **The real wire format is a 4-byte big-endian
+length prefix followed by the payload**, not a bare table. koolenex's parser never handled
+`TypeRawData` at all - every branch in its `ParameterType` loop checks for a specific child
+element (`TypeNumber`/`TypeFloat`/`TypeTime`/`TypeText`) before falling through to a generic
+`TypeRestriction`-based branch that only reads *TypeRestriction's own* `SizeInBit`, absent for
+`TypeRawData` - hence the silent `bitSize=8` fallback that started this whole investigation.
+
+**Fixed properly at both layers**: `ets-app.ts` now reads `TypeRawData`'s `MaxSize` (in bytes)
+into `bitSize`; `buildParamMem()` (`server/routes/knx-tables.ts`) now emits the real
+`[4-byte BE length][payload]` framing when a blob's declared size matches that shape, falling
+back to a raw (unframed) write otherwise - a deliberate safety net for a stale pre-fix cache or a
+genuinely different blob shape not yet seen, rather than assuming this framing is universal.
+**Result, verified against a fresh re-parse of the real XML**: 0 diffs across all four 516-byte
+regions. The gap is fully closed, not just 99.2% of it - the earlier "16 remaining bytes, still
+open" framing in Part 9's first draft was itself premature; corrected the same day.
 
 ## What's still genuinely open
 
 - The exact mechanism by which ETS detects "this device's state doesn't match what I expect" and
-  triggers the comprehensive rewrite - confirmed to exist and to be triggered by *any* intervening
-  non-ETS write (tested with both an incomplete and a complete RelSegment declaration), but the
-  underlying signal is unknown. No live memory read occurs in any capture, so it isn't a
-  read-then-diff mechanism at the byte level.
-- The 16-byte fixed-constant gap after each curve blob - real, small, not yet traced to a
-  declared parameter.
-- Which of each channel's 6 curve-type alternates is genuinely "active" for a given project
-  configuration - not yet determined (needs the same conditional-activation logic already used
-  for the offset-172 case, applied here and verified against real capture content).
+  triggers the comprehensive rewrite (Findings 1-2) - confirmed to exist and to be triggered by
+  *any* intervening non-ETS write (tested with both an incomplete and a complete RelSegment
+  declaration), but the underlying signal is unknown. No live memory read occurs in any capture,
+  so it isn't a read-then-diff mechanism at the byte level.
+- Whether the `TypeRawData`/length-prefix framing generalizes beyond this one app's
+  "Characteristic curve value domain" parameters - confirmed for this one shape only;
+  `buildParamMem()`'s fallback path is a deliberate unknown-shape safety net, not assumed correct
+  for other manufacturers/parameter types.
 - Object 3's identity (`0x0C2000` region) - written in the comprehensive rewrite, still
   unidentified, unrelated to this investigation's scope.
 
@@ -149,4 +198,11 @@ either. Left open as a minor, low-stakes follow-up (0.15% of the segment).
 - `tests/fixtures/relmem-real-devices/1.1.10-actual.hex` /
   `1.1.10-expected-computed.hex` - source for the blob-range/diff-offset cross-check.
 - `data/apps/M-0004_A-3030-23-F0EA-O000A.json` - source for the 24 blob-typed `paramMemLayout`
-  entries and their real decoded lengths.
+  entries and their real decoded lengths, before the `TypeRawData` fix (this project's own cache
+  hasn't been regenerated from source yet - a later re-parse will pick up the fix automatically).
+- An older `.knxproj` export of the same project (found locally in an email cache, not part of
+  this repo) - source for the raw `M-0004_A-3030-23-F0EA-O000A.xml` confirming `TypeRawData
+  MaxSize="516"` directly. Not saved into this repo's own capture/fixture set (not this project's
+  own export, and large/user-identifying) - if this needs re-verifying later, the same
+  `<TypeRawData MaxSize="...">` declaration will be present in any export of this exact app
+  version.

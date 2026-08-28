@@ -736,6 +736,67 @@ export function buildParamMem(
       strBuf.copy(buf, info.offset, 0, Math.min(strBuf.length, byteSize));
       continue;
     }
+    // TypeRawData-shaped default values ("Characteristic curve value
+    // domain" and similar) - the manufacturer ships a whole pre-baked
+    // lookup table as the parameter's raw DefaultValue, base64-encoded in
+    // the source XML, rather than a single scalar. Real ETS writes the
+    // WHOLE table (confirmed via a real Full Download capture,
+    // byte-for-byte) - this is the root cause of a real, large gap
+    // between this function's computed image and a real device (see
+    // docs/knx-device-write-protocol.md Part 9 and
+    // docs/follow-ups/2026-08-28-full-download-history-and-blob-params.md
+    // for the full real-hardware + real-.knxproj-XML investigation this
+    // fix is based on).
+    //
+    // The real wire format, confirmed against 1.1.10's actual .knxproj
+    // XML and a real device capture, is a 4-byte big-endian LENGTH PREFIX
+    // followed by the payload: `<TypeRawData MaxSize="516" />` for a
+    // 512-byte curve table (516 = 4 + 512), and the real device's own
+    // leading 4 bytes there decode as `0x00000200` = 512 - exactly the
+    // payload length. ets-app.ts now reads MaxSize into `bitSize`
+    // (`sizeInBit = maxSize*8`, previously TypeRawData wasn't handled at
+    // all and silently fell back to bitSize=8/1 byte) - so
+    // `declaredBytes` below is now the REAL total allocation (prefix +
+    // payload) once a project has been re-parsed with that fix. Detect
+    // and frame based on the *value itself* rather than trusting a
+    // specific bitSize number, since data/apps/*.json caches generated
+    // before the ets-app.ts fix still carry the old (wrong) bitSize=8 -
+    // this stays correct either way.
+    //
+    // The existing conditional-activation gate above already selects
+    // only the one genuinely active alternate among a conditional group
+    // (e.g. one of a channel's several curve-type choices) - this branch
+    // only needs to apply whichever value survives that gate.
+    if (typeof rawVal === 'string' && /^[A-Za-z0-9+/]+=*$/.test(rawVal) && rawVal.length >= 20) {
+      let blob: Buffer;
+      try {
+        blob = Buffer.from(rawVal, 'base64');
+      } catch (_e) {
+        blob = Buffer.alloc(0);
+      }
+      const declaredBytes = Math.ceil(info.bitSize / 8);
+      if (declaredBytes === blob.length + 4) {
+        // Declared allocation is exactly "4-byte length prefix + this
+        // payload" - the confirmed real shape. Frame it that way.
+        const framed = Buffer.alloc(4 + blob.length);
+        framed.writeUInt32BE(blob.length, 0);
+        blob.copy(framed, 4);
+        framed.copy(buf, info.offset, 0, Math.min(framed.length, buf.length - info.offset));
+        continue;
+      }
+      if (blob.length > declaredBytes + 1) {
+        // Declared size doesn't match the confirmed prefix+payload shape
+        // (e.g. an un-re-parsed cache still showing bitSize=8, or a
+        // genuinely different blob shape this hasn't been verified
+        // against) - write the raw payload with no framing as a
+        // best-effort fallback, matching the offset ETS's own writes
+        // used in every capture so far.
+        blob.copy(buf, info.offset, 0, Math.min(blob.length, buf.length - info.offset));
+        continue;
+      }
+      // Falls through to the generic numeric path below for genuinely
+      // short base64-looking strings (a coincidence, not a real blob).
+    }
     if (info.isFloat) {
       const fVal = parseFloat(String(rawVal));
       if (isNaN(fVal)) continue;

@@ -764,6 +764,41 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
         };
         continue;
       }
+      if (pt.TypeRawData) {
+        // Whole pre-baked binary blobs shipped inline as a Parameter's own
+        // Value (e.g. "Characteristic curve value domain" parameters -
+        // confirmed 2026-08-28 against 1.1.10's real .knxproj: manufacturer
+        // ID 0004, ParameterType "_DA_Kennlinie_Raw Data"). Before this fix
+        // TypeRawData fell all the way through to the generic
+        // TypeRestriction-based branch below, which only reads
+        // TypeRestriction's own SizeInBit - absent here, so every such
+        // parameter silently got the `|| 8` fallback (1 byte) regardless of
+        // its real size. That's the root cause of a real, large gap between
+        // koolenex's computed parameter image and a real device - see
+        // docs/knx-device-write-protocol.md Part 9 and
+        // docs/follow-ups/2026-08-28-full-download-history-and-blob-params.md.
+        //
+        // MaxSize is in bytes, not bits (confirmed against the real XML:
+        // `<TypeRawData MaxSize="516" />` for a 512-byte curve table -
+        // real wire format is a 4-byte big-endian length prefix followed by
+        // up to MaxSize-4 bytes of data, decoding that same real curve's
+        // leading 4 bytes as `0x00000200` = 512, exactly the real payload
+        // length - so MaxSize itself already accounts for the prefix).
+        // buildParamMem() (server/routes/knx-tables.ts) is what actually
+        // emits the length prefix + payload for entries whose real value
+        // exceeds a plain scalar's size; this only needs to report the real
+        // byte size so that code can recognise them.
+        const trd = Array.isArray(pt.TypeRawData)
+          ? pt.TypeRawData[0]
+          : pt.TypeRawData;
+        const maxSizeBytes = parseInt(attr(trd, 'MaxSize'), 10) || 1;
+        paramTypes[tid] = {
+          kind: 'other',
+          enums: {},
+          sizeInBit: maxSizeBytes * 8,
+        };
+        continue;
+      }
       const enums: Record<string, string> = {};
       for (const e of toArr(pt.TypeRestriction?.Enumeration)) {
         const val = attr(e, 'Value');

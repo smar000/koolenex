@@ -339,10 +339,14 @@ inference):
 
 ## Artifacts
 
-- Capture files: `full_download_test.pcapng` (2026-08-27, original
-  investigation) and `ga_wire_format_test.pcapng` (2026-08-28, Finding 3's
-  confirmation) — both local scratch capture directory, not checked into
-  this repo.
+- Capture files (filtered to `cemi and tcp`, dropping unrelated multi-interface
+  UDP noise): `2026-08-27-full-download-1.1.9-1.1.10.pcapng` (Findings 1/2 and
+  Finding 3's first, degenerate-GA pass) and
+  `2026-08-28-ga-wire-format-1.1.9-1.1.10.pcapng` (Finding 3's confirmation on
+  real non-degenerate GAs) — kept in the knx-ets-manager repo, not here (they
+  back this repo's own strategy record rather than being koolenex's own
+  concern): `../knx-ets-manager/docs/data/captures/`, see that folder's own
+  README for what each contains.
 - `research/programming-implementation.md` — koolenex's original author's
   own status/plan doc, 2026-03-31, predates everything else referenced
   here by months. Source for the "Non-Default Cache" / "Mask Tracking" /

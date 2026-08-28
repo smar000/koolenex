@@ -382,8 +382,9 @@ Consolidated from throughout this document, for visibility:
 
 1. Why does the NTP-parameter write differ in byte count (5 bytes for "off" vs 1 byte for "on")
    between the two otherwise-identical Partial Download captures? (§1.2)
-2. What object 3 actually represents (§2.7 - 1.1.9's instance, 98 bytes; see also Part 10 for
-   1.1.10's instance, 942 bytes - a different device/app, not a correction of this figure).
+2. ~~What object 3 actually represents~~ - **RESOLVED, see Part 10**: the standard KNX Group
+   Object Table (object type `9`, confirmed against real KNX Master Data). What remains open is
+   narrower: why ETS only rewrites it on some Full Downloads and not others (Part 10).
 3. Whether the mask-version gate (§3) generalizes beyond System B, or whether a real legacy
    device needs something different — untested, no legacy hardware available.
 4. Whether the LoadData `mode` byte's Full/Partial meaning holds for objects other than OX=4 —
@@ -461,7 +462,7 @@ happens to exist as an attribute on several of these objects here:
 |---|---|
 | 1 | Group Address table |
 | 2 | Association table |
-| 3 | Unidentified (KNX object type `9`, confirmed live) - real size is per-app (98 bytes for 1.1.9, 942 for 1.1.10); see Part 5 item 2 and Part 10 |
+| 3 | Group Object Table (KNX standard type `9`) - real size is per-app (98 bytes for 1.1.9, 942 for 1.1.10); see Part 10 |
 | 4 | The application/parameter memory object - the real device settings |
 
 So it isn't its own memory area - it's a per-object "content status/checksum" attribute that
@@ -571,11 +572,12 @@ deliberate safety net for an unverified shape, not assumed correct. The Part 8 d
 mechanism question (how ETS decides a comprehensive rewrite is needed) remains open and is
 unrelated to this fix.
 
-## Part 10 — Object 3, revisited for 1.1.10: partial identification, still genuinely speculative (PARKED 2026-08-28)
+## Part 10 — Object 3 identified: the standard Group Object Table (RESOLVED identity 2026-08-28; write-trigger behavior still open)
 
-**Explicitly not a resolved finding** - the user asked for this to be recorded as speculation
-requiring further investigation, not treated as settled. Parked here as a running item to watch
-for in future write tests, not acted on.
+Object 3's real facts (size, base, identity) below are confirmed and no longer speculative -
+resolved the same day the earlier, explicitly-flagged-speculative theory connecting it to
+application-version management was recorded and then retracted (see below). What remains open is
+narrower: not "what is this object" but "why does ETS only rewrite it sometimes."
 
 🟢 **Confirmed, directly, no speculation involved**:
 - Real size for 1.1.10: **942 bytes** (`LoadData` size field `0x03AE`, matching the real chunked
@@ -584,11 +586,17 @@ for in future write tests, not acted on.
   evidently per-app, even though the object's presence is universal/mask-defined (§Part 6's
   established pattern).
 - Real base address: `0x0C2000` (`PID_TABLE_REFERENCE`, confirmed twice, stable across sessions).
-- **`PID_OBJECT_TYPE` (property 1), read live from the real device**: object 3 reports type `9`,
-  distinct from objIdx 1/2/4's types `1`/`2`/`3` (Address table / Association table / Application
-  Program - all match KNX-standard expectations). Type `9`'s real standard name is not confirmed
-  here - no reliable local KNX standard reference was available to verify it, so it is
-  deliberately left as a number, not a guessed name.
+- **Object 3's real identity, resolved**: `PID_OBJECT_TYPE` (property 1), read live from the real
+  device, reports type `9`. Cross-referenced against koolenex's own bundled real KNX Master Data
+  (`data/knx_master_1.xml`, the authoritative standard reference, not a guess or a memory recall):
+  `<InterfaceObjectType Number="9" Name="OT_GROUP_OBJECT_TABLE" Text="Group Object Table Object" />`.
+  **Object 3 is the standard KNX "Group Object Table" object** - confirmed the same way for
+  objIdx 1/2/4 too (types `1`/`2`/`3` = Address Table/Association Table/Application Program,
+  all correctly matching what was already independently established), which validates the method.
+  A Group Object Table is an ordinary, well-understood KNX concept - per-communication-object
+  flags (communication/read/write/transmit-enable, priority) and possibly cached values, indexed
+  by communication object number - distinct from the Association table (which maps GA links to
+  communication objects) and the Address/GA table itself. Not an exotic or opaque thing.
 - Not declared anywhere in 1.1.10's own app XML (checked directly against the real `.knxproj`) -
   same "universal, app doesn't need to declare it" pattern as GA/Association tables.
 - Content is almost entirely zero-filled - only ~30 meaningful bytes (a small structure repeating
@@ -600,30 +608,30 @@ for in future write tests, not acted on.
   (2026-08-27, 2026-08-28 x2): all are first-Full-Download-of-a-session or post-reconnect/
   post-failed-attempt sessions, consistent with (not proof of) the same pattern.
 
-🔴 **Speculative, not supported beyond the co-occurrence above**:
-- That object 3 holds some form of application-identity/version-tracking data ETS re-establishes
-  specifically when it can't be confident about a device's current state - motivated by (a) the
-  correlation just described, (b) a real ETS UI capability (user-confirmed: the "Change
-  Application Program" dropdown genuinely supports loading a different application version onto
-  already-commissioned hardware, not just picking a local file at project-edit time - a real
-  device-level capability that plausibly needs device-side tracking to support), and (c) object
-  3's `PID_OBJECT_TYPE=9` being consistent with (not proof of) a KNX-standard secondary
-  application-management object. **None of this has been independently verified** - the
-  co-occurrence is a real, checked fact; the causal story built on top of it is not.
-- Whether this same object could be *the* mechanism behind Part 8's still-unexplained
-  "comprehensive rewrite" trigger - plausible, unproven, and not the only possible explanation.
+**Retracted**: an earlier, explicitly-flagged-as-speculative theory here connected object 3 to
+application-version-management (motivated by a real ETS UI capability - genuinely loading a
+different application version onto already-commissioned hardware) and, tentatively, to Part 8's
+detection-mechanism question. The Group Object Table identity above is unrelated to application
+version management, so that specific causal story doesn't hold. Recorded as a real example of
+why this was marked speculative rather than asserted at the time - the correction cost nothing
+because nothing downstream had been built on it yet.
 
-**Explicitly parked, not investigated further today.** Revisit if a future real write test
-surfaces more evidence either way - in particular, whether object 3 gets touched again on any
-future "first download of a session" vs. "routine, mid-session" download, and whether its content
-ever differs meaningfully between those cases.
+🔴 **Still genuinely open**: why the Group Object Table is only rewritten in some Full Downloads
+and not others is now a narrower, more answerable question (a real, understood KNX object's
+write-triggering behavior) rather than a speculative one, but it remains unanswered. Possible
+starting point for later investigation: whether the two routine (non-rewriting) sessions also
+skipped writing GA/Association tables, or wrote those unconditionally regardless - if objIdx 1/2
+get written every time but objIdx 3 doesn't, that would narrow down what's actually different
+about the two triggering sessions. Not investigated further today.
 
 ## Sources
 
 - `docs/data/captures/2026-08-28-ets-full-download-history-and-blob-params-1.1.10.pcapng`,
   cross-checked against every other saved capture (`grep -c "OX=3 P=5"` across
-  `docs/data/captures/*.pcapng`) and a live `PID_OBJECT_TYPE`/`PID_TABLE_REFERENCE` read via
-  `POST /bus/read-property` — primary source for Part 10.
+  `docs/data/captures/*.pcapng`), a live `PID_OBJECT_TYPE`/`PID_TABLE_REFERENCE` read via
+  `POST /bus/read-property`, and koolenex's own bundled real KNX Master Data
+  (`data/knx_master_1.xml`, `<InterfaceObjectType>` entries) for the standard object-type name —
+  primary source for Part 10.
 - `docs/data/captures/2026-08-28-ets-1-full-download-1.1.9.pcapng` — primary source for Part 1.1
   and most of Part 2.
 - `docs/data/captures/2026-08-28-ets-2-partial-download-ntp-off-1.1.9.pcapng` and

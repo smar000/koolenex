@@ -19,14 +19,15 @@ of discovery, including a self-corrected "99.2%" framing that turned out to be t
    at all, silently defaulting every such parameter to 1 byte. Confirmed directly against the real
    `.knxproj` XML (`<TypeRawData MaxSize="516" />`), not just inferred from behavior.
 
-**Plus one explicitly PARKED, not-resolved side-track** (Finding 4): a closer look at Object 3
-(written during the comprehensive rewrite) established several new, real facts (its true size for
-1.1.10 - 942 bytes, correcting nothing about 1.1.9's separately-real 98-byte figure; its base
-address; its KNX standard object type, `9`, read live; that it correlates with Full Downloads
-following a reconnect/uncertain state, never Partial Downloads or routine same-session Full
-Downloads) - but the causal story connecting it to application-version management or to Part 8's
-detection mechanism is deliberately left as unresolved speculation, per explicit user instruction,
-not treated as settled.
+**Plus Finding 4** (Object 3): its true size for 1.1.10 (942 bytes, not a correction of 1.1.9's
+separately-real 98 bytes), base address, and correlation with Full Downloads following a
+reconnect/uncertain state (never Partial Downloads or routine same-session Full Downloads) are
+all real, checked facts. Its *identity* is now also resolved, not speculative: **object 3 is the
+standard KNX "Group Object Table"** (type `9`, confirmed against koolenex's own bundled real KNX
+Master Data - see below). An earlier, explicitly-flagged-speculative theory tying it to
+application-version management was recorded, then retracted once the real identity was found -
+correctly parked as speculation at the time, so retracting it cost nothing. What's genuinely still
+open is narrower: why ETS only rewrites this object on some Full Downloads and not others.
 
 ## Why this came up
 
@@ -183,7 +184,7 @@ genuinely different blob shape not yet seen, rather than assuming this framing i
 regions. The gap is fully closed, not just 99.2% of it - the earlier "16 remaining bytes, still
 open" framing in Part 9's first draft was itself premature; corrected the same day.
 
-## Finding 4: Object 3, revisited - real facts established, causal story explicitly parked as speculation
+## Finding 4: Object 3, revisited - identity resolved (Group Object Table), write-trigger behavior still open
 
 Since Object 3 got written during the comprehensive rewrite (Finding 1), and the original
 "skip-unmapped-bytes" task this whole investigation grew out of was about to resume, it was worth
@@ -202,18 +203,18 @@ is evidently per-app.
 interface object reports, giving a direct, unambiguous identifier rather than inferring one from
 behavior: object 3 reports type `9`, distinct from objIdx 1/2/4's `1`/`2`/`3` (which correctly
 match Address table / Association table / Application Program - confirming the read itself is
-trustworthy). Type `9`'s real standard name wasn't confirmed - no reliable local KNX standard
-reference was available, and the session's own memory of the standard object-type table wasn't
-trusted enough to assert a name outright (per [[dont_jump_to_conclusions]]).
+trustworthy). Type `9`'s real standard name wasn't confirmed at the time - no reliable local KNX
+standard reference was checked yet, and the session's own memory of the standard object-type
+table wasn't trusted enough to assert a name outright (per [[dont_jump_to_conclusions]]).
 
 **A real ETS screenshot from the user surfaced a plausible connection, then needed correcting
 once, then partly reinstated**: the "Change Application Program" dropdown initially looked like it
-might tie to a device-side "application management" object (supporting the object-type-9 guess).
-The user first clarified this was just an ETS-side local-file picker (weakening that link), then
-corrected further: it genuinely supports loading a *different* application version onto
-already-commissioned hardware (a real device-level capability, not just a project-editing
-convenience) - which does plausibly need device-side infrastructure to support, partially
-reinstating the connection, though still unconfirmed.
+might tie to a device-side "application management" object (supporting an application-version
+guess for object 3). The user first clarified this was just an ETS-side local-file picker
+(weakening that link), then corrected further: it genuinely supports loading a *different*
+application version onto already-commissioned hardware (a real device-level capability, not just
+a project-editing convenience) - which does plausibly need device-side infrastructure to support,
+partially reinstating the connection at the time.
 
 **Checked whether Object 3 activity correlates with Full vs. Partial Download** (a much simpler,
 already-established distinction) - genuinely tested, not assumed: swept every saved capture in
@@ -224,11 +225,36 @@ capture showing Object 3 activity (2026-08-27, two from 2026-08-28) is a first-d
 session or post-reconnect/post-failed-attempt capture - consistent with, not proof of, "written
 when ETS has reason to be uncertain about device state."
 
-**Explicit instruction from the user**: document the real, checked facts (size, base, object
-type, universal/undeclared nature, the Full/Partial correlation) as confirmed, but treat the
-causal story built on top of them (application-identity tracking, tied to the Part 8 detection
-mechanism) as genuine speculation requiring further investigation - not close to well-supported.
-Parked, not investigated further today; keep watching for it on future real write tests.
+**Per explicit user instruction, the above was documented as checked facts (size, base, object
+type, universal/undeclared nature, the Full/Partial correlation) with the causal story
+(application-identity tracking) explicitly marked as speculation requiring further investigation,
+not settled** - which turned out to matter: the user then asked directly whether the ETS SDK's
+help file might help, prompting a check of `ETS 6.4 SDK/ETS6 SDK.chm` (extractable with 7-Zip
+like an archive) - its `MasterData.InterfaceObjectType` class docs described the *shape* of a
+number→name lookup but not the actual values (loaded at runtime from KNX Master Data, not baked
+into the help file). That pointed to a better source already available: koolenex's own bundled
+real KNX Master Data (`data/knx_master_1.xml`, used earlier in this project for the System B
+mask-family finding). Its `<InterfaceObjectType>` table gives the authoritative answer directly:
+
+```xml
+<InterfaceObjectType Id="OT-9" Number="9" Name="OT_GROUP_OBJECT_TABLE" Text="Group Object Table Object" />
+```
+
+Cross-checked against objIdx 1/2/4 too (types `1`/`2`/`3` = Address Table/Association Table/
+Application Program, all correctly matching what was already independently established) -
+validating the method, not just trusting one lucky lookup. **Object 3 is the standard KNX "Group
+Object Table"**: an ordinary, well-understood object holding per-communication-object flags
+(communication/read/write/transmit-enable, priority) and possibly cached values, indexed by
+communication object number - unrelated to application-version management. The earlier
+speculative theory is retracted; correctly parking it as speculation rather than asserting it
+meant the retraction cost nothing downstream.
+
+**What's still genuinely open, narrower now**: not "what is this object" (resolved) but "why does
+ETS only rewrite the Group Object Table on some Full Downloads and not others." Not investigated
+further today - a reasonable starting point for later: check whether the two routine
+(non-rewriting) sessions still wrote GA/Association tables unconditionally, which would suggest
+objIdx 3 has a genuinely different write-triggering policy than objIdx 1/2, not just "part of the
+same uncertain-state response."
 
 ## What's still genuinely open
 
@@ -236,15 +262,13 @@ Parked, not investigated further today; keep watching for it on future real writ
   triggers the comprehensive rewrite (Findings 1-2) - confirmed to exist and to be triggered by
   *any* intervening non-ETS write (tested with both an incomplete and a complete RelSegment
   declaration), but the underlying signal is unknown. No live memory read occurs in any capture,
-  so it isn't a read-then-diff mechanism at the byte level. Object 3 (Finding 4) is a real,
-  checked lead here - **explicitly not confirmed**, parked pending future evidence.
+  so it isn't a read-then-diff mechanism at the byte level.
 - Whether the `TypeRawData`/length-prefix framing generalizes beyond this one app's
   "Characteristic curve value domain" parameters - confirmed for this one shape only;
   `buildParamMem()`'s fallback path is a deliberate unknown-shape safety net, not assumed correct
   for other manufacturers/parameter types.
-- Object 3's real identity (KNX object type `9`'s standard name; whether it relates to
-  application-version management) - genuinely open, deliberately left as speculation, not
-  resolved.
+- Object 3's *identity* is resolved (Finding 4: the standard Group Object Table, type `9`) - what
+  remains open is why ETS only rewrites it on some Full Downloads and not others.
 
 ## Sources
 
@@ -253,6 +277,10 @@ Parked, not investigated further today; keep watching for it on future real writ
   writes (flag true/false), the two koolenex-injected out-of-band writes (incomplete then complete
   RelSegment), and both subsequent real ETS Full Downloads (the first showing the comprehensive
   rewrite, the second confirming it wasn't a one-off).
+- `ETS 6.4 SDK/ETS6 SDK.chm` (knx-ets-manager repo, extracted with 7-Zip) - checked for a
+  standard object-type reference table; only describes the API shape, not the values, but pointed
+  toward `data/knx_master_1.xml` (koolenex repo) as the real source - its `<InterfaceObjectType>`
+  entries are the direct source for Finding 4's Group Object Table identification.
 - `tests/fixtures/relmem-real-devices/1.1.10-actual.hex` /
   `1.1.10-expected-computed.hex` - source for the blob-range/diff-offset cross-check.
 - `data/apps/M-0004_A-3030-23-F0EA-O000A.json` - source for the 24 blob-typed `paramMemLayout`

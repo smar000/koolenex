@@ -237,53 +237,18 @@ export function DeviceCompareResults({
                   match / 2 differ" as parameters next to "8448/10433 bytes
                   match" as raw memory) - a visible "(raw memory)" /
                   "(named parameters)" label on each cluster, plus a fuller
-                  tooltip, so that's clear without already knowing it. */}
-              <div className={styles.summaryGroup}>
-                {decoded ? (
-                  <button
-                    type="button"
-                    className={`${styles.filterChipBtn} ${rowFilter === 'all' ? styles.filterChipBtnActive : ''}`}
-                    style={
-                      {
-                        '--chip-ring': result.match
-                          ? 'var(--green)'
-                          : 'var(--amber)',
-                      } as React.CSSProperties
-                    }
-                    onClick={() => setRowFilter('all')}
-                    title={
-                      (rowFilter === 'all'
-                        ? 'Showing all parameters (matching and differing). '
-                        : 'Show all parameters — clears the match/differ filter. ') +
-                      'This count is the raw byte-level comparison across the full ' +
-                      `${result.totalBytes}-byte parameter memory segment, including ` +
-                      'padding/reserved bytes not tied to any named parameter - a ' +
-                      'different (larger) scope than the match/differ counts below, ' +
-                      'which only cover named parameters.'
-                    }
-                  >
-                    <Badge
-                      label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
-                      color={result.match ? 'var(--green)' : 'var(--amber)'}
-                    />
-                  </button>
-                ) : (
-                  <Badge
-                    label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
-                    color={result.match ? 'var(--green)' : 'var(--amber)'}
-                  />
-                )}
-                <span
-                  className={styles.summaryGroupLabel}
-                  title={
-                    'Every byte of the raw parameter memory segment, including padding/reserved ' +
-                    'bytes with no named parameter behind them - usually a much larger, coarser ' +
-                    'number than the parameter-level counts to the right.'
-                  }
-                >
-                  raw memory
-                </span>
-              </div>
+                  tooltip, so that's clear without already knowing it.
+
+                  Named parameters first, raw memory second (was the other
+                  way round): named parameters are the scope actually under
+                  project control, where a mismatch means something real -
+                  raw memory legitimately includes padding/gap bytes ETS
+                  itself never writes to (see the 2026-08-27 relmem
+                  write-scope investigation), so its mismatch count is
+                  structurally noisy and shouldn't be the first, most
+                  prominent thing shown. The raw-memory chip's color is
+                  muted to --dim for the same reason - amber/green there
+                  reads as "this matters" when usually it doesn't. */}
               {decoded && (
                 <div className={styles.summaryGroup}>
                   <button
@@ -298,11 +263,18 @@ export function DeviceCompareResults({
                         ? 'Showing only matching parameters — click to show all. '
                         : 'Show only matching parameters. ') +
                       'Named, project-configurable parameters only - a smaller, more ' +
-                      'precise scope than the raw byte count on the left, which also ' +
+                      'precise scope than the raw byte count to the right, which also ' +
                       'includes unmapped/padding bytes.'
                     }
                   >
-                    <Badge label={`${matchCount} match`} color="var(--green)" />
+                    <Badge
+                      label={
+                        mismatchCount === 0
+                          ? `All ${matchCount} matched`
+                          : `${matchCount} match`
+                      }
+                      color="var(--green)"
+                    />
                   </button>
                   {mismatchCount > 0 && (
                     <button
@@ -338,13 +310,55 @@ export function DeviceCompareResults({
                     title={
                       'Only bytes ETS maps to a named, project-configurable parameter - excludes ' +
                       'padding/reserved bytes, so this is usually a much smaller, more precise ' +
-                      'count than the raw memory total to the left.'
+                      'count than the raw memory total to the right.'
                     }
                   >
                     named parameters
                   </span>
                 </div>
               )}
+              <div className={styles.summaryGroup}>
+                {decoded ? (
+                  <button
+                    type="button"
+                    className={`${styles.filterChipBtn} ${rowFilter === 'all' ? styles.filterChipBtnActive : ''}`}
+                    style={{ '--chip-ring': 'var(--dim)' } as React.CSSProperties}
+                    onClick={() => setRowFilter('all')}
+                    title={
+                      (rowFilter === 'all'
+                        ? 'Showing all parameters (matching and differing). '
+                        : 'Show all parameters — clears the match/differ filter. ') +
+                      'This count is the raw byte-level comparison across the full ' +
+                      `${result.totalBytes}-byte parameter memory segment, including ` +
+                      'padding/reserved bytes not tied to any named parameter - a ' +
+                      'different (larger) scope than the match/differ counts to the ' +
+                      'left. Muted deliberately: ETS itself never writes to most of ' +
+                      "this padding region, so a mismatch here usually isn't " +
+                      'meaningful the way a named-parameter mismatch is.'
+                    }
+                  >
+                    <Badge
+                      label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
+                      color="var(--dim)"
+                    />
+                  </button>
+                ) : (
+                  <Badge
+                    label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
+                    color="var(--dim)"
+                  />
+                )}
+                <span
+                  className={styles.summaryGroupLabel}
+                  title={
+                    'Every byte of the raw parameter memory segment, including padding/reserved ' +
+                    'bytes with no named parameter behind them - usually a much larger, coarser ' +
+                    'number than the parameter-level counts to the left.'
+                  }
+                >
+                  raw memory
+                </span>
+              </div>
             </div>
           </div>
         )}

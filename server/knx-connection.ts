@@ -716,9 +716,22 @@ export class KnxConnection extends EventEmitter {
       return;
     }
 
-    await this.managementSession(deviceAddr, async ({ nextSeq }) => {
+    await this.managementSession(deviceAddr, async ({ nextSeq, waitResponse }) => {
       const MEM_CHUNK = 10;
 
+      // Waits for the device's actual PropertyValue_Response before
+      // resolving - PropertyValue_Write/Response (0x3D7/0x3D5) aren't
+      // registered as named extended APCIs (see parseCEMI's APCI_EXT_NAMES),
+      // so the response comes back as apciName 'OTHER', same as
+      // readPropertyMany()'s own PropertyValue_Read/Response exchange above.
+      // Previously fire-and-forget with a fixed 50ms delay - real hardware
+      // showed a LoadCompleted response can take ~500ms to arrive (see
+      // docs/follow-ups/2026-08-28-write-path-missing-load-sequence.md's
+      // "Restart race" finding), so a fixed short delay let Restart fire
+      // before the device had actually confirmed the transition, discarding
+      // the just-loaded segment. Not fatal if the response never arrives
+      // (some property writes may legitimately not always respond) - logs
+      // and continues rather than aborting the whole download over it.
       const propWrite = async (
         objIdx: number,
         propId: number,
@@ -727,8 +740,13 @@ export class KnxConnection extends EventEmitter {
         const seq = nextSeq();
         const apdu = apduPropertyValueWrite(seq, objIdx, propId, data);
         const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+        const respP = waitResponse('OTHER', 3000);
         await this.sendCEMI(cemi);
-        await delay(50);
+        try {
+          await respP;
+        } catch (_e) {
+          log(`No PropertyValue_Response for ObjIdx=${objIdx} PropId=${propId} (continuing)`);
+        }
       };
 
       // ── Load State Machine transitions (PID_LOAD_STATE_CONTROL = property
@@ -898,6 +916,12 @@ export class KnxConnection extends EventEmitter {
       // if we actually did a load cycle above (nothing to restart for a
       // pure WriteProp/CompareProp/LoadImageProp download).
       if (anyRelSegmentLoaded) {
+        // Real ETS itself waits roughly another second after LoadCompleted's
+        // own response before sending Restart (see the doc above's "Restart
+        // race" finding - even with propWrite now waiting for the response
+        // itself, real ETS's extra margin here is real, observed behavior,
+        // not just a safety guess this fix invented on top of it).
+        await delay(1000);
         log('Restart');
         const seq = nextSeq();
         const apdu = apduConnected(seq, 'Restart');

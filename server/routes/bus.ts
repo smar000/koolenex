@@ -668,6 +668,14 @@ router.post('/bus/read-memory', async (req: Request, res: Response) => {
 // program-device, including the 16-bit truncation fix) - not a separate
 // write implementation - by passing `address` as objIdx 0's own
 // "resolved base" with offset 0, so addr = base + offset = address exactly.
+//
+// Optional `relSegment` opts into the real Unload/StartLoading/LoadData/
+// LoadCompleted sequence (see docs/follow-ups/2026-08-28-write-path-
+// missing-load-sequence.md and the fix in downloadDevice()) around this
+// write, declaring the REAL full segment size/fill (matching what ETS
+// itself declares for this object - not the size of `hex`, which can be a
+// small, fast, targeted slice) so the device accepts the write exactly
+// like a real ETS load, without needing to blind-write the entire segment.
 router.post('/bus/write-memory', async (req: Request, res: Response) => {
   const b = requireBus(res);
   if (!b) return;
@@ -680,22 +688,52 @@ router.post('/bus/write-memory', async (req: Request, res: Response) => {
         .string()
         .regex(/^[0-9a-fA-F]+$/)
         .refine((h) => h.length % 2 === 0, 'hex must have an even length'),
+      relSegment: z
+        .object({
+          objIdx: z.number().int().min(0).max(255),
+          size: z.number().int().min(1),
+          fill: z.number().int().min(0).max(255).default(0),
+          combined: z.boolean().default(false),
+        })
+        .optional(),
     }),
   );
-  const { deviceAddress, address, hex } = body;
+  const { deviceAddress, address, hex, relSegment } = body;
   if (!b.connected) return res.status(409).json({ error: 'Not connected' });
   const data = Buffer.from(hex, 'hex');
+  const objIdx = relSegment?.objIdx ?? 0;
+  const steps = relSegment
+    ? [
+        {
+          type: 'RelSegment' as const,
+          objIdx,
+          propId: 0,
+          lsmIdx: objIdx,
+          size: relSegment.size,
+          fill: relSegment.fill,
+          mode: relSegment.combined ? 'full,par' : 'full',
+        },
+        ...(relSegment.combined
+          ? [
+              {
+                type: 'RelSegment' as const,
+                objIdx,
+                propId: 0,
+                lsmIdx: objIdx,
+                size: relSegment.size,
+                fill: relSegment.fill,
+                mode: 'par',
+              },
+            ]
+          : []),
+        { type: 'WriteRelMem', objIdx, propId: 0, size: data.length, offset: 0 },
+      ]
+    : [{ type: 'WriteRelMem', objIdx, propId: 0, size: data.length, offset: 0 }];
   try {
-    await b.downloadDevice(
-      deviceAddress,
-      [{ type: 'WriteRelMem', objIdx: 0, propId: 0, size: data.length, offset: 0 }],
-      null,
-      null,
-      data,
-      undefined,
-      { resolvedBases: { 0: address } },
-    );
-    res.json({ deviceAddress, address, hex, byteCount: data.length });
+    await b.downloadDevice(deviceAddress, steps, null, null, data, undefined, {
+      resolvedBases: { [objIdx]: address },
+    });
+    res.json({ deviceAddress, address, hex, byteCount: data.length, loadSequence: !!relSegment });
   } catch (e) {
     res.status(502).json({ error: safeError('bus', 'Memory write failed', e) });
   }

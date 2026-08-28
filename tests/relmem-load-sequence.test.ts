@@ -20,7 +20,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseCEMI } from '../server/knx-cemi.ts';
+import { parseCEMI, buildCEMI, apduConnectedFull, APCI_EXT } from '../server/knx-cemi.ts';
 import { KnxConnection } from '../server/knx-connection.ts';
 import type { DownloadStep } from '../server/knx-connection.ts';
 
@@ -66,12 +66,34 @@ class LoadGatedFakeDevice extends KnxConnection {
       if (propId === 5 && data.length > 0) {
         const event = data[0]!;
         this.lsmEvents.push({ objIdx, event, data: Buffer.from(data) });
-        if (event === 0x01) this.loadingObjIdx = objIdx; // StartLoading
-        else if (event === 0x02 || event === 0x04) {
-          // LoadCompleted or Unload - no longer loading this object
+        let state = 0x00; // Unloaded
+        if (event === 0x01) {
+          this.loadingObjIdx = objIdx; // StartLoading
+          state = 0x02; // Loading
+        } else if (event === 0x03) {
+          state = 0x02; // LoadData - stays Loading
+        } else if (event === 0x02) {
+          // LoadCompleted
           if (this.loadingObjIdx === objIdx) this.loadingObjIdx = null;
+          state = 0x01; // Loaded
+        } else if (event === 0x04) {
+          // Unload
+          if (this.loadingObjIdx === objIdx) this.loadingObjIdx = null;
+          state = 0x00; // Unloaded
         }
-        // event === 0x03 (LoadData) doesn't change gating - stays "loading"
+        // propWrite() now waits for this response before proceeding (see
+        // the 2026-08-28 "Restart race" fix) - respond like real hardware
+        // does, not just accept-and-ignore, or every lsmWrite() call would
+        // time out after 3s.
+        const respApdu = apduConnectedFull(
+          0,
+          APCI_EXT.PropertyValue_Response,
+          Buffer.from([objIdx, propId, 0x10, 0x01, state]),
+        );
+        const resp = parseCEMI(
+          buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+        )!;
+        setImmediate(() => this._onCEMI(resp));
       }
     } else if (frame.apciName === 'Memory_Write') {
       const count = frame.apduData[0]!;

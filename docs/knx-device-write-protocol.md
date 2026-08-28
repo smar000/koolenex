@@ -445,23 +445,52 @@ mask family (only tested on two System B devices), and whether the "no declared 
 correctly generalizes to apps with more than 2 GAs or association entries beyond what's been
 tested here (small real samples throughout).
 
-## Part 7 — Parameters tab now cross-references communication objects (added 2026-08-29)
+## Part 7 — GA info added to two UI pages: the Parameters tab (side benefit) and the verify compare page (the actual request)
 
-A separate but related gap: the device detail panel's Parameters tab showed zero GA/
-communication-object information, even though the panel's own separate GROUP ADDRESSES/GROUP
-OBJECTS tabs have always covered this at the whole-device level. 🟢 **CONFIRMED, not
-speculative** - `server/ets-app.ts`'s `evalDynamic()` already computes, at import time, which
-channel each communication object belongs to (the same `<Channel>` grouping that structures the
-Parameters view itself), stored in each `com_objects` row's `channel` column. The client
-(`client/src/detail/DeviceParameters.tsx`) now fetches this via the existing
+A user request to "add GA info" was initially misread as being about the device detail panel's
+Parameters tab. That page showed zero GA/communication-object information, even though the
+panel's own separate GROUP ADDRESSES/GROUP OBJECTS tabs have always covered this at the
+whole-device level - so a cross-reference was added there first (still real, still kept). 🟢
+**CONFIRMED, not speculative** - `server/ets-app.ts`'s `evalDynamic()` already computes, at
+import time, which channel each communication object belongs to (the same `<Channel>` grouping
+that structures the Parameters view itself), stored in each `com_objects` row's `channel`
+column. The client (`client/src/detail/DeviceParameters.tsx`) fetches this via the existing
 `GET /projects/:id/comobjects` endpoint and renders a "COMMUNICATION OBJECTS" panel under
 whichever section is currently active, matched by channel name. Verified live: 1.1.9's "Timer
 configuration" section correctly shows all 6 Timer-channel com objects, including both real GA
 links.
 
-**Caveat, don't overclaim**: this is a channel-name match, not a true per-parameter link - KNX
-has no such concept. A section whose channel label doesn't exactly match any com object's
-`channel` string shows nothing, even if conceptually related. Not an issue for the one real app
+**What was actually asked for, once clarified with a screenshot**: GA info on the *Device vs
+Project verify/compare page* (`Programming` → `Verify`, `client/src/views/
+DeviceCompareResults.tsx`) - the page that reads the device over the bus and diffs it against
+the project's computed image, shown in the same screenshot as this doc's Part 6 GA-write finding
+above. That page had no GA comparison at all, for the same underlying reason as Part 6: the
+verify plan (`planVerify()`) only ever built regions for what the app's model declares, and
+1.1.9's app declares nothing for objIdx 1/2.
+
+**Fixed** (koolenex commit `c41168e`): `planVerify()` now returns a `gaAssocMem` field built the
+same way as the Part 6 write-side fix - resolves the real device-resident base for objIdx 1/2
+(extending `resolveRelmemBases()` to accept extra objIdx targets) whenever the model doesn't
+already declare a step for them, but only for genuinely RelSegment-family apps (at least one
+real `WriteRelMem` step) - AbsSegment/prop-only devices have no confirmed equivalent mechanism.
+The verify-device route decodes the read-back bytes (new `decodeGATable()`/`decodeAssocTable()`
+in `knx-tables.ts`, the inverse of the existing builders) into one comparison row per
+communication object, folded into the same `decoded` array the frontend already renders, under
+a new "Group Addresses" section - no frontend code changes needed, since that page already
+generically renders whatever sections come back.
+
+**A real bug caught by the test written for this, before it ever reached hardware**: a
+communication object with more than one GA link only kept the *last* decoded link, silently
+dropping earlier ones - fixed as part of the same commit.
+
+**Confirmed on real hardware, via the actual UI page** (not just curl): the slide-over now shows
+a "GROUP ADDRESSES" section with both of 1.1.9's real GA links (`9/1/1`, `9/1/4`), both correctly
+matching project vs. device.
+
+**Caveat, don't overclaim** (applies to both UI additions in this Part): channel-name matching
+(Parameters tab) is not a true per-parameter link - KNX has no such concept. A section whose
+channel label doesn't exactly match any com object's `channel` string shows nothing, even if
+conceptually related. Not an issue for the one real app
 tested here, but worth remembering if a future app's channel naming is less consistent.
 
 ## Sources

@@ -6,6 +6,8 @@ import { encodeDpt } from './knx-dpt.ts';
 
 // Extended 10-bit APCI codes (used for property/memory management services)
 export const APCI_EXT = {
+  Authorize_Request: 0x03d1,
+  Authorize_Response: 0x03d2,
   PropertyValue_Read: 0x03d5,
   PropertyValue_Response: 0x03d6,
   PropertyValue_Write: 0x03d7,
@@ -160,6 +162,21 @@ export function apduPropertyValueRead(
 ): Buffer {
   const meta = Buffer.from([objIdx & 0xff, propId & 0xff, 0x10, 0x01]);
   return apduConnectedFull(seq, APCI_EXT.PropertyValue_Read, meta);
+}
+
+/**
+ * A_Authorize_Request (0x3D1): [reserved(1)][key(4, BE)]. Real ETS sends
+ * this with the well-known/default key 0xFFFFFFFF before doing property/
+ * memory writes that need elevated access - see docs/follow-ups/2026-08-28-
+ * write-path-missing-load-sequence.md's "authorization" update. koolenex
+ * never sent this at all before that fix; the response
+ * (A_Authorize_Response, 0x3D2) carries a single access-level byte
+ * (0 = full access, per real captured examples).
+ */
+export function apduAuthorizeRequest(seq: number, key: number = 0xffffffff): Buffer {
+  const extra = Buffer.alloc(5);
+  extra.writeUInt32BE(key >>> 0, 1); // byte 0 stays reserved/0
+  return apduConnectedFull(seq, APCI_EXT.Authorize_Request, extra);
 }
 
 export function apduMemoryRead(

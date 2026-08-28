@@ -27,7 +27,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { parseCEMI } from '../server/knx-cemi.ts';
+import { parseCEMI, buildCEMI, apduConnectedFull, APCI_EXT } from '../server/knx-cemi.ts';
 import { KnxConnection } from '../server/knx-connection.ts';
 import type { DownloadStep } from '../server/knx-connection.ts';
 
@@ -64,6 +64,26 @@ class FakeWritableMemoryDevice extends KnxConnection {
     this.sent.push(cemi);
     const frame = parseCEMI(cemi);
     if (!frame) return Promise.resolve();
+
+    // downloadDevice() now sends A_Authorize_Request before any RelSegment-
+    // driven writes (see the 2026-08-28 authorization fix) and waits for
+    // the response - respond like real hardware does, or every download
+    // would stall on the 3s wait timeout.
+    const fullApci = frame.apdu.length >= 2
+      ? ((frame.apdu[0]! & 0x03) << 8) | frame.apdu[1]!
+      : -1;
+    if (fullApci === 0x3d1 /* Authorize_Request */) {
+      const respApdu = apduConnectedFull(
+        0,
+        APCI_EXT.Authorize_Response,
+        Buffer.from([0x00]),
+      );
+      const resp = parseCEMI(
+        buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+      )!;
+      setImmediate(() => this._onCEMI(resp));
+      return Promise.resolve();
+    }
 
     if (frame.apciName === 'Memory_Write') {
       // extraBuf layout from apduConnected: [count(1)][addrHi][addrLo][data...]

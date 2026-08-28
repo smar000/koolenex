@@ -36,6 +36,7 @@ class LoadGatedFakeDevice extends KnxConnection {
   loadingObjIdx: number | null = null;
   lsmEvents: Array<{ objIdx: number; event: number; data: Buffer }> = [];
   rejectedWrites: Array<{ address: number; extended: boolean }> = [];
+  authRequests: Buffer[] = [];
 
   constructor(deviceAddr: string, memory: Buffer) {
     super();
@@ -58,7 +59,18 @@ class LoadGatedFakeDevice extends KnxConnection {
     const fullApci = frame.apdu.length >= 2
       ? ((frame.apdu[0]! & 0x03) << 8) | frame.apdu[1]!
       : -1;
-    if (fullApci === 0x3d7 /* PropertyValue_Write */) {
+    if (fullApci === 0x3d1 /* Authorize_Request */) {
+      this.authRequests.push(Buffer.from(frame.apduData));
+      const respApdu = apduConnectedFull(
+        0,
+        APCI_EXT.Authorize_Response,
+        Buffer.from([0x00]), // level 0 = full access, matching real captures
+      );
+      const resp = parseCEMI(
+        buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+      )!;
+      setImmediate(() => this._onCEMI(resp));
+    } else if (fullApci === 0x3d7 /* PropertyValue_Write */) {
       // apduPropertyValueWrite layout: [objIdx][propId][count/start:2][data...]
       const objIdx = frame.apduData[0]!;
       const propId = frame.apduData[1]!;

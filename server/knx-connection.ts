@@ -22,6 +22,7 @@ import {
   parseMemoryExtendedResponse,
   apduPropertyValueWrite,
   apduPropertyValueRead,
+  apduAuthorizeRequest,
   encodePhysical,
   eventType,
   type CemiFrame,
@@ -748,6 +749,33 @@ export class KnxConnection extends EventEmitter {
           log(`No PropertyValue_Response for ObjIdx=${objIdx} PropId=${propId} (continuing)`);
         }
       };
+
+      // A_Authorize_Request with the well-known/default key - real ETS
+      // sends this near the start of every download session, before any
+      // property/memory writes, and koolenex never has (any code path).
+      // Root-caused 2026-08-28: a small, correctly-addressed, correctly-
+      // sequenced write (including the LSM fix above) still didn't persist
+      // even once Restart was correctly delayed until after LoadCompleted's
+      // real response - the response itself looked valid, so the remaining
+      // plausible explanation is that the underlying commit is gated behind
+      // authorization we'd never requested. Sent once, unconditionally, at
+      // the start of any RelSegment-driven download (see the log line if
+      // the device declines it - a non-zero response is possible on a
+      // device with real project-set access keys, unlike this testbed's
+      // presumed-default 0xFFFFFFFF).
+      {
+        const seq = nextSeq();
+        const apdu = apduAuthorizeRequest(seq);
+        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+        const respP = waitResponse('OTHER', 3000);
+        await this.sendCEMI(cemi);
+        try {
+          const resp = await respP;
+          log(`Authorize level=${resp.apduData[0] ?? 'unknown'}`);
+        } catch (_e) {
+          log('No Authorize_Response received (continuing)');
+        }
+      }
 
       // ── Load State Machine transitions (PID_LOAD_STATE_CONTROL = property
       // 5) around a RelSegment/WriteRelMem write. Real device firmware

@@ -194,6 +194,11 @@ export interface VerifyProgress {
 export interface VerifyCache {
   cache: Record<number, VerifyCacheEntry>;
   setResult: (deviceId: number, result: VerifyDeviceResult) => void;
+  // Forgets a device's cached verify result (both in-memory and the
+  // IndexedDB copy, via the same save effect that persists every other
+  // verifyCache change). No equivalent "clear everything" - deliberately
+  // per-device only, see the Programming page's row-level clear button.
+  clearResult: (deviceId: number) => void;
   // Live progress while a verify read is in flight, keyed by device
   // *address* (progress events only carry the address, not the id) - not
   // persisted like `cache`, just transient UI state updated from the

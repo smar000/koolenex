@@ -232,6 +232,7 @@ export type Action =
       type: 'HYDRATE_VERIFY_CACHE';
       cache: Record<number, VerifyCacheEntry>;
     }
+  | { type: 'CLEAR_VERIFY_RESULT'; deviceId: number }
   | { type: 'PATCH_DEVICE'; id: number; patch: Partial<Device> }
   | { type: 'PATCH_GA'; id: number; patch: Partial<EnrichedGA> }
   | {
@@ -359,6 +360,10 @@ export function reducer(state: AppState, action: Action): AppState {
         ...state,
         verifyCache: { ...action.cache, ...state.verifyCache },
       };
+    case 'CLEAR_VERIFY_RESULT': {
+      const { [action.deviceId]: _drop, ...rest } = state.verifyCache;
+      return { ...state, verifyCache: rest };
+    }
     case 'SET_DEVICE_STATUS': {
       if (!state.projectData) return state;
       const devices = state.projectData.devices.map((d) =>

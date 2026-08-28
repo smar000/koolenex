@@ -396,6 +396,8 @@ export default function App() {
       cache: state.verifyCache,
       setResult: (deviceId, result) =>
         dispatch({ type: 'SET_VERIFY_RESULT', deviceId, result }),
+      clearResult: (deviceId) =>
+        dispatch({ type: 'CLEAR_VERIFY_RESULT', deviceId }),
       progress: verifyProgress,
     }),
     [state.verifyCache, verifyProgress],

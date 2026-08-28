@@ -26,6 +26,7 @@ export function ProgrammingView() {
   const {
     cache: verifyCache,
     setResult: setVerifyResult,
+    clearResult: clearVerifyResult,
     progress: verifyProgress,
   } = useVerifyCache();
   const COLMAP: Record<string, string> = {
@@ -298,18 +299,31 @@ export function ProgrammingView() {
                             start at the same x position on every row -
                             View used to sit inline before Re-verify, which
                             pushed everything right only on rows that had a
-                            cached result. */}
+                            cached result. Icon pair (View / clear cache)
+                            rather than text so both fit without widening
+                            the slot as much as two text buttons would. */}
                         <div className={styles.viewSlot}>
                           {verifyCache[d.id] && (
-                            <button
-                              type="button"
-                              className={styles.viewChipBtn}
-                              onClick={() => openComparison(d.id)}
-                              disabled={verifying}
-                              title="View the last comparison result — no bus read"
-                            >
-                              View
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                className={styles.iconChipBtn}
+                                onClick={() => openComparison(d.id)}
+                                disabled={verifying}
+                                title="View the last comparison result — no bus read"
+                              >
+                                👁
+                              </button>
+                              <button
+                                type="button"
+                                className={`${styles.iconChipBtn} ${styles.clearCacheBtn}`}
+                                onClick={() => clearVerifyResult(d.id)}
+                                disabled={verifying}
+                                title="Clear the cached comparison result for this device — does not touch the device itself, only local cache"
+                              >
+                                🗑
+                              </button>
+                            </>
                           )}
                         </div>
                         <div className={styles.verifyBtnWrap}>

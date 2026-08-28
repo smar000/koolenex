@@ -62,7 +62,7 @@
      the matching floor so the table (not the DEVICE column) is what
      shrinks/scrolls once the log pane leaves too little room, rather than
      squeezing DEVICE toward zero again. */
-  /* other columns' widths (88+55+244=387) + thDevice's own 168px min-width,
+  /* other columns' widths (88+55+250=393) + thDevice's own 168px min-width,
      below - table-layout:fixed derives DEVICE's actual share from (this
      min-width minus the other columns' widths), not from its own min-width
      directly, so this has to stay in sync with both.
@@ -73,7 +73,7 @@
      above got its right padding trimmed 20px -> 14px for the same reason.
      ADDRESS used to be its own 46px column; folded into DEVICE as a small
      pill instead (see .addrBadge) so thDevice's min-width absorbs it. */
-  min-width: 555px;
+  min-width: 561px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -247,7 +247,9 @@
   width: 55px;
 }
 .thActions {
-  width: 244px;
+  /* viewSlot grew 46->52px (View + clear-cache icon pair) - widened to
+     match, see .table's min-width comment for how this feeds into it. */
+  width: 250px;
 }
 .logEntrySuccess {
   composes: logEntry;
@@ -281,33 +283,60 @@
   min-width: 92px;
   text-align: center;
 }
-/* Fixed-width slot for the "View" chip so Verify/Program always line up at
-   the same x across rows, whether or not a row has a cached result (see
-   the comment at its call site). Width covers the chip's own natural size
-   plus a little breathing room. */
+/* Fixed-width slot for the View/clear-cache icon pair so Verify/Program
+   always line up at the same x across rows, whether or not a row has a
+   cached result (see the comment at its call site). Width covers both
+   icon buttons' natural size plus their gap and a little breathing room. */
 .viewSlot {
-  width: 46px;
+  width: 52px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
+  gap: 4px;
 }
-.viewChipBtn {
+/* Small square icon buttons (View 👁 / clear-cache 🗑) - replaced the old
+   text "View" pill once a second action needed to sit next to it; a pill
+   sized for "Clear" text would have eaten more row width than these two
+   icons combined. */
+.iconChipBtn {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   background: color-mix(in srgb, var(--accent) 20%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   color: var(--accent);
-  border-radius: 999px;
-  padding: 3px 10px;
-  font-size: 9.5px;
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1;
   font-family: inherit;
   cursor: pointer;
-  white-space: nowrap;
 }
-.viewChipBtn:hover {
+.iconChipBtn:hover {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
-.viewChipBtn:disabled {
+.iconChipBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+/* Clear-cache is a lower-key, slightly-careful action next to the primary
+   View affordance - muted/dim by default (not competing with View for
+   attention), a red tint only on hover to signal "this removes something"
+   without being alarming at rest. Destructive but low-stakes (re-verify
+   any time restores it), so no confirm step - same precedent as the log
+   sidebar's plain "Clear Log" button. */
+.clearCacheBtn {
+  background: color-mix(in srgb, var(--dim) 15%, transparent);
+  border-color: color-mix(in srgb, var(--dim) 35%, transparent);
+  color: var(--dim);
+}
+.clearCacheBtn:hover {
+  background: color-mix(in srgb, var(--red) 20%, transparent);
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+  color: var(--red);
 }
 .verifyPopover {
   position: absolute;

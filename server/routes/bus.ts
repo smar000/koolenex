@@ -1278,9 +1278,32 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
     // only) is unaffected; folded into `decoded` instead, so it shows up
     // in the same named-comparison table the frontend already renders.
     if (plan.gaAssocMem.length) {
+      // The device's own real table can be a DIFFERENT size than the
+      // project's currently-computed `expected` buffer (e.g. a GA link was
+      // just removed/added in the project but never re-downloaded, or the
+      // device simply has more/fewer entries than the project currently
+      // declares) - reading `expected.length` bytes would silently truncate
+      // a real table that's larger than expected, decoding it as if entries
+      // past the truncation point don't exist. Read each table's real
+      // 2-byte count field first, then read the real full length it
+      // implies - not the project's assumed length. Capped defensively
+      // (2000 bytes ~ 500 GA entries / 250 association entries) against a
+      // corrupt/garbage count field driving an unbounded read.
+      const countActuals = await b.readMemoryMany(
+        deviceAddress,
+        plan.gaAssocMem.map((r) => ({ address: r.addr, length: 2 })),
+      );
+      const realLengths = plan.gaAssocMem.map((r, i) => {
+        const countBuf = countActuals[i];
+        const realCount =
+          countBuf && countBuf.length >= 2 ? countBuf.readUInt16BE(0) : 0;
+        const entryWidth = r.label.startsWith('gatable@') ? 2 : 4;
+        const realLen = 2 + realCount * entryWidth;
+        return Math.min(Math.max(realLen, r.expected.length), 2000);
+      });
       const gaAssocActuals = await b.readMemoryMany(
         deviceAddress,
-        plan.gaAssocMem.map((r) => ({ address: r.addr, length: r.expected.length })),
+        plan.gaAssocMem.map((r, i) => ({ address: r.addr, length: realLengths[i]! })),
       );
       const coRows = db.all<ComObject>(
         'SELECT * FROM com_objects WHERE device_id=? ORDER BY object_number',

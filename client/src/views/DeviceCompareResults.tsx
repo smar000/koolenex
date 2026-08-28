@@ -16,6 +16,24 @@ function sectionId(name: string): string {
   return 'sec-' + name.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
 }
 
+/** Compose a "5 params / 2 GAs" style count string from two scoped counts,
+ * omitting whichever side is zero (e.g. a device with no GA rows, or one
+ * where every GA matches while a param differs, only mentions the side
+ * that's actually nonzero) rather than always spelling out both. Used for
+ * the combined match/differ summary badges - see the comment at their call
+ * site in DeviceCompareResults. */
+function composeCount(
+  count: number,
+  gaCount: number,
+  word: string,
+  gaWord: string,
+): string {
+  const parts: string[] = [];
+  if (count > 0) parts.push(`${count} ${word}${count === 1 ? '' : 's'}`);
+  if (gaCount > 0) parts.push(`${gaCount} ${gaWord}${gaCount === 1 ? '' : 's'}`);
+  return parts.join(' / ');
+}
+
 /** Compact match/differ glyph for the per-row MATCH column - a text Badge
  * ("MATCH"/"DIFFERS") has a fixed minimum width from its own padding, which
  * overflowed its cell once the MATCH column's percentage width shrank below
@@ -149,18 +167,35 @@ export function DeviceCompareResults({
     a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }),
   );
 
-  const matchCount = decoded
-    ? decoded.filter((d) => d.match === true).length
-    : 0;
-  const mismatchCount = decoded
-    ? decoded.filter((d) => d.match === false).length
-    : 0;
+  // GA link rows (server-side section: 'Group Addresses' - see
+  // docs/knx-device-write-protocol.md Part 7 in the koolenex repo) are
+  // folded into the same `decoded` array as named parameters, but they're a
+  // different kind of thing (a communication object's linked GA(s), not a
+  // byte-mapped parameter value) - the top summary badges below scope
+  // "params matched"/"differ" to exclude them and show their own separate
+  // count, so the wording stays accurate and a GA mismatch can't hide
+  // silently inside a "params matched" number that doesn't actually mention
+  // GAs at all.
+  const gaDecoded = decoded
+    ? decoded.filter((d) => d.section === 'Group Addresses')
+    : [];
+  const paramDecoded = decoded
+    ? decoded.filter((d) => d.section !== 'Group Addresses')
+    : [];
+  const matchCount = paramDecoded.filter((d) => d.match === true).length;
+  const mismatchCount = paramDecoded.filter((d) => d.match === false).length;
+  const gaMatchCount = gaDecoded.filter((d) => d.match === true).length;
+  const gaMismatchCount = gaDecoded.filter((d) => d.match === false).length;
   // How many of those mismatches the current filters (search / only-named)
   // are hiding from the table below - the summary badges below count every
   // decoded parameter, not just the filtered/visible ones, so this makes
   // that gap visible instead of leaving "4 differ" looking wrong next to a
-  // 3-row table.
-  const shownMismatchCount = filtered.filter((d) => d.match === false).length;
+  // 3-row table. Scoped to exclude GA rows, matching `mismatchCount` above -
+  // otherwise a visible differing GA row would count here but not in the
+  // base it's being subtracted from, going negative.
+  const shownMismatchCount = filtered.filter(
+    (d) => d.match === false && d.section !== 'Group Addresses',
+  ).length;
   const hiddenMismatchCount = mismatchCount - shownMismatchCount;
 
   const jumpTo = (name: string) => {
@@ -253,34 +288,51 @@ export function DeviceCompareResults({
                   prominent thing shown. The raw-memory chip's color is
                   muted to --dim for the same reason - amber/green there
                   reads as "this matters" when usually it doesn't. */}
+              {/* Params and GA links share one page with no real filter
+                  distinction between them - clicking "match"/"differ" already
+                  shows both kinds together via `filtered`'s scope-blind
+                  `d.match` check, so keeping them as two separate badge
+                  groups was pure redundancy once both report the same thing
+                  (all matched, or one has nothing to report). One combined
+                  group instead, composing whichever of params/GAs actually
+                  has a nonzero count into each label via `composeCount` -
+                  covers "all clean", "only params differ", "only GAs
+                  differ", and "both differ" without a separate branch per
+                  case. `hiddenMismatchCount` (unnamed params hidden by "Only
+                  named parameters") stays params-only in its own callout,
+                  since that filter never hides GA rows (their label is
+                  always the com object's name, never equal to their key). */}
               {decoded && (
                 <div className={styles.summaryGroup}>
-                  <button
-                    type="button"
-                    className={`${styles.filterChipBtn} ${rowFilter === 'match' ? styles.filterChipBtnActive : ''}`}
-                    style={{ '--chip-ring': 'var(--green)' } as React.CSSProperties}
-                    onClick={() =>
-                      setRowFilter(rowFilter === 'match' ? 'all' : 'match')
-                    }
-                    title={
-                      (rowFilter === 'match'
-                        ? 'Showing only matching parameters — click to show all. '
-                        : 'Show only matching parameters. ') +
-                      'Named, project-configurable parameters only - a smaller, more ' +
-                      'precise scope than the raw byte count to the right, which also ' +
-                      'includes unmapped/padding bytes.'
-                    }
-                  >
-                    <Badge
-                      label={
-                        mismatchCount === 0
-                          ? `All ${matchCount} params matched`
-                          : `${matchCount} match`
+                  {(matchCount > 0 || gaMatchCount > 0) && (
+                    <button
+                      type="button"
+                      className={`${styles.filterChipBtn} ${rowFilter === 'match' ? styles.filterChipBtnActive : ''}`}
+                      style={{ '--chip-ring': 'var(--green)' } as React.CSSProperties}
+                      onClick={() =>
+                        setRowFilter(rowFilter === 'match' ? 'all' : 'match')
                       }
-                      color="var(--green)"
-                    />
-                  </button>
-                  {mismatchCount > 0 && (
+                      title={
+                        (rowFilter === 'match'
+                          ? 'Showing only matching rows — click to show all. '
+                          : 'Show only matching rows. ') +
+                        'Named, project-configurable parameters' +
+                        (gaDecoded.length ? ' and group-address links' : '') +
+                        ' only - a smaller, more precise scope than the raw byte count ' +
+                        'to the right, which also includes unmapped/padding bytes.'
+                      }
+                    >
+                      <Badge
+                        label={
+                          mismatchCount === 0 && gaMismatchCount === 0
+                            ? `All ${composeCount(matchCount, gaMatchCount, 'param', 'GA')} matched`
+                            : `${composeCount(matchCount, gaMatchCount, 'param', 'GA')} match`
+                        }
+                        color="var(--green)"
+                      />
+                    </button>
+                  )}
+                  {(mismatchCount > 0 || gaMismatchCount > 0) && (
                     <button
                       type="button"
                       className={`${styles.filterChipBtn} ${rowFilter === 'differ' ? styles.filterChipBtnActive : ''}`}
@@ -293,37 +345,37 @@ export function DeviceCompareResults({
                       }}
                       title={
                         rowFilter === 'differ'
-                          ? 'Showing only differing parameters — click to show all'
+                          ? 'Showing only differing rows — click to show all'
                           : hiddenMismatchCount > 0
-                            ? `Show only differing parameters (including ${hiddenMismatchCount} unnamed one${hiddenMismatchCount === 1 ? '' : 's'} normally hidden by "Only named parameters")`
-                            : 'Show only differing parameters'
+                            ? `Show only differing rows (including ${hiddenMismatchCount} unnamed param${hiddenMismatchCount === 1 ? '' : 's'} normally hidden by "Only named parameters")`
+                            : 'Show only differing rows'
                       }
                     >
                       <Badge
                         label={
-                          hiddenMismatchCount > 0
-                            ? `${mismatchCount} differ (${hiddenMismatchCount} hidden)`
-                            : `${mismatchCount} differ`
+                          `${composeCount(mismatchCount, gaMismatchCount, 'param', 'GA')} differ` +
+                          (hiddenMismatchCount > 0 ? ` (${hiddenMismatchCount} hidden)` : '')
                         }
                         color="var(--red)"
                       />
                     </button>
                   )}
-                  {/* Redundant once the badge itself says "All N params
+                  {/* Redundant once the match badge itself says "All N
                       matched" - the label's whole job was disambiguating
-                      "params" vs "raw memory" scope, which the wording
-                      change above already does inline. Only shown when
+                      "params (+ GAs)" vs "raw memory" scope, which the
+                      wording above already does inline. Only shown when
                       there's an actual match/differ split to clarify. */}
-                  {mismatchCount > 0 && (
+                  {(mismatchCount > 0 || gaMismatchCount > 0) && (
                     <span
                       className={styles.summaryGroupLabel}
                       title={
-                        'Only bytes ETS maps to a named, project-configurable parameter - excludes ' +
-                        'padding/reserved bytes, so this is usually a much smaller, more precise ' +
-                        'count than the raw memory total to the right.'
+                        'Only bytes ETS maps to a named, project-configurable parameter, plus each ' +
+                        "communication object's expected-vs-actual GA link - excludes padding/reserved " +
+                        'bytes, so this is usually a much smaller, more precise count than the raw ' +
+                        'memory total to the right.'
                       }
                     >
-                      named parameters
+                      {gaDecoded.length ? 'named parameters / GAs' : 'named parameters'}
                     </span>
                   )}
                 </div>
@@ -439,15 +491,29 @@ export function DeviceCompareResults({
               <Empty msg="No parameters match the current filter." />
             ) : (
               Array.from(bySection.entries()).map(([section, rows]) => {
-                const hue = hueForSection(section);
+                // Group Addresses gets a fixed hue (not the usual name-hash)
+                // plus a distinct .sectionBlockGA/.sectionTitleGA treatment
+                // (stronger border/background) - a hash-derived tint alone
+                // wouldn't reliably read as "different kind of thing" from a
+                // params section, since two hashed hues can land close
+                // together by chance. GA rows are a different domain (a
+                // communication object's linked address, not a byte-mapped
+                // parameter value - see docs/knx-device-write-protocol.md
+                // Part 7 in the koolenex repo), so this section should
+                // always look deliberately distinct, not just "differently
+                // colored today".
+                const isGA = section === 'Group Addresses';
+                const hue = isGA ? 205 : hueForSection(section);
                 return (
                   <div
                     key={section}
                     id={sectionId(section)}
-                    className={styles.sectionBlock}
+                    className={`${styles.sectionBlock} ${isGA ? styles.sectionBlockGA : ''}`}
                     style={{ '--section-hue': hue } as React.CSSProperties}
                   >
-                    <div className={styles.sectionTitle}>
+                    <div
+                      className={`${styles.sectionTitle} ${isGA ? styles.sectionTitleGA : ''}`}
+                    >
                       {section}
                       <span className={styles.sectionCount}>{rows.length}</span>
                     </div>

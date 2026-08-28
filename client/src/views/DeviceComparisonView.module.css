@@ -268,6 +268,24 @@
   padding: 1px 7px;
 }
 
+/* Group Addresses section - deliberately stronger than the usual per-section
+   hash tint (still using --section-hue, but a fixed one set at the call
+   site - see DeviceCompareResults.tsx) so this section reads as a clearly
+   different kind of thing from a params section on sight, not just
+   "happens to be a different color today". Thicker/more saturated border,
+   a left accent bar, and a stronger title background - same hue variable,
+   just turned up. */
+.sectionBlockGA {
+  border: 2px solid hsl(var(--section-hue) 70% 60% / 0.6);
+  border-left-width: 4px;
+  background: hsl(var(--section-hue) 60% 50% / 0.1);
+}
+.sectionTitleGA {
+  background: hsl(var(--section-hue) 65% 50% / 0.32);
+  color: hsl(var(--section-hue) 75% 85%);
+  font-weight: 600;
+}
+
 .table {
   width: 100%;
   table-layout: fixed;

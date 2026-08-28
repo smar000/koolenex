@@ -1295,4 +1295,63 @@ describe('POST /bus/verify-device — GA/Association table fallback for an app t
     assert.equal((byCO.get('co-12-ga') as any).match, false);
     assert.equal((byCO.get('co-48-ga') as any).match, false);
   });
+
+  // Regression test for a real bug found on real hardware (2026-08-29):
+  // sizing the actual-bytes read off the PROJECT's currently-computed
+  // "expected" buffer, rather than the device's own real on-device table
+  // size - if the project's GA/Association tables happen to be SMALLER
+  // than what's genuinely on the device (e.g. a GA link was just removed
+  // in the project, or the device was programmed with more entries than
+  // the project currently declares), the read silently truncates and
+  // decodes the device's real, larger table as if the entries past the
+  // truncation point don't exist - reporting them as missing/null instead
+  // of what's really there.
+  it('reads the device\'s real table size, not the project\'s currently-smaller expected size', async () => {
+    mockBus.connected = true;
+    // Project currently only expects object 0's link (as if object 12's
+    // and 48's GA links were just removed, matching what actually happened
+    // live) - a SHORTER table than what's really on the device.
+    ts.db.run(
+      `UPDATE com_objects SET ga_address='' WHERE device_id=(SELECT id FROM devices WHERE project_id=? AND individual_address=?) AND object_number IN (12,48)`,
+      [projectId, deviceAddr],
+    );
+    // Device's real bytes are unchanged - still the FULL table (all three
+    // objects' links), exactly as if it was programmed before the project
+    // edit and never re-downloaded since.
+    seedPropAndMem(gaTable, assocTable);
+    const r = await req(ts.baseUrl, 'POST', '/bus/verify-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    mockBus.propImage = null;
+    mockBus.memImage = null;
+    // Restore for any later test in this file that might reuse this device.
+    ts.db.run(
+      `UPDATE com_objects SET ga_address='2/1/3 2/1/2' WHERE device_id=(SELECT id FROM devices WHERE project_id=? AND individual_address=?) AND object_number=12`,
+      [projectId, deviceAddr],
+    );
+    ts.db.run(
+      `UPDATE com_objects SET ga_address='0/0/1 0/0/2' WHERE device_id=(SELECT id FROM devices WHERE project_id=? AND individual_address=?) AND object_number=48`,
+      [projectId, deviceAddr],
+    );
+    assert.equal(r.status, 200);
+    const body = r.data as any;
+    const gaRows = (body.decoded ?? []).filter(
+      (d: any) => d.section === 'Group Addresses',
+    );
+    const byCO = new Map(gaRows.map((r: any) => [r.key, r]));
+    // Object 0 still matches (project and device agree).
+    assert.equal((byCO.get('co-0-ga') as any).match, true);
+    // Objects 12/48 mismatch (project no longer expects a link) - but their
+    // REAL device values must still be correctly recovered, not silently
+    // dropped to null by a truncated read.
+    const co12 = byCO.get('co-12-ga') as any;
+    assert.equal(co12.expectedValue, '(none)');
+    assert.equal(co12.actualValue, '2/1/2 2/1/3');
+    assert.equal(co12.match, false);
+    const co48 = byCO.get('co-48-ga') as any;
+    assert.equal(co48.expectedValue, '(none)');
+    assert.equal(co48.actualValue, '0/0/1 0/0/2');
+    assert.equal(co48.match, false);
+  });
 });

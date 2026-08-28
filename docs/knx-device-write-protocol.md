@@ -493,6 +493,27 @@ channel label doesn't exactly match any com object's `channel` string shows noth
 conceptually related. Not an issue for the one real app
 tested here, but worth remembering if a future app's channel naming is less consistent.
 
+**A second, real bug found immediately after, testing the differ badge on real hardware**
+(koolenex commit `3bd9ca0`): the actual-bytes read for a GA/Association table region was sized
+off the *project's* currently-computed `expected` buffer length, not the *device's* own real
+on-device table size. Those normally agree, but not always - removing a GA link in the project
+(without a re-download) shrinks the project's computed table while the device's real one stays
+the same, larger size; the read then truncated to the smaller size, and the decoders correctly
+stopped at that truncation point per their own bounds checks, silently reporting real entries
+past it as missing (`actualValue: null`) rather than as a genuine byte-level mismatch. 🟢
+**CONFIRMED on real hardware**: reproduced by temporarily removing one com object's GA link
+project-side only (no device write) - a completely unrelated, still-correctly-linked com object
+came back `actualValue: null` even though its real device value was untouched and correct.
+Fixed with a two-pass read (real 2-byte count field first, then the real full length it implies,
+capped defensively at 2000 bytes) rather than trusting the project's assumed size. Reconfirmed
+correct on real hardware after the fix, same reproduction steps.
+
+**UI refinement, same session**: the two separate "params matched"/"GAs matched" badges were
+combined into one (`All N params / M GAs matched`, or composing whichever side has a nonzero
+count when something differs) - per the user's observation that the page shows both scopes
+together with no real filtering distinction between them, so two badges was pure redundancy
+once neither had anything to report. Commit `6f0bff0`.
+
 ## Sources
 
 - `docs/data/captures/2026-08-28-ets-1-full-download-1.1.9.pcapng` — primary source for Part 1.1

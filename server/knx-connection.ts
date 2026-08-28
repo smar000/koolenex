@@ -1044,6 +1044,95 @@ export class KnxConnection extends EventEmitter {
         }
       }
 
+      // Real ETS also writes the GA table (objIdx 1) and Association table
+      // (objIdx 2) during a Full Download, via the exact same Unload/
+      // StartLoading/LoadData/write/LoadCompleted RelSegment mechanism used
+      // above for the parameter object - confirmed directly in
+      // docs/knx-device-write-protocol.md's capture decode. Neither real
+      // app model this project has tested DECLARES this itself for objIdx
+      // 1/2 the way real ETS actually behaves: 1.1.9's app
+      // (M-0004_A-0025-10-1BA6-O00A6) has no step at all for these objects
+      // in its own Static/LoadProcedures XML; 1.1.10's app
+      // (M-0004_A-3030-23-F0EA-O000A) declares `LoadImageProp` instead (a
+      // different mechanism, honored by the switch above). Root-caused
+      // 2026-08-29: real ETS's GA/Association table loading is apparently a
+      // universal, mask-defined procedure, not something every app needs to
+      // (or, for 1.1.9's app, does) declare - koolenex previously had no
+      // fallback for the "doesn't declare it" case at all, meaning it never
+      // wrote either table for that app, ever. Only synthesize this when
+      // the model hasn't already handled the object some other way
+      // (WriteRelMem or LoadImageProp above), and only when the caller
+      // actually supplied a table - never blind-writes an absent one.
+      //
+      // No real Partial Download example exists for these two objects (see
+      // the reference doc's §2.3/§1.2 caveats) - `mode=Full` (combined
+      // `true`) is used unconditionally here since every real example of an
+      // actual GA/Association table write observed is a Full Download; not
+      // proven for what a real Partial variant would look like.
+      const declaredTableObjIdxs = new Set(
+        steps
+          .filter((s) => s.type === 'WriteRelMem' || s.type === 'LoadImageProp')
+          .map((s) => s.objIdx),
+      );
+      const writeUndeclaredTable = async (
+        objIdx: number,
+        table: Buffer,
+        label: string,
+      ): Promise<void> => {
+        log(`Unload ObjIdx=${objIdx} (${label})`);
+        await lsmWrite(objIdx, LSM_EVENT.UNLOAD);
+        log(`StartLoading ObjIdx=${objIdx} (${label})`);
+        await lsmWrite(objIdx, LSM_EVENT.START_LOADING);
+        log(`LoadData ObjIdx=${objIdx} Size=${table.length} (${label})`);
+        await lsmWrite(
+          objIdx,
+          LSM_EVENT.LOAD_DATA,
+          // fill=0, mode=Full - matches every real GA/Association table
+          // LoadData observed (see docs/knx-device-write-protocol.md §2.3).
+          loadDataExtra(table.length, 0, true),
+        );
+        anyRelSegmentLoaded = true;
+        const baseBuf = await propRead(objIdx, 7);
+        const base = baseBuf && baseBuf.length >= 4 ? baseBuf.readUInt32BE(0) : 0;
+        if (!base) {
+          log(
+            `ObjIdx=${objIdx} (${label}): PID_TABLE_REFERENCE unallocated - skipping write`,
+          );
+          return;
+        }
+        for (let off = 0; off < table.length; off += MEM_CHUNK) {
+          const chunk = table.subarray(off, off + MEM_CHUNK);
+          const seq = nextSeq();
+          const addr = base + off;
+          // Same mask-version gate as the WriteRelMem case above (§3 of the
+          // reference doc) - extended unconditionally for a confirmed
+          // System B device, falling back to the address-size heuristic
+          // otherwise.
+          const useExtendedForThisChunk = useExtendedMemory ?? addr > 0xffff;
+          const apdu = useExtendedForThisChunk
+            ? apduMemoryExtendedWrite(seq, addr, chunk)
+            : apduConnected(
+                seq,
+                'Memory_Write',
+                Buffer.concat([
+                  Buffer.from([chunk.length, (addr >> 8) & 0xff, addr & 0xff]),
+                  chunk,
+                ]),
+              );
+          const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+          await this.sendCEMI(cemi);
+          await delay(30);
+        }
+        log(`LoadCompleted ObjIdx=${objIdx} (${label})`);
+        await lsmWrite(objIdx, LSM_EVENT.LOAD_COMPLETED);
+      };
+      if (gaTable && gaTable.length && !declaredTableObjIdxs.has(1)) {
+        await writeUndeclaredTable(1, gaTable, 'GA table');
+      }
+      if (assocTable && assocTable.length && !declaredTableObjIdxs.has(2)) {
+        await writeUndeclaredTable(2, assocTable, 'Association table');
+      }
+
       // Real ETS ends a RelSegment-driven download with a device Restart
       // once every loaded object has been marked LoadCompleted - without it
       // a freshly-loaded segment isn't confirmed to actually apply

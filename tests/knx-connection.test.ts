@@ -461,14 +461,19 @@ describe('KnxConnection.downloadDevice', () => {
     assert.ok(progress.includes('Download complete'));
   });
 
-  it('processes LoadImageProp steps with gaTable', async () => {
+  it('LoadImageProp on objIdx 1/2/3 only reads, never writes (real ETS never writes these)', async () => {
+    // Confirmed 2026-08-29 against 3 independent real downloads of 1.1.10:
+    // ETS only ever reads objIdx 1/2/3's declared LoadImageProp property,
+    // identical value before/after - it does not write image/table bytes
+    // there. gaTable is supplied here specifically to prove it's NOT what
+    // gets sent, unlike the old (buggy) behavior this replaces.
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
 
     const gaTable = Buffer.from([0x02, 0x08, 0x00, 0x08, 0x01]);
     const steps: DownloadStep[] = [
-      { type: 'LoadImageProp', objIdx: 1, propId: 56 },
+      { type: 'LoadImageProp', objIdx: 1, propId: 27 },
     ];
     const progress: string[] = [];
 
@@ -476,7 +481,138 @@ describe('KnxConnection.downloadDevice', () => {
       progress.push(p.msg),
     );
 
-    assert.ok(progress.some((m) => m.includes('LoadImageProp')));
+    assert.ok(progress.some((m) => m.includes('LoadImageProp') && m.includes('read-only')));
+    // No PropertyValue_Write APDU (APCI_EXT 0x3D7) should have been sent -
+    // every frame here must be a read (0x3D5) or unrelated management traffic.
+    const propWrites = conn.sent.filter((cemi) => {
+      const parsed = parseCEMI(cemi);
+      return (
+        parsed?.apciName === 'OTHER' &&
+        parsed.apdu.length >= 2 &&
+        (parsed.apdu.readUInt16BE(0) & 0x3ff) === 0x03d7
+      );
+    });
+    assert.equal(propWrites.length, 0, 'must not write PropertyValue for objIdx 1/2/3');
+  });
+
+  it('LoadImageProp on objIdx 4 reads the current array value and writes both elements back with trailing bytes zeroed', async () => {
+    // Real behavior confirmed 2026-08-29: ETS reads objIdx4's 2-element
+    // array (8 bytes/element) in one N=2 read, then writes each element
+    // back separately (element 1 with no explicit index, element 2 with
+    // startIndex=2), each with its own trailing 2 bytes zeroed - the
+    // device recomputes a real checksum there on the next read. The
+    // leading 6 bytes of each element must be preserved from what was
+    // read, not fabricated.
+    // Auto-responds to every outgoing management frame by decoding its real
+    // full 10-bit APCI (all of Authorize_Request/PropertyValue_Read/
+    // PropertyValue_Write share apciName 'OTHER', so a send-count/order
+    // heuristic is too fragile - e.g. an unrelated DeviceDescriptor_Read or
+    // Authorize_Request ahead of our step in the real preamble would
+    // silently consume a response meant for the property read).
+    const realArrayValue = Buffer.from('000028c000330a1a000000010133dcbd', 'hex');
+    class AutoRespondConnection extends TestKnxConnection {
+      override async sendCEMI(cemi: Buffer): Promise<void> {
+        await super.sendCEMI(cemi);
+        const parsed = parseCEMI(cemi);
+        if (!parsed || parsed.apdu.length < 2) return;
+        const fullApci = parsed.apdu.readUInt16BE(0) & 0x3ff;
+        setTimeout(() => {
+          if (fullApci === 0x03d1) {
+            // Authorize_Request -> Authorize_Response, access level 0
+            this.simulateMgmtFrame({
+              msgCode: 0x29,
+              src: '1.1.2',
+              dst: '1.0.1',
+              isGroup: false,
+              apciIdx: 15,
+              apciName: 'OTHER',
+              apduData: Buffer.from([0x00]),
+              apdu: Buffer.alloc(4),
+              tpciType: 'DATA_CONNECTED',
+            });
+          } else if (fullApci === 0x03d5) {
+            // PropertyValue_Read -> our known real objIdx4/P27 array value
+            const meta = parsed.apduData.subarray(0, 4);
+            this.simulateMgmtFrame({
+              msgCode: 0x29,
+              src: '1.1.2',
+              dst: '1.0.1',
+              isGroup: false,
+              apciIdx: 15,
+              apciName: 'OTHER',
+              apduData: Buffer.concat([meta, realArrayValue]),
+              apdu: Buffer.alloc(4),
+              tpciType: 'DATA_CONNECTED',
+            });
+          } else if (fullApci === 0x03d7) {
+            // PropertyValue_Write -> echo back (content unused by propWrite)
+            this.simulateMgmtFrame({
+              msgCode: 0x29,
+              src: '1.1.2',
+              dst: '1.0.1',
+              isGroup: false,
+              apciIdx: 15,
+              apciName: 'OTHER',
+              apduData: parsed.apduData,
+              apdu: Buffer.alloc(4),
+              tpciType: 'DATA_CONNECTED',
+            });
+          } else if (parsed.apciName === 'DeviceDescriptor_Read') {
+            this.simulateMgmtFrame({
+              msgCode: 0x29,
+              src: '1.1.2',
+              dst: '1.0.1',
+              isGroup: false,
+              apciIdx: 13,
+              apciName: 'DeviceDescriptor_Response',
+              apduData: Buffer.from([0x07, 0xb0]),
+              apdu: Buffer.alloc(4),
+              tpciType: 'DATA_CONNECTED',
+            });
+          }
+        }, 2);
+      }
+    }
+
+    const conn = new AutoRespondConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const steps: DownloadStep[] = [
+      { type: 'LoadImageProp', objIdx: 4, propId: 27 },
+    ];
+    const progress: string[] = [];
+
+    await conn.downloadDevice('1.1.2', steps, null, null, null, (p) =>
+      progress.push(p.msg),
+    );
+
+    const propFrames = conn.sent
+      .map((cemi) => parseCEMI(cemi))
+      .filter(
+        (p): p is NonNullable<typeof p> =>
+          !!p && p.apdu.length >= 2 && (p.apdu.readUInt16BE(0) & 0x3ff) === 0x03d7,
+      );
+
+    assert.equal(propFrames.length, 2, 'expected exactly 2 PropertyValue_Write APDUs');
+
+    // apduData = [objIdx, propId, countIndexHi, countIndexLo, ...payload]
+    const meta1 = propFrames[0]!.apduData.subarray(0, 4);
+    const elem1 = propFrames[0]!.apduData.subarray(4);
+    const meta2 = propFrames[1]!.apduData.subarray(0, 4);
+    const elem2 = propFrames[1]!.apduData.subarray(4);
+    assert.equal(elem1.subarray(0, 6).toString('hex'), '000028c00033');
+    assert.equal(elem1.subarray(6, 8).toString('hex'), '0000');
+    assert.equal(elem2.subarray(0, 6).toString('hex'), '000000010133');
+    assert.equal(elem2.subarray(6, 8).toString('hex'), '0000');
+
+    // First write must address element 1, second element 2 (startIndex=2).
+    const startIndex1 = ((meta1[2]! & 0x0f) << 8) | meta1[3]!;
+    const startIndex2 = ((meta2[2]! & 0x0f) << 8) | meta2[3]!;
+    assert.equal(startIndex1, 1);
+    assert.equal(startIndex2, 2);
+
+    assert.ok(progress.some((m) => m.includes('LoadImageProp') && m.includes('checksum')));
   });
 
   it('processes WriteRelMem steps with chunking', async () => {

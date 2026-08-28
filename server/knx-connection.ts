@@ -737,9 +737,10 @@ export class KnxConnection extends EventEmitter {
         objIdx: number,
         propId: number,
         data: Buffer,
+        startIndex = 1,
       ): Promise<void> => {
         const seq = nextSeq();
-        const apdu = apduPropertyValueWrite(seq, objIdx, propId, data);
+        const apdu = apduPropertyValueWrite(seq, objIdx, propId, data, 1, startIndex);
         const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
         const respP = waitResponse('OTHER', 3000);
         await this.sendCEMI(cemi);
@@ -754,9 +755,11 @@ export class KnxConnection extends EventEmitter {
       const propRead = async (
         objIdx: number,
         propId: number,
+        count = 1,
+        startIndex = 1,
       ): Promise<Buffer | null> => {
         const seq = nextSeq();
-        const apdu = apduPropertyValueRead(seq, objIdx, propId);
+        const apdu = apduPropertyValueRead(seq, objIdx, propId, count, startIndex);
         const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
         const respP = waitResponse('OTHER', 3000);
         await this.sendCEMI(cemi);
@@ -1031,14 +1034,52 @@ export class KnxConnection extends EventEmitter {
             break;
           }
           case 'LoadImageProp': {
-            log(`LoadImageProp ObjIdx=${step.objIdx} PropId=${step.propId}`);
-            const imgData =
-              step.objIdx === 1 && gaTable
-                ? gaTable
-                : step.objIdx === 2 && assocTable
-                  ? assocTable
-                  : Buffer.from([0x04]);
-            await propWrite(step.objIdx, step.propId, imgData);
+            // Real ETS behavior here is NOT "write the image to this
+            // property" despite the step name - confirmed 2026-08-29 across
+            // 3 independent real downloads (Full + 2 Partials) against
+            // 1.1.10's app (M-0004_A-3030-23-F0EA-O000A), the only app this
+            // project has seen declare LoadImageProp at all:
+            //   - objIdx 1/2/3: ETS only ever READS this property (identical
+            //     value before/after the load cycle) - never writes it. The
+            //     previous code here blindly WROTE the GA table to objIdx1,
+            //     the Association table to objIdx2, and a stray 0x04 byte to
+            //     objIdx3 - none of which real ETS ever does. That was a
+            //     real, unverified bug; fixed by not writing at all for
+            //     these objects.
+            //   - objIdx 4 only: this property IS written, but not with
+            //     image/table bytes - real ETS reads the current 2-element
+            //     array value (an 8-byte-per-element device-computed
+            //     checksum/version marker: elem1 unchanged across all 3
+            //     downloads, elem2's trailing 2 bytes verified changing with
+            //     actual parameter content and self-healing back to the
+            //     original value once the content reverted), then writes
+            //     each element back with its own trailing 2 bytes zeroed -
+            //     apparently a "recompute" trigger, with the device filling
+            //     in the real checksum on the next read. The leading 6
+            //     bytes of each element are preserved from the read rather
+            //     than fabricated, since they're not table data this
+            //     executor has any other source for.
+            if (step.objIdx !== 4) {
+              log(
+                `LoadImageProp ObjIdx=${step.objIdx} PropId=${step.propId} - read-only per real ETS, not writing`,
+              );
+              await propRead(step.objIdx, step.propId);
+              break;
+            }
+            log(`LoadImageProp ObjIdx=4 PropId=${step.propId} (checksum recompute trigger)`);
+            const current = await propRead(step.objIdx, step.propId, 2, 1);
+            if (!current || current.length < 16) {
+              log(
+                `Could not read current PropId=${step.propId} array value for ObjIdx=4 - skipping (no safe fallback content)`,
+              );
+              break;
+            }
+            const elem1 = Buffer.from(current.subarray(0, 8));
+            const elem2 = Buffer.from(current.subarray(8, 16));
+            elem1.writeUInt16BE(0, 6);
+            elem2.writeUInt16BE(0, 6);
+            await propWrite(step.objIdx, step.propId, elem1, 1);
+            await propWrite(step.objIdx, step.propId, elem2, 2);
             break;
           }
         }

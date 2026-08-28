@@ -141,13 +141,27 @@ export function apduConnectedFull(
   return extraBuf ? Buffer.concat([header, extraBuf]) : header;
 }
 
+// count/startIndex default to 1/1 - the overwhelming majority of property
+// accesses in this codebase are single-element, non-array properties. A few
+// real properties are array-style (e.g. PID 27 on objIdx4 for some apps,
+// confirmed 2026-08-29 against real 1.1.10 captures: ETS reads it as one
+// N=2 read from index 1, then writes each of the 2 elements separately -
+// element 1 with no explicit index, element 2 with startIndex=2) and need
+// the caller to pass both explicitly.
 export function apduPropertyValueWrite(
   seq: number,
   objIdx: number,
   propId: number,
   data: Buffer,
+  count = 1,
+  startIndex = 1,
 ): Buffer {
-  const meta = Buffer.from([objIdx & 0xff, propId & 0xff, 0x10, 0x01]);
+  const meta = Buffer.from([
+    objIdx & 0xff,
+    propId & 0xff,
+    ((count & 0x0f) << 4) | ((startIndex >> 8) & 0x0f),
+    startIndex & 0xff,
+  ]);
   return apduConnectedFull(
     seq,
     APCI_EXT.PropertyValue_Write,
@@ -159,8 +173,15 @@ export function apduPropertyValueRead(
   seq: number,
   objIdx: number,
   propId: number,
+  count = 1,
+  startIndex = 1,
 ): Buffer {
-  const meta = Buffer.from([objIdx & 0xff, propId & 0xff, 0x10, 0x01]);
+  const meta = Buffer.from([
+    objIdx & 0xff,
+    propId & 0xff,
+    ((count & 0x0f) << 4) | ((startIndex >> 8) & 0x0f),
+    startIndex & 0xff,
+  ]);
   return apduConnectedFull(seq, APCI_EXT.PropertyValue_Read, meta);
 }
 

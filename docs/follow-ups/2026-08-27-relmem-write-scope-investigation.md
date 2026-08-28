@@ -102,7 +102,7 @@ accounted for** — named parameters, or one of these three table objects,
 resolved the same way parameters are. Nothing unexplained remains in
 either capture.
 
-## Finding 3 (speculative): GA/Association table wire format — NOT yet matched
+## Finding 3 (originally speculative, now confirmed on real non-degenerate data — see update below): GA/Association table wire format
 
 Koolenex already has `buildGATable()`/`buildAssocTable()`
 (`server/routes/knx-tables.ts`), but they were written for a *different*
@@ -140,6 +140,51 @@ It should not be treated as ground truth without at least one more real
 capture from a device with non-zero main/middle group numbers and more
 than 2 association entries, to separate "real format" from "coincidence
 that only showed up because the test data was simple."
+
+### Update 2026-08-28: confirmed on real, non-degenerate GAs
+
+Renumbered the real project's GAs to genuinely non-zero main/middle groups
+(`1/2/1`, `1/2/2` under a new "Lighting" function; `9/1/1`–`9/1/4` under a
+new "Astro" function) specifically to settle this, then repeated a real ETS
+Full Download to both 1.1.9 and 1.1.10 and re-captured via tshark (1.1.10's
+first attempt that day aborted right after `IndAddrSerNumRead`/
+`DevDescrRead`, before any memory writes — the analysis below is from its
+successful second attempt only). Fixtures:
+`tests/fixtures/relmem-real-devices/ga-assoc-wire-format-1.1.9.json` and
+`-1.1.10.json`, with an executable decode spec in
+`tests/relmem-real-device-fixtures.test.ts`.
+
+```
+1.1.9 GA table   (X=$004000): 00 02 49 01 49 04
+  -> count=2, GA1=0x4901=9/1/1, GA2=0x4904=9/1/4  (real: "9/1/1", "9/1/4" under 9/1 Astro)
+
+1.1.10 GA table  (X=$0F0000): 00 02 0A 01 0A 02
+  -> count=2, GA1=0x0A01=1/2/1, GA2=0x0A02=1/2/2  (real: "1/2/1 Ch1-SW", "1/2/2 Ch1-FB")
+
+1.1.9 assoc table   (X=$00470A): 00 02 00 01 00 05 00 02 00 08
+  -> count=2, [gaIndex=1,co=5], [gaIndex=2,co=8]
+
+1.1.10 assoc table  (X=$0C0000): 00 02 00 01 00 1F 00 02 00 20
+  -> count=2, [gaIndex=1,co=31], [gaIndex=2,co=32]
+```
+
+Both GA tables decode to exactly the real, renumbered project GAs — direct,
+unambiguous confirmation of `[count:2][GA:2]…`, the standard raw 16-bit
+main(5)/middle(3)/sub(8) encoding, no reordering. Both association tables
+are **byte-identical to the earlier degenerate-GA capture** (same device,
+same two GA-table slots, just renumbered) — which is itself confirming
+evidence, not a null result: it's exactly what `[gaIndex:2][coNumber:2]`
+per entry, 1-based, POSITION-referencing (not value-referencing) predicts,
+since the same two table slots are still filled either way.
+
+**Caveat — read before treating this as settled elsewhere:** this is still
+a small sample. Two devices, both from the same manufacturer (Albrecht
+Jung), both on the same testbed router, captured on the same day. It
+confirms the format for *these* devices/apps with real confidence, but
+it's real evidence from a narrow slice, not a guarantee every
+manufacturer's app uses the same table layout — treat as a strong working
+assumption elsewhere, not gospel, until/unless it's seen holding on a
+different supplier's device too.
 
 ## Resolution: this isn't an ETS optimization being missed — it's ETS's actual scope
 
@@ -270,15 +315,19 @@ inference):
   "Partial download" mechanism) or a live pre-read of the device (an
   earlier idea from this conversation) — just never writing outside the
   four known categories' byte ranges, every download, unconditionally.
+- The GA table and Association table wire formats (Finding 3) — confirmed
+  2026-08-28 on real, non-degenerate GAs (two devices, both Albrecht Jung —
+  see the caveat right after Finding 3's update: real confidence for these
+  devices/apps, not proof it generalizes to every manufacturer).
 
 **Still open / not confirmed**:
-- Whether the *specific offsets found so far* generalize beyond these two
-  apps/devices to the wider device population this project targets (the
-  four-category *boundary* itself is now settled; which exact bytes fall
-  inside it per app still needs checking per app, same as always).
-- The exact wire format for the GA table and Association table — the
-  numbers above are a first guess from one small example, explicitly not
-  verified (see Finding 3).
+- Whether the *specific offsets found so far* (both the named-parameter
+  offsets and the now-confirmed GA/Association table format) generalize
+  beyond these two apps/devices, both from one manufacturer, to the wider
+  device population this project targets (the four-category *boundary*
+  itself is settled from KNX Association's own docs, independent of
+  manufacturer; per-app/per-manufacturer specifics still need checking as
+  they come up, same as always).
 - What 1.1.9's objIdx 3 (98-byte write) actually is.
 - Implementing the write-path change (`buildParamMem` /
   `downloadDevice`'s `WriteRelMem` step, and any future GA/Assoc table
@@ -290,8 +339,10 @@ inference):
 
 ## Artifacts
 
-- Capture file: `full_download_test.pcapng` (local scratch capture
-  directory, not checked into this repo)
+- Capture files: `full_download_test.pcapng` (2026-08-27, original
+  investigation) and `ga_wire_format_test.pcapng` (2026-08-28, Finding 3's
+  confirmation) — both local scratch capture directory, not checked into
+  this repo.
 - `research/programming-implementation.md` — koolenex's original author's
   own status/plan doc, 2026-03-31, predates everything else referenced
   here by months. Source for the "Non-Default Cache" / "Mask Tracking" /
@@ -309,3 +360,7 @@ inference):
   data) captured from this investigation's findings:
   `tests/fixtures/relmem-real-devices/` and
   `tests/relmem-real-device-fixtures.test.ts`.
+- GA/Association table wire-format fixtures (Finding 3's 2026-08-28
+  confirmation): `tests/fixtures/relmem-real-devices/ga-assoc-wire-format-1.1.9.json`
+  and `-1.1.10.json`, with an executable decode spec in the same test file
+  above.

@@ -6,12 +6,22 @@ finding, below), (2) a Restart-before-LoadCompleted-confirmed race, (3) a missin
 (4) a missing `PID_PROGRAM_VERSION` read-back-and-write-back, (5) the `LoadData` "mode" byte meaning
 Full(`0x01`)/Partial(`0x00`) download, not "combined full+par declaration" as first guessed, and (6) — the
 final blocker, found via a verbatim real-frame replay that succeeded where koolenex's own reconstruction
-kept failing — `WriteRelMem` unconditionally must use `A_MemoryExtended_Write`, never legacy
-`A_Memory_Write`, regardless of whether the address fits in 16 bits. See "Fixes 2-6" and "Final resolution"
-below for the full story; the original Fix-1 writeup follows unchanged as the section that started it.
-This also un-retracts nothing about the 2026-08-26 "write path proven correct" finding for 1.1.10 — that
-finding is still unverified against these fixes and should not be cited until it is (see "Retroactive
-implication" below, still open).
+kept failing — `WriteRelMem` must use `A_MemoryExtended_Write` for a System B device (mask `0x07B0`),
+regardless of whether the address fits in 16 bits. See "Fixes 2-6" and "Final resolution" below for the
+full story; the original Fix-1 writeup follows unchanged as the section that started it. This also
+un-retracts nothing about the 2026-08-26 "write path proven correct" finding for 1.1.10 — that finding is
+still unverified against these fixes and should not be cited until it is (see "Retroactive implication"
+below, still open).
+
+**Correction (same day, commit `95805ff`)**: Fix 6 originally shipped as an unconditional "always use
+`A_MemoryExtended_Write`" rule, generalized from real-hardware evidence on exactly two devices (1.1.9,
+1.1.10). The user correctly challenged this generalization before it was trusted further - both devices
+turned out to share the same mask family (`0x07B0`, "System B" per this project's own bundled KNX Master
+Data), so "always extended" happened to be right for them specifically, not because it's universally true.
+`WriteRelMem` now reads the device's real mask version (`A_DeviceDescriptor_Read`, mirroring what real ETS
+itself does at the start of every download) and gates on it: extended unconditionally for a confirmed
+System B device, falling back to the original address-size heuristic otherwise. See "Fix 6, corrected"
+below for the full trawl and fix.
 
 ## Why this came up
 
@@ -187,16 +197,61 @@ git history of `test/relmem-real-device-fixtures`.
   RelSegment-gated download path; the legacy write is a **silent** no-op — no error, no rejected-write
   signal, nothing — which is exactly why every earlier fix (1 through 5) succeeded at the protocol level
   (correct Load State transitions, correct `PropValueResp ... $01` confirming "Loaded", correct `Restart`)
-  while the underlying byte write itself was quietly ignored the whole time. Removed the `addr > 0xFFFF`
-  conditional entirely — `WriteRelMem` now always uses `A_MemoryExtended_Write`.
+  while the underlying byte write itself was quietly ignored the whole time. Originally shipped (commit
+  `68c0394`) as an unconditional rule — removed the `addr > 0xFFFF` conditional entirely, `WriteRelMem`
+  always uses `A_MemoryExtended_Write` — see "Fix 6, corrected" below for why that generalization was
+  wrong and what replaced it.
+
+## Fix 6, corrected: gate on the device's real mask version, not a blanket rule
+
+The user pushed back on "always extended" immediately, correctly: it was generalized from real-hardware
+evidence on exactly two devices (1.1.9, 1.1.10), both tested only because they happened to be available on
+this testbed — not because they were chosen to represent device diversity. Asked directly: *"is it possible
+that the manufacturer device library has some config value that specifies this? Can you trawl through the
+ETS project file and make sure we have not missed anything."*
+
+**Trawled the project's own bundled KNX Master Data** (`data/knx_master_<projectId>.xml`, ETS's own
+standardized reference table, not manufacturer-specific config — every project bundles the same one).
+Its `<MaskVersion>` elements carry a `ManagementModel` attribute per mask-version family: `Bcu1` (masks
+`0010`-`0013`, `0900`-`091A`), `Bcu2` (`0020`-`0025`), `PropertyBased` (`0300`), `BimM112` (`0700`-`0705`,
+`1900`, `5705`), and — the one that matters here — **`SystemB`** for masks `07B0`/`17B0`/`27B0`/`57B0`
+(TP/PL/RF/IP medium variants of the same device generation). This is a real, standardized KNX
+classification bundled in every project, not a guess.
+
+**Checked both real tested devices' actual mask version** via a live `A_DeviceDescriptor_Read` against the
+real testbed:
+
+```
+1.1.9  → descriptor "07b0"
+1.1.10 → descriptor "07b0"
+```
+
+Both are `MV-07B0` = `ManagementModel="SystemB"`. This confirms "always extended" was correct for *these
+two devices specifically*, because they're both System B — not because it generalizes. A genuinely older
+BCU1/BCU2/System-7-family device (mask outside the `xxB0` pattern) has never been tested against this write
+path and could still require the legacy service; the blanket rule would have silently broken it the exact
+same way the original bug broke System B writes.
+
+**Fix** (commit `95805ff`): `WriteRelMem` now reads the device's real mask version via
+`A_DeviceDescriptor_Read` at the very start of any RelSegment-driven download session — mirroring what real
+ETS itself does (every capture this project has starts with a `DevDescrRead`, almost certainly for this
+exact reason) — and gates the memory-write service on it: `A_MemoryExtended_Write` unconditionally when the
+mask's low byte is `0xB0` (confirmed System B), falling back to the original conservative address-size
+heuristic (`addr > 0xFFFF` → extended, else legacy) when the mask is unread or doesn't match a recognized
+System B pattern, rather than assuming the blanket rule holds. Reconfirmed on real hardware afterward:
+1.1.9's NTP-source byte flipped `0x80`↔`0x00` correctly through this refined path across 3 more real
+downloads/reconnects.
 
 ## Final resolution: confirmed on real hardware
 
-After Fix 6, the NTP-server-source parameter at 1.1.9 (`0x5F53`) was flipped `0x80`→`0x00`→`0x80`→`0x00`
-across four separate real downloads/reconnects via koolenex's own (fixed) write path, each value
+After Fix 6 (corrected), the NTP-server-source parameter at 1.1.9 (`0x5F53`) was flipped
+`0x80`→`0x00`→`0x80`→`0x00`→`0x00`→`0x80` across seven separate real downloads/reconnects total (four
+against the original unconditional Fix 6, three more against the corrected mask-gated version), each value
 independently confirmed via a fresh `read-memory` call after a full disconnect/reconnect cycle. The write
-path genuinely works now, for this device/app at least (1.1.10, and the still-unidentified objIdx 3, and
-the GA/Association table format for objIdx 1/2, remain open — see below).
+path genuinely works now, for confirmed System B devices at least (a real legacy/non-System-B device has
+never been tested against this write path at all — see "What this does and doesn't settle" below — and
+1.1.10, the still-unidentified objIdx 3, and the GA/Association table format for objIdx 1/2, all remain
+open).
 
 ## Retroactive implication: the 2026-08-26 "write path proven correct" finding is now unsafe to rely on
 
@@ -223,10 +278,12 @@ fix for this gap.
   Partial Downloads.
 - `A_Authorize_Request` and `PID_PROGRAM_VERSION` write-back are both required parts of the real sequence,
   not optional.
-- `WriteRelMem` must always use `A_MemoryExtended_Write`, never the legacy service, regardless of address
-  size, at least for this device/app.
-- **The write path works**: confirmed reproducibly on real hardware (1.1.9), four separate real
-  downloads/reconnects, byte flipped both directions correctly each time.
+- `WriteRelMem` must use `A_MemoryExtended_Write` for a confirmed System B device (mask `0x07B0`,
+  identified via a live `A_DeviceDescriptor_Read` and this project's own bundled KNX Master Data's
+  `ManagementModel` classification), regardless of address size - gated on the real mask, not a blanket
+  rule (see "Fix 6, corrected" above).
+- **The write path works**: confirmed reproducibly on real hardware (1.1.9, a confirmed System B device),
+  seven separate real downloads/reconnects total, byte flipped both directions correctly every time.
 - A separate, unrelated byte-packing bug in `buildParamMem()`'s padding-bit fill (still not fixed - see
   below).
 
@@ -236,17 +293,19 @@ fix for this gap.
 - Whether 1.1.10 (and any other `RelSegment`-family device) needed all six fixes too, confirmed empirically
   rather than by analogy - not yet re-tested since these fixes landed. The 2026-08-26 "write path proven
   correct" finding for 1.1.10 specifically should still not be cited until it is (see "Retroactive
-  implication" below).
+  implication" below). (1.1.10 is also mask `0x07B0` per this session's live check, so it should take the
+  same System B code path once re-tested - not yet confirmed for the WriteRelMem path specifically.)
 - The GA/Association table (objIdx 1/2) wire format - still uses a guessed format, unfixed (per the
   2026-08-27/28 GA-wire-format work).
 - What objIdx 3 actually is (still just "possibly per-channel mapper config", unconfirmed, per the
   2026-08-27 doc).
-- Whether the fix generalizes: this was confirmed for exactly one app (`M-0004_A-0025-10-1BA6-O00A6`, the
-  IP router's additional-function app) on exactly one device. Whether *every* device always requires
-  extended writes, or whether some genuinely do use legacy writes for low addresses (making Fix 6's
-  "always extended" the wrong generalization rather than just the right fix for this device), is untested.
-  If a future device is confirmed to need real legacy writes, this will need revisiting into a per-device or
-  per-app flag rather than a blanket "always extended".
+- **A genuinely legacy (non-System-B) device has never been tested against this write path at all.** The
+  mask-gating fix's fallback branch (address-size heuristic for non-System-B/unrecognized masks) is
+  currently only protocol-level-tested (fake device, `tests/relmem-write-protocol.test.ts`), not confirmed
+  against real BCU1/BCU2/System-7 hardware - if/when a real device of that family becomes available for
+  testing, this is the next thing to verify. Don't assume the fallback is correct just because it's
+  conservative and mirrors the pre-08-28 behavior; it's never been proven against real hardware, only the
+  System B path has.
 - **Longer-term**: none of these fixes came from fixing the *model extraction* (how `model.loadProcedures`
   is built from real project XML during import) - they're all in the hand-written `downloadDevice()`
   executor. The original Fix-1 writeup's "two shapes to choose between" framing (fix the importer vs.

@@ -514,7 +514,7 @@ count when something differs) - per the user's observation that the page shows b
 together with no real filtering distinction between them, so two badges was pure redundancy
 once neither had anything to report. Commit `6f0bff0`.
 
-## Part 8 — 1.1.10 re-baselined, and `LoadImageProp`'s real semantics were wrong (RESOLVED 2026-08-29)
+## Part 8 — 1.1.10 re-baselined; `LoadImageProp` and `WriteProp` (property 27) both got fixed (RESOLVED 2026-08-29)
 
 Item 7 of Part 5's open questions flagged that 1.1.10 (the only app in this project declaring
 `LoadImageProp`, per Part 6) had never been re-tested against the six write-path fixes in Part 3
@@ -527,38 +527,123 @@ tables via the identical RelSegment Unload/StartLoading/LoadData/write/LoadCompl
 already established for 1.1.9 - independent real-hardware confirmation, still only two devices/
 one manufacturer.
 
-**New finding: `LoadImageProp`'s real semantics are not "write the image to this property"**,
-despite the step name (🟢 confirmed, 3 independent real downloads):
+### Where property 27 actually comes from - it's in the project file, not decided at download time
 
-- objIdx 1/2/3: ETS only ever **reads** this property (property 27) - byte-identical value
-  before and after the load cycle, every time. Never writes it.
-- objIdx 4 only: **is** written, but not with table/image bytes. ETS reads a 2-element,
-  8-byte-per-element array, then writes each element back *separately* (element 1 with no
-  explicit index, element 2 with an explicit `startIndex=2`), each with its own trailing 2 bytes
-  zeroed. The device recomputes and returns a real, content-dependent checksum there on the next
-  read - confirmed directly: the checksum tracked the actual parameter change end to end
-  (baseline `0a1a` → `7948` after the flag-true write → back to `0a1a` once the flag-false
-  download reverted the change).
+Before the two bugs below, it's worth being explicit about *why* only 1.1.10 is affected at all,
+since this isn't ETS deciding something dynamically per-device. Every device's app carries its
+own `LoadProcedures` list (parsed by `server/ets-app.ts` from the real `.knxproj`/`.knxprod` XML,
+already fully visible in `data/apps/*.json`) - a per-app, manufacturer-authored recipe of exactly
+what steps to run on download, in order. 1.1.9's app declares no `WriteProp`/`LoadImageProp` step
+for property 27 anywhere, so it never touches this property at all - that's not a gap in our
+model extraction, the real app XML simply doesn't ask for it. 1.1.10's app does, and its full
+declaration (in order) is:
+
+```
+RelSegment (mode: full)         — allocate space, Full Download
+RelSegment (mode: par)          — allocate space, Partial Download
+WriteProp  objIdx=4 propId=27   data: 000028c0003300000000   (literal, fixed bytes from the file)
+WriteProp  objIdx=4 propId=27   data: 00000001013300000000   (literal, fixed bytes from the file)
+WriteRelMem objIdx=4            — the real parameter settings
+LoadImageProp objIdx=1 propId=27
+LoadImageProp objIdx=2 propId=27
+LoadImageProp objIdx=3 propId=27
+LoadImageProp objIdx=4 propId=27
+```
+
+Checking `data/apps/*.json` across every app that declares a `WriteProp` for objIdx4/propId27
+(not just 1.1.10's - several different manufacturer IDs: `0004`, `0048`, `00C5`, `0233`) shows
+the same two-step, literal-fixed-data shape every time, just with different embedded values.
+**This is exported, manufacturer-authored data ETS ships with the project - not something a
+download-time algorithm computes.**
+
+### What property 27 actually is, in plain terms
+
+A KNX device management operation always addresses "object N, property M" - `objIdx` is a
+logical object inside the device's own internal object table, not a raw memory address.
+Property 27 happens to exist as an attribute on several of these objects here:
+
+| objIdx | What it is |
+|---|---|
+| 1 | Group Address table |
+| 2 | Association table |
+| 3 | Unidentified (98 bytes) - still an open question, see Part 5 item 2 |
+| 4 | The application/parameter memory object - the real device settings |
+
+So it isn't its own memory area - it's a per-object "content status/checksum" attribute that
+happens to be shared property ID 27 across object types 1-4. The real wire evidence (below)
+points to it being the device's own record of "what does my currently-loaded content look
+like/hash to", not anything ETS computes and hands over.
+
+### Bug 1: `LoadImageProp` was writing to a property real ETS only ever reads
+
+🟢 Confirmed, 3 independent real downloads: **all four** of objIdx 1/2/3/4's `LoadImageProp`
+step is read-only in real ETS - byte-identical value before and after the load cycle, every
+time, for every object including 4. It's a read-back/verify step, not a write, despite the step
+name.
 
 koolenex's pre-existing `LoadImageProp` handler (in place before this finding, never previously
-exercised against real hardware since 1.1.10 is the only app that declares this step) got this
-backwards: it blindly wrote for *every* declared object - GA-table bytes to objIdx1, Association-
-table bytes to objIdx2, a stray single `0x04` byte to objIdx3 - none of which real ETS ever does,
-and for objIdx4 it wrote a single fabricated `0x04` byte rather than the real 2-element,
-read-then-zero-trailer pattern.
+exercised against real hardware since 1.1.10 is the only app that declares this step at all) got
+this backwards - it blindly wrote for *every* declared object: GA-table bytes to objIdx1,
+Association-table bytes to objIdx2, a stray single `0x04` byte to objIdx3, none of which real
+ETS ever does. (An earlier version of this fix also added a fabricated write for objIdx4,
+reasoning from the wire capture alone before the app-model comparison below caught that this was
+also wrong - see "self-correction" below.)
 
-**Fixed** (koolenex, `test/relmem-real-device-fixtures` branch, commit `563dbe3`): objIdx 1/2/3
-are now read-only, matching real ETS; objIdx4 now reads the current array value and writes it
-back with only the trailing 2 bytes of each element zeroed, preserving the real leading content
-bytes rather than fabricating them (this executor has no independent source for what those bytes
-should be). `apduPropertyValueWrite`/`apduPropertyValueRead` (`server/knx-cemi.ts`) gained an
-optional `count`/`startIndex` pair so element 2 can be addressed explicitly - previously hardcoded
-to a single element at index 1. New coverage in `tests/knx-connection.test.ts`.
+**Fixed** (koolenex, `test/relmem-real-device-fixtures` branch, commit `563dbe3`, corrected same
+day): `LoadImageProp` is now read-only for all four objects, full stop. New coverage in
+`tests/knx-connection.test.ts`.
 
-**Still open**: only one app/device has ever declared `LoadImageProp` at all, so the objIdx4
-"array of 2, trailing-2-bytes-is-a-checksum" shape is confirmed for this one property/app
-combination, not proven as a general pattern for other array-style properties or other apps that
-might declare this step differently.
+### Bug 2: `WriteProp`'s declared data for property 27 is 2 bytes longer than what ETS actually sends
+
+The real functional write to objIdx4/property 27 doesn't come from `LoadImageProp` at all - it
+comes from the two `WriteProp` steps shown in the app declaration above, using literal fixed
+bytes straight from the project file. Comparing that literal data against the real wire capture
+byte-for-byte:
+
+```
+Project file (declared, 10 bytes):  00 00 28 c0 00 33 00 00 | 00 00
+Real wire (actually sent, 8 bytes): 00 00 28 c0 00 33 00 00
+```
+
+The first 8 bytes match exactly; the file's declared value always carries 2 extra trailing zero
+bytes real ETS never transmits. Checked against every app in `data/apps/*.json` that declares
+this step (multiple manufacturers) - every single one is exactly 10 bytes, always ending in the
+same 2-byte pad beyond a real 8-byte element. Not observed for any other property in that same
+data, so this is scoped specifically to property 27's declared format, not a general artifact of
+how `WriteProp`'s `InlineData` is parsed.
+
+koolenex's pre-existing `WriteProp` case (also untouched before this finding, also never
+exercised against real hardware for this specific property) sent the raw declared value
+unmodified - 2 bytes longer than what real ETS puts on the wire. Untested whether a real device
+would reject, truncate, or otherwise mishandle the extra bytes; fixed defensively rather than
+finding out live.
+
+**Fixed** (same commit): `WriteProp` now trims data to its first 8 bytes specifically when
+`propId === 27`, before sending. Every other property's `WriteProp` data passes through
+unmodified. New coverage in `tests/knx-connection.test.ts`.
+
+### Self-correction worth recording
+
+The first version of the `LoadImageProp` fix, reasoning from the wire capture in isolation,
+mis-attributed the two real objIdx4/property-27 writes to `LoadImageProp` itself and built a
+"read the current array, zero the trailing bytes, write it back" special case to reproduce them.
+Comparing directly against the app's own declared `LoadProcedures` order (only done afterward,
+prompted by a direct question about what the project file itself says) showed those two writes
+line up exactly with the separate, pre-existing `WriteProp` steps instead - `LoadImageProp` for
+objIdx4 contributes nothing but a read, same as objIdx 1/2/3. The corrected fix removes that
+special case entirely; a real functional write for objIdx4 already existed via `WriteProp`, once
+that step's own separate byte-length bug (above) was also fixed. Lesson: when a wire capture
+alone seems to explain a step's behavior, cross-check it against the actual declared step list
+before building special-case logic around it - the file itself is a more reliable source than
+inferring intent from timing.
+
+### Still open
+
+Only one app/device has ever declared either of these steps at all (1.1.10, mask `07b0`), so
+while the *shape* of the fix (property 27's read/write split, and the 10-vs-8-byte trim) is now
+backed by many different manufacturers' declared data in `data/apps/*.json`, the actual live
+wire confirmation is still one real device. Object 3's identity (Part 5 item 2) remains
+unresolved.
 
 ## Sources
 

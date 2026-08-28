@@ -461,125 +461,89 @@ describe('KnxConnection.downloadDevice', () => {
     assert.ok(progress.includes('Download complete'));
   });
 
-  it('LoadImageProp on objIdx 1/2/3 only reads, never writes (real ETS never writes these)', async () => {
+  it('LoadImageProp is read-only for every objIdx, including 4 (real ETS never writes it there)', async () => {
     // Confirmed 2026-08-29 against 3 independent real downloads of 1.1.10:
-    // ETS only ever reads objIdx 1/2/3's declared LoadImageProp property,
-    // identical value before/after - it does not write image/table bytes
-    // there. gaTable is supplied here specifically to prove it's NOT what
-    // gets sent, unlike the old (buggy) behavior this replaces.
+    // ETS only ever reads this property for objIdx 1/2/3/4 - identical
+    // value before/after, every time, including objIdx4 - it does not
+    // write image/table/checksum bytes via this step for any object. An
+    // earlier fix here special-cased objIdx4 to read-then-write-back a
+    // "checksum recompute" - itself wrong: the real writes to objIdx4/P27
+    // come from a separate WriteProp step this app's own model declares
+    // explicitly (see the WriteProp test below), not from LoadImageProp.
+    // gaTable/assocTable are omitted (null) here so downloadDevice()'s
+    // separate "write undeclared GA/Association table" fallback (see
+    // Part 6 of the reference doc) never fires and confuses this test -
+    // that's a different feature, exercised by its own tests.
+    const hasPropWrite = (cemi: Buffer): boolean => {
+      const parsed = parseCEMI(cemi);
+      return (
+        !!parsed &&
+        parsed.apciName === 'OTHER' &&
+        parsed.apdu.length >= 2 &&
+        (parsed.apdu.readUInt16BE(0) & 0x3ff) === 0x03d7
+      );
+    };
+
+    for (const objIdx of [1, 2, 3, 4]) {
+      const conn = new TestKnxConnection();
+      conn.connected = true;
+      conn.localAddr = '1.0.1';
+
+      const steps: DownloadStep[] = [{ type: 'LoadImageProp', objIdx, propId: 27 }];
+      const progress: string[] = [];
+
+      await conn.downloadDevice('1.1.2', steps, null, null, null, (p) =>
+        progress.push(p.msg),
+      );
+
+      assert.ok(
+        progress.some((m) => m.includes('LoadImageProp') && m.includes('read-only')),
+        `objIdx=${objIdx} should log a read-only LoadImageProp message`,
+      );
+      assert.equal(
+        conn.sent.filter(hasPropWrite).length,
+        0,
+        `objIdx=${objIdx} must not write PropertyValue`,
+      );
+    }
+
+    // Separately: prove a supplied gaTable is genuinely NOT what gets sent
+    // for objIdx1 - the actual old (buggy) behavior this replaces. Declared
+    // alone (not alongside objIdx2), so the GA-table-synthesis fallback
+    // above doesn't apply (objIdx1 IS declared, just via LoadImageProp).
+    const conn2 = new TestKnxConnection();
+    conn2.connected = true;
+    conn2.localAddr = '1.0.1';
+    const gaTable = Buffer.from([0x02, 0x08, 0x00, 0x08, 0x01]);
+    await conn2.downloadDevice(
+      '1.1.2',
+      [{ type: 'LoadImageProp', objIdx: 1, propId: 27 }],
+      gaTable,
+      null,
+      null,
+      () => {},
+    );
+    assert.equal(conn2.sent.filter(hasPropWrite).length, 0, 'must not write the supplied gaTable');
+  });
+
+  it('WriteProp trims propId=27 data to its real 8-byte element size', async () => {
+    // The project file's own declared InlineData for objIdx4/propId27
+    // WriteProp steps is always 2 bytes longer than what real ETS actually
+    // puts on the wire - confirmed 2026-08-29 by comparing a real capture
+    // against the project file, then checked against every app in this
+    // project's data/apps declaring this step (several different
+    // manufacturers) - all consistently 10 bytes, ending in 2 trailing
+    // zero-padding bytes beyond the real 8-byte element. Not observed for
+    // any other property, so the trim in the WriteProp case is scoped to
+    // propId 27 only.
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
 
-    const gaTable = Buffer.from([0x02, 0x08, 0x00, 0x08, 0x01]);
+    // Real literal data from 1.1.10's own app model (M-0004_A-3030-23-F0EA-O000A).
+    const declared = Buffer.from('000028c0003300000000', 'hex'); // 10 bytes
     const steps: DownloadStep[] = [
-      { type: 'LoadImageProp', objIdx: 1, propId: 27 },
-    ];
-    const progress: string[] = [];
-
-    await conn.downloadDevice('1.1.2', steps, gaTable, null, null, (p) =>
-      progress.push(p.msg),
-    );
-
-    assert.ok(progress.some((m) => m.includes('LoadImageProp') && m.includes('read-only')));
-    // No PropertyValue_Write APDU (APCI_EXT 0x3D7) should have been sent -
-    // every frame here must be a read (0x3D5) or unrelated management traffic.
-    const propWrites = conn.sent.filter((cemi) => {
-      const parsed = parseCEMI(cemi);
-      return (
-        parsed?.apciName === 'OTHER' &&
-        parsed.apdu.length >= 2 &&
-        (parsed.apdu.readUInt16BE(0) & 0x3ff) === 0x03d7
-      );
-    });
-    assert.equal(propWrites.length, 0, 'must not write PropertyValue for objIdx 1/2/3');
-  });
-
-  it('LoadImageProp on objIdx 4 reads the current array value and writes both elements back with trailing bytes zeroed', async () => {
-    // Real behavior confirmed 2026-08-29: ETS reads objIdx4's 2-element
-    // array (8 bytes/element) in one N=2 read, then writes each element
-    // back separately (element 1 with no explicit index, element 2 with
-    // startIndex=2), each with its own trailing 2 bytes zeroed - the
-    // device recomputes a real checksum there on the next read. The
-    // leading 6 bytes of each element must be preserved from what was
-    // read, not fabricated.
-    // Auto-responds to every outgoing management frame by decoding its real
-    // full 10-bit APCI (all of Authorize_Request/PropertyValue_Read/
-    // PropertyValue_Write share apciName 'OTHER', so a send-count/order
-    // heuristic is too fragile - e.g. an unrelated DeviceDescriptor_Read or
-    // Authorize_Request ahead of our step in the real preamble would
-    // silently consume a response meant for the property read).
-    const realArrayValue = Buffer.from('000028c000330a1a000000010133dcbd', 'hex');
-    class AutoRespondConnection extends TestKnxConnection {
-      override async sendCEMI(cemi: Buffer): Promise<void> {
-        await super.sendCEMI(cemi);
-        const parsed = parseCEMI(cemi);
-        if (!parsed || parsed.apdu.length < 2) return;
-        const fullApci = parsed.apdu.readUInt16BE(0) & 0x3ff;
-        setTimeout(() => {
-          if (fullApci === 0x03d1) {
-            // Authorize_Request -> Authorize_Response, access level 0
-            this.simulateMgmtFrame({
-              msgCode: 0x29,
-              src: '1.1.2',
-              dst: '1.0.1',
-              isGroup: false,
-              apciIdx: 15,
-              apciName: 'OTHER',
-              apduData: Buffer.from([0x00]),
-              apdu: Buffer.alloc(4),
-              tpciType: 'DATA_CONNECTED',
-            });
-          } else if (fullApci === 0x03d5) {
-            // PropertyValue_Read -> our known real objIdx4/P27 array value
-            const meta = parsed.apduData.subarray(0, 4);
-            this.simulateMgmtFrame({
-              msgCode: 0x29,
-              src: '1.1.2',
-              dst: '1.0.1',
-              isGroup: false,
-              apciIdx: 15,
-              apciName: 'OTHER',
-              apduData: Buffer.concat([meta, realArrayValue]),
-              apdu: Buffer.alloc(4),
-              tpciType: 'DATA_CONNECTED',
-            });
-          } else if (fullApci === 0x03d7) {
-            // PropertyValue_Write -> echo back (content unused by propWrite)
-            this.simulateMgmtFrame({
-              msgCode: 0x29,
-              src: '1.1.2',
-              dst: '1.0.1',
-              isGroup: false,
-              apciIdx: 15,
-              apciName: 'OTHER',
-              apduData: parsed.apduData,
-              apdu: Buffer.alloc(4),
-              tpciType: 'DATA_CONNECTED',
-            });
-          } else if (parsed.apciName === 'DeviceDescriptor_Read') {
-            this.simulateMgmtFrame({
-              msgCode: 0x29,
-              src: '1.1.2',
-              dst: '1.0.1',
-              isGroup: false,
-              apciIdx: 13,
-              apciName: 'DeviceDescriptor_Response',
-              apduData: Buffer.from([0x07, 0xb0]),
-              apdu: Buffer.alloc(4),
-              tpciType: 'DATA_CONNECTED',
-            });
-          }
-        }, 2);
-      }
-    }
-
-    const conn = new AutoRespondConnection();
-    conn.connected = true;
-    conn.localAddr = '1.0.1';
-
-    const steps: DownloadStep[] = [
-      { type: 'LoadImageProp', objIdx: 4, propId: 27 },
+      { type: 'WriteProp', objIdx: 4, propId: 27, data: declared },
     ];
     const progress: string[] = [];
 
@@ -594,25 +558,36 @@ describe('KnxConnection.downloadDevice', () => {
           !!p && p.apdu.length >= 2 && (p.apdu.readUInt16BE(0) & 0x3ff) === 0x03d7,
       );
 
-    assert.equal(propFrames.length, 2, 'expected exactly 2 PropertyValue_Write APDUs');
+    assert.equal(propFrames.length, 1);
+    const sentData = propFrames[0]!.apduData.subarray(4);
+    assert.equal(sentData.length, 8, 'must send exactly the 8-byte element, not the declared 10');
+    assert.equal(sentData.toString('hex'), '000028c000330000');
+  });
 
-    // apduData = [objIdx, propId, countIndexHi, countIndexLo, ...payload]
-    const meta1 = propFrames[0]!.apduData.subarray(0, 4);
-    const elem1 = propFrames[0]!.apduData.subarray(4);
-    const meta2 = propFrames[1]!.apduData.subarray(0, 4);
-    const elem2 = propFrames[1]!.apduData.subarray(4);
-    assert.equal(elem1.subarray(0, 6).toString('hex'), '000028c00033');
-    assert.equal(elem1.subarray(6, 8).toString('hex'), '0000');
-    assert.equal(elem2.subarray(0, 6).toString('hex'), '000000010133');
-    assert.equal(elem2.subarray(6, 8).toString('hex'), '0000');
+  it('WriteProp does NOT trim data for other properties', async () => {
+    // Sanity check that the propId===27 trim is scoped correctly and
+    // doesn't clip an unrelated property's legitimate multi-byte value.
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
 
-    // First write must address element 1, second element 2 (startIndex=2).
-    const startIndex1 = ((meta1[2]! & 0x0f) << 8) | meta1[3]!;
-    const startIndex2 = ((meta2[2]! & 0x0f) << 8) | meta2[3]!;
-    assert.equal(startIndex1, 1);
-    assert.equal(startIndex2, 2);
+    const data = Buffer.from('0007080770', 'hex'); // real PID_PROGRAM_VERSION-shaped example
+    const steps: DownloadStep[] = [{ type: 'WriteProp', objIdx: 4, propId: 13, data }];
+    const progress: string[] = [];
 
-    assert.ok(progress.some((m) => m.includes('LoadImageProp') && m.includes('checksum')));
+    await conn.downloadDevice('1.1.2', steps, null, null, null, (p) =>
+      progress.push(p.msg),
+    );
+
+    const propFrames = conn.sent
+      .map((cemi) => parseCEMI(cemi))
+      .filter(
+        (p): p is NonNullable<typeof p> =>
+          !!p && p.apdu.length >= 2 && (p.apdu.readUInt16BE(0) & 0x3ff) === 0x03d7,
+      );
+
+    assert.equal(propFrames.length, 1);
+    assert.equal(propFrames[0]!.apduData.subarray(4).toString('hex'), '0007080770');
   });
 
   it('processes WriteRelMem steps with chunking', async () => {

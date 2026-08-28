@@ -750,6 +750,26 @@ export class KnxConnection extends EventEmitter {
         }
       };
 
+      /** Read a property's current value. Returns null on no response. */
+      const propRead = async (
+        objIdx: number,
+        propId: number,
+      ): Promise<Buffer | null> => {
+        const seq = nextSeq();
+        const apdu = apduPropertyValueRead(seq, objIdx, propId);
+        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+        const respP = waitResponse('OTHER', 3000);
+        await this.sendCEMI(cemi);
+        try {
+          const res = await respP;
+          return res.apduData.length > 4
+            ? Buffer.from(res.apduData.subarray(4))
+            : Buffer.alloc(0);
+        } catch (_e) {
+          return null;
+        }
+      };
+
       // A_Authorize_Request with the well-known/default key - real ETS
       // sends this near the start of every download session, before any
       // property/memory writes, and koolenex never has (any code path).
@@ -918,6 +938,32 @@ export class KnxConnection extends EventEmitter {
                 });
             }
             if (relSeg) {
+              // Real ETS reads PID_PROGRAM_VERSION (property 13) on the
+              // Application Program object early in its session, then
+              // writes that SAME value back after the memory writes finish,
+              // right before LoadCompleted - root-caused 2026-08-28 by
+              // doing a complete, systematic pass over every frame in a
+              // real capture (not just the frames already expected), after
+              // two prior real fixes (load sequence, then authorization)
+              // still didn't make a write persist. Working theory:
+              // LoadCompleted marks the SEGMENT loaded, but this registers
+              // the freshly-loaded data as belonging to a real, known
+              // application - without it the device may discard the
+              // segment on restart despite LoadCompleted confirming
+              // Loaded state. Only meaningful for the Application Program
+              // object itself (objIdx 4 by KNX System 7 convention) - the
+              // GA/Association/other table objects don't have a program
+              // version to register. See docs/follow-ups/2026-08-28-
+              // write-path-missing-load-sequence.md.
+              if (objIdx === 4) {
+                const version = await propRead(4, 13);
+                if (version && version.length) {
+                  log(`PID_PROGRAM_VERSION=${version.toString('hex')} (write-back)`);
+                  await propWrite(4, 13, version);
+                } else {
+                  log('Could not read PID_PROGRAM_VERSION - skipping write-back');
+                }
+              }
               log(`LoadCompleted ObjIdx=${objIdx}`);
               await lsmWrite(objIdx, LSM_EVENT.LOAD_COMPLETED);
             }

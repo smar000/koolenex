@@ -75,10 +75,18 @@ class LoadGatedFakeDevice extends KnxConnection {
       const objIdx = frame.apduData[0]!;
       const propId = frame.apduData[1]!;
       const data = frame.apduData.subarray(4);
+      // propWrite() now waits for a response before proceeding for EVERY
+      // property write (not just LSM ones - see the 2026-08-28
+      // "PID_PROGRAM_VERSION write-back" fix, which writes propId 13, not
+      // 5) - respond to all of them like real hardware does, or any
+      // non-LSM propWrite() call would time out after 3s. `state` below
+      // only has real meaning for propId 5 (LSM); echoed back verbatim
+      // otherwise (matching real ETS's own PID_PROGRAM_VERSION write-back,
+      // which gets its own value echoed back in the response).
+      let state = 0x00;
       if (propId === 5 && data.length > 0) {
         const event = data[0]!;
         this.lsmEvents.push({ objIdx, event, data: Buffer.from(data) });
-        let state = 0x00; // Unloaded
         if (event === 0x01) {
           this.loadingObjIdx = objIdx; // StartLoading
           state = 0x02; // Loading
@@ -93,20 +101,37 @@ class LoadGatedFakeDevice extends KnxConnection {
           if (this.loadingObjIdx === objIdx) this.loadingObjIdx = null;
           state = 0x00; // Unloaded
         }
-        // propWrite() now waits for this response before proceeding (see
-        // the 2026-08-28 "Restart race" fix) - respond like real hardware
-        // does, not just accept-and-ignore, or every lsmWrite() call would
-        // time out after 3s.
-        const respApdu = apduConnectedFull(
-          0,
-          APCI_EXT.PropertyValue_Response,
-          Buffer.from([objIdx, propId, 0x10, 0x01, state]),
-        );
-        const resp = parseCEMI(
-          buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
-        )!;
-        setImmediate(() => this._onCEMI(resp));
       }
+      const respExtra =
+        propId === 5 ? Buffer.from([state]) : data.length ? data : Buffer.from([0x00]);
+      const respApdu = apduConnectedFull(
+        0,
+        APCI_EXT.PropertyValue_Response,
+        Buffer.concat([Buffer.from([objIdx, propId, 0x10, 0x01]), respExtra]),
+      );
+      const resp = parseCEMI(
+        buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+      )!;
+      setImmediate(() => this._onCEMI(resp));
+    } else if (fullApci === 0x3d5 /* PropertyValue_Read */) {
+      // downloadDevice() now reads PID_PROGRAM_VERSION (objIdx 4, propId
+      // 13) and writes it straight back before LoadCompleted (see the
+      // 2026-08-28 "PID_PROGRAM_VERSION write-back" fix) - respond with a
+      // fixed dummy value (shape matches the real captured
+      // 0004002510: manufacturer(2)+appNumber(2)+version(1)) so that
+      // round-trip actually completes instead of timing out.
+      const objIdx = frame.apduData[0]!;
+      const propId = frame.apduData[1]!;
+      const value = Buffer.from('0004002510', 'hex');
+      const respApdu = apduConnectedFull(
+        0,
+        APCI_EXT.PropertyValue_Response,
+        Buffer.concat([Buffer.from([objIdx, propId, 0x10, 0x01]), value]),
+      );
+      const resp = parseCEMI(
+        buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+      )!;
+      setImmediate(() => this._onCEMI(resp));
     } else if (frame.apciName === 'Memory_Write') {
       const count = frame.apduData[0]!;
       const address = (frame.apduData[1]! << 8) | frame.apduData[2]!;

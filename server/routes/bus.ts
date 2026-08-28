@@ -658,6 +658,49 @@ router.post('/bus/read-memory', async (req: Request, res: Response) => {
   }
 });
 
+// Write an exact byte sequence to an absolute memory address. Debug-only
+// helper (unlike everything else in this file, this ONE writes to real
+// hardware) - built to manually pin down a write-path question without
+// going through buildDeviceProgramming()'s full computed image, e.g. when
+// that image itself is suspected of being wrong for unrelated bits packed
+// into the same byte as the parameter under test. Reuses the real
+// downloadDevice()/WriteRelMem code path (same address-selection logic as
+// program-device, including the 16-bit truncation fix) - not a separate
+// write implementation - by passing `address` as objIdx 0's own
+// "resolved base" with offset 0, so addr = base + offset = address exactly.
+router.post('/bus/write-memory', async (req: Request, res: Response) => {
+  const b = requireBus(res);
+  if (!b) return;
+  const body = validateBody(
+    req,
+    z.object({
+      deviceAddress: z.string().min(1),
+      address: z.number().int().min(0).max(0xffffff),
+      hex: z
+        .string()
+        .regex(/^[0-9a-fA-F]+$/)
+        .refine((h) => h.length % 2 === 0, 'hex must have an even length'),
+    }),
+  );
+  const { deviceAddress, address, hex } = body;
+  if (!b.connected) return res.status(409).json({ error: 'Not connected' });
+  const data = Buffer.from(hex, 'hex');
+  try {
+    await b.downloadDevice(
+      deviceAddress,
+      [{ type: 'WriteRelMem', objIdx: 0, propId: 0, size: data.length, offset: 0 }],
+      null,
+      null,
+      data,
+      undefined,
+      { resolvedBases: { 0: address } },
+    );
+    res.json({ deviceAddress, address, hex, byteCount: data.length });
+  } catch (e) {
+    res.status(502).json({ error: safeError('bus', 'Memory write failed', e) });
+  }
+});
+
 // Read an arbitrary interface-object property. Read-only debug helper - built
 // to check whether other interface objects (e.g. the Address/Association
 // tables, objIdx 1/2) resolve their own PID 7 (PID_TABLE_REFERENCE) base to a

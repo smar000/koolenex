@@ -750,6 +750,80 @@ describe('POST /bus/read-property', () => {
   });
 });
 
+// ── POST /bus/write-memory ──────────────────────────────────────────────────
+
+describe('POST /bus/write-memory', () => {
+  it('returns 409 when not connected', async () => {
+    mockBus.connected = false;
+    const r = await req(ts.baseUrl, 'POST', '/bus/write-memory', {
+      deviceAddress: '1.1.1',
+      address: 0x5f53,
+      hex: '00',
+    });
+    assert.equal(r.status, 409);
+  });
+
+  it('writes via downloadDevice with a single WriteRelMem step targeting the exact address', async () => {
+    mockBus.connected = true;
+    const r = await req(ts.baseUrl, 'POST', '/bus/write-memory', {
+      deviceAddress: '1.1.1',
+      address: 0x5f53,
+      hex: '00',
+    });
+    assert.equal(r.status, 200);
+    const data = r.data as {
+      deviceAddress: string;
+      address: number;
+      hex: string;
+      byteCount: number;
+    };
+    assert.equal(data.address, 0x5f53);
+    assert.equal(data.hex, '00');
+    assert.equal(data.byteCount, 1);
+    const call = mockBus.calls.find((c) => c.method === 'downloadDevice');
+    assert.ok(call, 'expected downloadDevice to be called');
+    const [deviceAddr, steps, gaTable, assocTable, paramMem, , extra] =
+      call!.args as [
+        string,
+        Array<{ type: string; objIdx: number; size?: number; offset?: number }>,
+        unknown,
+        unknown,
+        Buffer,
+        unknown,
+        { resolvedBases?: Record<number, number> },
+      ];
+    assert.equal(deviceAddr, '1.1.1');
+    assert.equal(gaTable, null);
+    assert.equal(assocTable, null);
+    assert.equal(steps.length, 1);
+    assert.equal(steps[0]!.type, 'WriteRelMem');
+    assert.equal(steps[0]!.objIdx, 0);
+    assert.equal(steps[0]!.size, 1);
+    assert.equal(steps[0]!.offset, 0);
+    assert.deepEqual([...paramMem], [0x00]);
+    assert.equal(extra.resolvedBases?.[0], 0x5f53);
+  });
+
+  it('rejects odd-length hex', async () => {
+    mockBus.connected = true;
+    const r = await req(ts.baseUrl, 'POST', '/bus/write-memory', {
+      deviceAddress: '1.1.1',
+      address: 0x5f53,
+      hex: '0',
+    });
+    assert.equal(r.status, 400);
+  });
+
+  it('rejects missing deviceAddress', async () => {
+    mockBus.connected = true;
+    const r = await req(ts.baseUrl, 'POST', '/bus/write-memory', {
+      address: 0x5f53,
+      hex: '00',
+    });
+    assert.equal(r.status, 400);
+  });
+});
+
 // ── POST /bus/verify-device ─────────────────────────────────────────────────
 
 describe('POST /bus/verify-device', () => {

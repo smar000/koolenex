@@ -1,9 +1,17 @@
 # Investigation: real device writes never take effect — koolenex's write path skips the entire Unload/Load/LoadCompleted sequence
 
-**Status: root cause confirmed via real hardware AND real wire-level capture of koolenex's own traffic — not
-inference. Not yet fixed.** This substantially undermines the earlier 2026-08-26 "write path proven correct"
-finding (see "Retroactive implication" below) — treat that finding as unsafe to rely on until re-verified
-against a real fix.
+**Status: RESOLVED.** Six independent, sequential root causes were found and fixed, each confirmed on real
+hardware: (1) the entire missing Unload/StartLoading/LoadData/LoadCompleted sequence (this doc's original
+finding, below), (2) a Restart-before-LoadCompleted-confirmed race, (3) a missing `A_Authorize_Request`,
+(4) a missing `PID_PROGRAM_VERSION` read-back-and-write-back, (5) the `LoadData` "mode" byte meaning
+Full(`0x01`)/Partial(`0x00`) download, not "combined full+par declaration" as first guessed, and (6) — the
+final blocker, found via a verbatim real-frame replay that succeeded where koolenex's own reconstruction
+kept failing — `WriteRelMem` unconditionally must use `A_MemoryExtended_Write`, never legacy
+`A_Memory_Write`, regardless of whether the address fits in 16 bits. See "Fixes 2-6" and "Final resolution"
+below for the full story; the original Fix-1 writeup follows unchanged as the section that started it.
+This also un-retracts nothing about the 2026-08-26 "write path proven correct" finding for 1.1.10 — that
+finding is still unverified against these fixes and should not be cited until it is (see "Retroactive
+implication" below, still open).
 
 ## Why this came up
 
@@ -126,6 +134,70 @@ direct code test (`buildParamMem()` called standalone with `{}` vs the changed p
 genuine, separate write-correctness bug (independent of the missing Load sequence above) that would still
 need fixing even once writes actually reach the device.
 
+## Fixes 2-6: what it took to get from "Fix 1 shipped" to an actual persisting write
+
+Fix 1 (the sequence above) shipped as koolenex commit `1620fa5`. Real-hardware retesting after each
+subsequent fix kept finding the byte still didn't persist, prompting the next fix. This section is the log
+of that chain, compressed — full detail lives in `koolenex-reference` memory (knx-ets-manager repo) and the
+git history of `test/relmem-real-device-fixtures`.
+
+- **Fix 2 (`b09dc1e`) — Restart-before-confirmation race.** `propWrite()` originally used a fixed `delay(50)`
+  after each Load State write instead of waiting for the device's actual `PropertyValue_Response`. Rewrote
+  it (and added `propRead()`) to use the pre-existing `waitResponse()` pattern properly.
+- **Fix 3 (`731c36b`) — missing `A_Authorize_Request`.** Real ETS sends this (well-known key `0xFFFFFFFF`)
+  before any RelSegment-driven write; koolenex never did. Neither `Authorize_Request/Response` nor
+  `PropertyValue_Write/Read` are in `parseCEMI`'s `APCI_EXT_NAMES` table, so matching frames requires
+  recomputing the full 10-bit APCI manually (`((apdu[0]&0x03)<<8)|apdu[1]`) rather than trusting
+  `apciName`.
+- **Fix 4 (`f5588c7`) — missing `PID_PROGRAM_VERSION` write-back.** Real ETS reads `PID_PROGRAM_VERSION`
+  (objIdx 4, property 13) early, then writes the identical value straight back right before
+  `LoadCompleted` — found only after the user explicitly pushed back on the methodology ("I am wondering if
+  there is more in the total captured data that we are missing/inadvertently ignoring") when two prior
+  narrow, hypothesis-driven greps of the same full capture had both missed it. A genuinely complete,
+  systematic frame-type-sequence extraction of every frame (not a targeted grep) is what actually found
+  this gap.
+- **Fix 5 (no code change, a corrected understanding) — the `LoadData` "mode" byte.** Originally guessed as
+  a "combined full+par declaration" flag (see the original Fix-1 section above, `mode=0x01` "possibly...").
+  A dedicated real-hardware experiment — three consecutive user-triggered ETS downloads (Full, Partial
+  NTP-off, Partial NTP-on), captured and split into
+  `2026-08-28-ets-{1,2,3}-*-1.1.9.pcapng` (`docs/data/captures/`, knx-ets-manager repo) — showed the mode
+  byte is `0x00` on **both** independent Partial Downloads despite the model still declaring `full`+`par`
+  RelSegment entries for objIdx 4, while the Full Download showed `0x01`. Real meaning: Full(`0x01`) vs
+  Partial(`0x00`) download type. This on its own stopped the erasure-to-`0xFF` behavior seen before, but
+  still didn't make a targeted new value persist — a real, necessary, but not sufficient fix.
+- **The decisive experiment — verbatim frame replay.** Rather than keep guessing, built
+  `POST /bus/replay-frames` (`server/routes/bus.ts` + `KnxBusManager.replayFrames()`,
+  `server/knx-bus.ts`, commit `541c134`) to fire the real captured Partial-Download-NTP-off frame sequence
+  (all 49 ETS→device request frames from `2026-08-28-ets-2-partial-download-ntp-off-1.1.9.pcapng`, extracted
+  and byte-verified) at real hardware **verbatim** — no koolenex APDU reconstruction at all, just the raw
+  bytes replayed through the existing tunnel. **This persisted correctly**
+  (`2026-08-28-verbatim-replay-success-1.1.9.pcapng`): `0x5F53` read back `0x00` after reconnect, matching
+  ETS's own real written value exactly. This proved the wire-level content itself is sufficient — the
+  remaining bug was entirely in koolenex's own reconstruction, not anything fundamental about the device,
+  the network path, or KNX Secure/tunneling behavior.
+- **Fix 6 (`68c0394`) — the actual final bug: legacy vs extended memory write.** Diffed koolenex's own
+  `/bus/write-memory` reconstruction of the identical operation (same address `0x5F53`, same count, same
+  data, mode-byte fix from Fix 5 already applied) frame-by-frame against the successful verbatim replay.
+  Captured as `2026-08-28-koolenex-legacy-write-fail-1.1.9.pcapng` — confirmed to silently fail to persist,
+  twice reproducibly. The diff found exactly one byte-level difference: koolenex's `WriteRelMem` loop
+  (`server/knx-connection.ts`) picked legacy `A_Memory_Write` for this chunk because `addr <= 0xFFFF`
+  (`0x5F53` fits easily), while real ETS used `A_MemoryExtended_Write` unconditionally — confirmed via raw
+  hex decode, not tshark's own (known-unreliable, see the note in the original Fix-1 section) summary
+  column. This device's application program apparently only honors the extended service on the
+  RelSegment-gated download path; the legacy write is a **silent** no-op — no error, no rejected-write
+  signal, nothing — which is exactly why every earlier fix (1 through 5) succeeded at the protocol level
+  (correct Load State transitions, correct `PropValueResp ... $01` confirming "Loaded", correct `Restart`)
+  while the underlying byte write itself was quietly ignored the whole time. Removed the `addr > 0xFFFF`
+  conditional entirely — `WriteRelMem` now always uses `A_MemoryExtended_Write`.
+
+## Final resolution: confirmed on real hardware
+
+After Fix 6, the NTP-server-source parameter at 1.1.9 (`0x5F53`) was flipped `0x80`→`0x00`→`0x80`→`0x00`
+across four separate real downloads/reconnects via koolenex's own (fixed) write path, each value
+independently confirmed via a fresh `read-memory` call after a full disconnect/reconnect cycle. The write
+path genuinely works now, for this device/app at least (1.1.10, and the still-unidentified objIdx 3, and
+the GA/Association table format for objIdx 1/2, remain open — see below).
+
 ## Retroactive implication: the 2026-08-26 "write path proven correct" finding is now unsafe to rely on
 
 That finding (koolenex-driven download vs fresh ETS-native download, `actualHex` diffed directly,
@@ -143,38 +215,69 @@ fix for this gap.
 ## What this does and doesn't settle
 
 **Settled**:
-- Root cause of every failed/no-op write attempt this project has made: `RelSegment`/Unload/StartLoading/
-  LoadCompleted are missing from both the load-procedure *model* (as extracted from real project data) and
-  the *executor* (`downloadDevice()`'s step switch).
-- The real wire format for `LoadData` (the `RelSegment` step's real on-the-wire shape), decoded from four
-  independent real examples.
-- A separate, unrelated byte-packing bug in `buildParamMem()`'s padding-bit fill.
-- The 2026-08-26 "write path proven correct" finding should not be trusted until re-verified.
+- Root cause of every failed/no-op write attempt this project has made against 1.1.9: six compounding gaps
+  (Fixes 1-6 above), the last and most stubborn being a silent legacy-vs-extended memory write mismatch
+  with no error signal of any kind.
+- The real wire format for `LoadData` (the `RelSegment` step's real on-the-wire shape, mode byte meaning
+  finally settled as Full/Partial), decoded from real examples across both a Full and two independent
+  Partial Downloads.
+- `A_Authorize_Request` and `PID_PROGRAM_VERSION` write-back are both required parts of the real sequence,
+  not optional.
+- `WriteRelMem` must always use `A_MemoryExtended_Write`, never the legacy service, regardless of address
+  size, at least for this device/app.
+- **The write path works**: confirmed reproducibly on real hardware (1.1.9), four separate real
+  downloads/reconnects, byte flipped both directions correctly each time.
+- A separate, unrelated byte-packing bug in `buildParamMem()`'s padding-bit fill (still not fixed - see
+  below).
 
 **Not yet done / open**:
-- The fix itself - not written. Two shapes to choose between: (a) fix whatever in the importer builds
-  `model.loadProcedures` from the real project XML, so it captures the full real sequence (more
-  foundational, benefits every future import); or (b) reconstruct the missing sequence generically inside
-  `downloadDevice()` from data it already has (`paramMem`→objIdx4, `gaTable`→objIdx1, `assocTable`→objIdx2,
-  objIdx3 still unidentified - see the 2026-08-27 doc's Finding 2). Neither attempted yet.
-- Whether 1.1.10 (and any other `RelSegment`-family device) has the exact same gap, confirmed empirically
-  rather than by analogy - the load-procedure shape matches, but a fresh real capture of 1.1.10's own
-  download (not just the byte offsets already documented) hasn't been done.
-- The `buildParamMem()` padding-bit fill bug - root-caused, not fixed.
+- The `buildParamMem()` padding-bit fill bug - root-caused, not fixed. Real device value is `0x80` (bit 7
+  set, others clear); koolenex fills the other 7 "padding" bits with `1`s instead of `0`s.
+- Whether 1.1.10 (and any other `RelSegment`-family device) needed all six fixes too, confirmed empirically
+  rather than by analogy - not yet re-tested since these fixes landed. The 2026-08-26 "write path proven
+  correct" finding for 1.1.10 specifically should still not be cited until it is (see "Retroactive
+  implication" below).
+- The GA/Association table (objIdx 1/2) wire format - still uses a guessed format, unfixed (per the
+  2026-08-27/28 GA-wire-format work).
 - What objIdx 3 actually is (still just "possibly per-channel mapper config", unconfirmed, per the
   2026-08-27 doc).
+- Whether the fix generalizes: this was confirmed for exactly one app (`M-0004_A-0025-10-1BA6-O00A6`, the
+  IP router's additional-function app) on exactly one device. Whether *every* device always requires
+  extended writes, or whether some genuinely do use legacy writes for low addresses (making Fix 6's
+  "always extended" the wrong generalization rather than just the right fix for this device), is untested.
+  If a future device is confirmed to need real legacy writes, this will need revisiting into a per-device or
+  per-app flag rather than a blanket "always extended".
+- **Longer-term**: none of these fixes came from fixing the *model extraction* (how `model.loadProcedures`
+  is built from real project XML during import) - they're all in the hand-written `downloadDevice()`
+  executor. The original Fix-1 writeup's "two shapes to choose between" framing (fix the importer vs.
+  reconstruct generically in the executor) was effectively resolved in favor of the executor approach by
+  default, not by a deliberate decision - worth revisiting once more apps/devices are tested, since a
+  model-extraction fix would generalize automatically where the executor approach needs each new
+  requirement (Auth, PID13, mode byte, extended-vs-legacy) hand-added.
 
 ## Artifacts
 
 - Capture: `2026-08-28-ga-wire-format-1.1.9-1.1.10.pcapng` (`docs/data/captures/` in the knx-ets-manager
   repo, already saved for the GA/Association table wire-format work) - the real ETS Full Download used to
   decode the `LoadData` format above.
-- Capture: `2026-08-28-koolenex-write-attempt-1.1.9.pcapng` (same folder, new) - koolenex's own failed
-  write attempt, showing the missing Load sequence directly on the wire (raw `MemWrite` straight after the
-  PID-7 resolve, no `PropValueWrite ... P=5` anywhere).
-- New endpoint: `POST /bus/write-memory` (`server/routes/bus.ts`) - writes an exact byte sequence to an
+- Capture: `2026-08-28-koolenex-write-attempt-1.1.9.pcapng` (same folder) - koolenex's own failed write
+  attempt from Fix 1's investigation, showing the missing Load sequence directly on the wire (raw `MemWrite`
+  straight after the PID-7 resolve, no `PropValueWrite ... P=5` anywhere).
+- Captures: `2026-08-28-ets-{1,2,3}-{full,partial-ntp-off,partial-ntp-on}-download-1.1.9.pcapng` (same
+  folder) - the three consecutive real ETS downloads used to settle the LoadData mode-byte meaning (Fix 5)
+  and as the source frames for the verbatim replay (below).
+- Capture: `2026-08-28-verbatim-replay-success-1.1.9.pcapng` (same folder) - koolenex replaying the real
+  Partial-Download frames verbatim; succeeded, pinning the remaining bug to koolenex's own reconstruction.
+- Capture: `2026-08-28-koolenex-legacy-write-fail-1.1.9.pcapng` (same folder) - koolenex's own
+  reconstruction of the identical operation, captured specifically to diff against the verbatim replay;
+  this diff found Fix 6.
+- Endpoint: `POST /bus/write-memory` (`server/routes/bus.ts`) - writes an exact byte sequence to an
   absolute address, reusing the real `downloadDevice()`/`WriteRelMem` path (not a separate implementation).
-  Unlike every other debug route in this file, this one writes to real hardware - built specifically for
-  this diagnosis, not intended for routine use.
+  Optionally opts into the real Load State sequence via a `relSegment` param. Real-hardware debug tool, not
+  intended for routine use.
+- Endpoint: `POST /bus/replay-frames` (`server/routes/bus.ts` + `KnxBusManager.replayFrames()` in
+  `server/knx-bus.ts`) - replays a literal sequence of real captured CEMI frames verbatim, no
+  reconstruction at all. Built for, and instrumental in, the decisive experiment above. Real-hardware debug
+  tool, not intended for routine use.
 - `koolenex-reference` memory (knx-ets-manager repo's persistent memory) has the fuller methodological
-  history of why the write path's status was already in question before this investigation.
+  history, including the 2026-08-28 update documenting all six fixes and the final resolution.

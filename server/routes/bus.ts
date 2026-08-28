@@ -11,6 +11,8 @@ import { validateBody } from '../validate.ts';
 import {
   buildGATable,
   buildAssocTable,
+  decodeGATable,
+  decodeAssocTable,
   resolveParamSegment,
   buildParamMem,
   diffMemory,
@@ -1089,10 +1091,37 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
   // the step's relative offset. Resolve it over the bus and refuse to verify
   // an unallocated segment (a zero base would read the wrong low-memory region
   // and report a bogus all-zeros mismatch).
+  //
+  // Also resolve the GA table (objIdx 1) / Association table (objIdx 2)
+  // base whenever the app's own model doesn't already declare a step for
+  // them but a table exists to compare - real ETS verifies/writes these via
+  // the same RelSegment mechanism even without an explicit declaration (see
+  // knx-download-plan.ts's `buildGaAssocMem` and knx-connection.ts's
+  // WriteRelMem case for the write-side twin of this same gap).
+  // Only for genuinely RelSegment-family apps (at least one real WriteRelMem
+  // step somewhere) - real ETS's GA/Association-via-RelSegment behavior has
+  // only ever been confirmed on this family (System B masks). AbsSegment
+  // (MDT-style) and prop-only devices have no such mechanism confirmed at
+  // all, and forcing a PID 7 resolve for objIdx 1/2 on those would 409 the
+  // whole verify on a genuinely unrelated/unallocated interface object.
+  const isRelSegmentApp = (
+    steps as Array<{ type: string; objIdx?: number }>
+  ).some((s) => s.type === 'WriteRelMem');
+  const declaredTableObjIdxs = new Set(
+    (steps as Array<{ type: string; objIdx?: number }>)
+      .filter((s) => s.type === 'WriteRelMem' || s.type === 'LoadImageProp')
+      .map((s) => s.objIdx),
+  );
+  const extraObjIdxs: number[] = [];
+  if (isRelSegmentApp && gaTable && gaTable.length && !declaredTableObjIdxs.has(1))
+    extraObjIdxs.push(1);
+  if (isRelSegmentApp && assocTable && assocTable.length && !declaredTableObjIdxs.has(2))
+    extraObjIdxs.push(2);
   const { bases, unallocated } = await resolveRelmemBases(
     b,
     deviceAddress,
     steps as Array<{ type: string; objIdx?: number }>,
+    extraObjIdxs,
   );
   if (unallocated.length) {
     return res.status(409).json({
@@ -1237,6 +1266,82 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
           match: act ? act.value === value : null,
         };
       });
+    }
+
+    // Verify the GA table / Association table too, when the model didn't
+    // already declare (and get read/decoded as) an ordinary WriteRelMem/
+    // LoadImageProp step - see the `gaAssocMem` field comment in
+    // knx-download-plan.ts. Surfaced as one comparison row per
+    // communication object (its expected vs. actual linked GA), not raw
+    // bytes - deliberately kept out of `segments`/`totalBytes` so the
+    // existing "raw memory bytes match" scope (named-parameter segment
+    // only) is unaffected; folded into `decoded` instead, so it shows up
+    // in the same named-comparison table the frontend already renders.
+    if (plan.gaAssocMem.length) {
+      const gaAssocActuals = await b.readMemoryMany(
+        deviceAddress,
+        plan.gaAssocMem.map((r) => ({ address: r.addr, length: r.expected.length })),
+      );
+      const coRows = db.all<ComObject>(
+        'SELECT * FROM com_objects WHERE device_id=? ORDER BY object_number',
+        [dev.id],
+      );
+      const gaRegion = plan.gaAssocMem.find((r) => r.label.startsWith('gatable@'));
+      const assocRegion = plan.gaAssocMem.find((r) => r.label.startsWith('assoctable@'));
+      const gaIdx = gaRegion ? plan.gaAssocMem.indexOf(gaRegion) : -1;
+      const assocIdx = assocRegion ? plan.gaAssocMem.indexOf(assocRegion) : -1;
+
+      const expectedGAs = gaRegion ? decodeGATable(gaRegion.expected) : [];
+      const actualGAs =
+        gaIdx >= 0 ? decodeGATable(gaAssocActuals[gaIdx] ?? Buffer.alloc(0)) : [];
+      const expectedAssoc = assocRegion
+        ? decodeAssocTable(assocRegion.expected, expectedGAs)
+        : [];
+      const actualAssoc =
+        assocIdx >= 0
+          ? decodeAssocTable(gaAssocActuals[assocIdx] ?? Buffer.alloc(0), actualGAs)
+          : [];
+      // A com object can have more than one GA link (see buildAssocTable) -
+      // aggregate every link per com object rather than keeping only the
+      // last one, then join for display/comparison the same way
+      // co.ga_address is already stored (space-separated).
+      const groupByCO = (
+        entries: Array<{ coNumber: number; ga: string | null }>,
+      ): Map<number, string> => {
+        const m = new Map<number, string[]>();
+        for (const e of entries) {
+          if (!m.has(e.coNumber)) m.set(e.coNumber, []);
+          if (e.ga) m.get(e.coNumber)!.push(e.ga);
+        }
+        return new Map([...m].map(([co, gas]) => [co, gas.join(' ')]));
+      };
+      const expectedByCO = groupByCO(expectedAssoc);
+      const actualByCO = groupByCO(actualAssoc);
+
+      // One row per com object that has (or should have) a GA link on
+      // either side - matches the existing "only named parameters" scope
+      // convention (nothing to compare = not shown).
+      const gaRows: DecodedComparison[] = [];
+      for (const co of coRows) {
+        const expectedGA = expectedByCO.get(co.object_number) ?? null;
+        const actualGA = actualByCO.get(co.object_number) ?? null;
+        if (expectedGA == null && actualGA == null) continue;
+        gaRows.push({
+          key: `co-${co.object_number}-ga`,
+          label: co.name || `CO ${co.object_number}`,
+          section: 'Group Addresses',
+          group: co.channel || '',
+          unit: '',
+          offset: 0,
+          bitOffset: 0,
+          bitSize: 0,
+          rawValue: '',
+          expectedValue: expectedGA ?? '(none)',
+          actualValue: actualGA,
+          match: expectedGA === actualGA,
+        });
+      }
+      if (gaRows.length) decoded = [...(decoded ?? []), ...gaRows];
     }
 
     res.json({

@@ -12,6 +12,8 @@ import { planVerify, type PlanStep } from '../server/knx-download-plan.ts';
 import {
   buildGATable,
   buildAssocTable,
+  decodeGATable,
+  decodeAssocTable,
   buildParamMem,
   resolveParamSegment,
 } from '../server/routes/knx-tables.ts';
@@ -1174,5 +1176,123 @@ describe('POST /bus/program-device — relmem zero-pointer guard', () => {
       mockBus.calls.some((c) => c.method === 'downloadDevice'),
       false,
     );
+  });
+});
+
+// ── verify-device: GA table / Association table fallback (RELMEM_APP declares
+// only objIdx 4, matching 1.1.9's real shape - see docs/knx-device-write-
+// protocol.md Part 6 in the koolenex repo) ─────────────────────────────────
+describe('POST /bus/verify-device — GA/Association table fallback for an app that only declares objIdx 4', () => {
+  let projectId: number;
+  const deviceAddr = '1.1.33';
+  const PARAM_BASE = 0x5000;
+  const GA_BASE = 0x6000;
+  const ASSOC_BASE = 0x6100;
+
+  before(() => {
+    // RELMEM_MODEL is already written by the earlier "relmem zero-pointer
+    // guard" describe block above (writeModel/APPS_DIR is shared, keyed by
+    // appId) - no need to re-write it.
+    ts.db.run(`INSERT INTO projects (name) VALUES ('verify-ga-fallback')`);
+    projectId = ts.db.get<{ id: number }>(
+      `SELECT id FROM projects WHERE name='verify-ga-fallback'`,
+    )!.id;
+    seedDevice(ts.db, projectId, deviceAddr, RELMEM_APP, GA_LINKS, CO_ROWS);
+  });
+
+  // Recompute the exact GA/Association table bytes verify-device will
+  // expect, from the same GA_LINKS/CO_ROWS fixtures used elsewhere in this
+  // file, matching buildGATable()/buildAssocTable()'s real (corrected)
+  // wire format.
+  const gaTable = buildGATable(GA_LINKS);
+  const assocTable = buildAssocTable(CO_ROWS, GA_LINKS);
+  // 4-byte param segment (RELMEM_MODEL declares size:4) - content doesn't
+  // matter for this test, just needs to exist and match itself.
+  const paramMem = Buffer.from([0x01, 0x00, 0x00, 0x00]);
+
+  function seedPropAndMem(actualGaTable: Buffer, actualAssocTable: Buffer) {
+    mockBus.propImage = new Map([
+      ['4/7', Buffer.from([0, 0, PARAM_BASE >> 8, PARAM_BASE & 0xff])],
+      ['1/7', Buffer.from([0, 0, GA_BASE >> 8, GA_BASE & 0xff])],
+      ['2/7', Buffer.from([0, 0, ASSOC_BASE >> 8, ASSOC_BASE & 0xff])],
+    ]);
+    const map = new Map<number, number>();
+    for (let i = 0; i < paramMem.length; i++) map.set(PARAM_BASE + i, paramMem[i]!);
+    for (let i = 0; i < actualGaTable.length; i++)
+      map.set(GA_BASE + i, actualGaTable[i]!);
+    for (let i = 0; i < actualAssocTable.length; i++)
+      map.set(ASSOC_BASE + i, actualAssocTable[i]!);
+    mockBus.memImage = map;
+  }
+
+  it('adds one GA comparison row per linked communication object when the device holds the correct tables', async () => {
+    mockBus.connected = true;
+    seedPropAndMem(gaTable, assocTable);
+    const r = await req(ts.baseUrl, 'POST', '/bus/verify-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    mockBus.propImage = null;
+    mockBus.memImage = null;
+    assert.equal(r.status, 200);
+    const body = r.data as any;
+    const gaRows = (body.decoded ?? []).filter(
+      (d: any) => d.section === 'Group Addresses',
+    );
+    // CO_ROWS: object 0 -> '2/1/2' (1 GA), object 12 -> '2/1/3 2/1/2' (2 GAs,
+    // must both survive - the multi-GA-per-object aggregation bug this test
+    // was written to catch), object 48 -> '0/0/1 0/0/2' (2 GAs).
+    assert.equal(gaRows.length, 3);
+    const byCO = new Map(gaRows.map((r: any) => [r.key, r]));
+    const co0 = byCO.get('co-0-ga') as any;
+    assert.equal(co0.expectedValue, '2/1/2');
+    assert.equal(co0.actualValue, '2/1/2');
+    assert.equal(co0.match, true);
+    const co12 = byCO.get('co-12-ga') as any;
+    // buildAssocTable sorts by gaIndex ascending - 2/1/2 (GA_LINKS[2]) has a
+    // lower table index than 2/1/3 (GA_LINKS[3]), so it decodes first
+    // regardless of the order in CO_ROWS's own ga_address string.
+    assert.equal(co12.expectedValue, '2/1/2 2/1/3');
+    assert.equal(co12.actualValue, '2/1/2 2/1/3');
+    assert.equal(co12.match, true);
+    const co48 = byCO.get('co-48-ga') as any;
+    assert.equal(co48.expectedValue, '0/0/1 0/0/2');
+    assert.equal(co48.actualValue, '0/0/1 0/0/2');
+    assert.equal(co48.match, true);
+    // Named-parameter row(s) for objIdx 4 should still be present alongside
+    // the GA rows, not replaced by them.
+    assert.ok((body.decoded ?? []).some((d: any) => d.section !== 'Group Addresses'));
+    // GA/Association bytes must NOT be folded into the raw byte totals -
+    // those stay scoped to the parameter segment only (4 bytes).
+    assert.equal(body.totalBytes, paramMem.length);
+  });
+
+  it('flags a mismatch when the device\'s actual GA table differs from the project', async () => {
+    mockBus.connected = true;
+    // Device's real GA/Association tables only carry object 0's own link
+    // (2/1/2 = GA_LINKS[2]) - object 12's links and object 48 entirely are
+    // missing on the device side, so they should mismatch while object 0
+    // stays correct.
+    const corruptedGa = buildGATable([GA_LINKS[2]!]);
+    const corruptedAssoc = buildAssocTable(
+      CO_ROWS.filter((c) => c.object_number === 0),
+      [GA_LINKS[2]!],
+    );
+    seedPropAndMem(corruptedGa, corruptedAssoc);
+    const r = await req(ts.baseUrl, 'POST', '/bus/verify-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    mockBus.propImage = null;
+    mockBus.memImage = null;
+    assert.equal(r.status, 200);
+    const body = r.data as any;
+    const gaRows = (body.decoded ?? []).filter(
+      (d: any) => d.section === 'Group Addresses',
+    );
+    const byCO = new Map(gaRows.map((r: any) => [r.key, r]));
+    assert.equal((byCO.get('co-0-ga') as any).match, true);
+    assert.equal((byCO.get('co-12-ga') as any).match, false);
+    assert.equal((byCO.get('co-48-ga') as any).match, false);
   });
 });

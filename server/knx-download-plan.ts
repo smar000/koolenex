@@ -376,6 +376,54 @@ export interface VerifyPlan {
   family: VerifyFamily;
   mem: VerifyMemRegion[];
   props: VerifyPropRead[];
+  // GA table (objIdx 1) / Association table (objIdx 2) regions, kept
+  // separate from `mem` deliberately - see downloadDevice()'s WriteRelMem
+  // case for the write-side twin of this same gap. Only populated when the
+  // app's own model doesn't already declare a WriteRelMem/LoadImageProp
+  // step for these objects (i.e. would otherwise never be verified at all,
+  // matching the fact they'd otherwise never have been written either).
+  // Kept out of `mem`/`totalBytes` so the existing "raw memory bytes match"
+  // scope (parameter segment only) and the `segments.length === 1` decode
+  // gate in the verify-device route are unaffected - these are decoded and
+  // surfaced as their own named comparison rows instead (per communication
+  // object, not per raw byte).
+  gaAssocMem: VerifyMemRegion[];
+}
+
+// Shared by every VerifyPlan branch below - see the `gaAssocMem` field
+// comment above for why this exists and is kept separate from `mem`.
+function buildGaAssocMem(
+  steps: PlanStep[],
+  gaTable: Buffer | null,
+  assocTable: Buffer | null,
+  relBaseByObj: Record<number, number>,
+): VerifyMemRegion[] {
+  const declaredObjIdxs = new Set(
+    steps
+      .filter((s) => s.type === 'WriteRelMem' || s.type === 'LoadImageProp')
+      .map((s) => s.objIdx),
+  );
+  const out: VerifyMemRegion[] = [];
+  if (gaTable && gaTable.length && !declaredObjIdxs.has(1) && relBaseByObj[1] != null) {
+    out.push({
+      addr: relBaseByObj[1],
+      expected: gaTable,
+      label: `gatable@0x${relBaseByObj[1].toString(16)}`,
+    });
+  }
+  if (
+    assocTable &&
+    assocTable.length &&
+    !declaredObjIdxs.has(2) &&
+    relBaseByObj[2] != null
+  ) {
+    out.push({
+      addr: relBaseByObj[2],
+      expected: assocTable,
+      label: `assoctable@0x${relBaseByObj[2].toString(16)}`,
+    });
+  }
+  return out;
 }
 
 export function planVerify(
@@ -388,6 +436,8 @@ export function planVerify(
   appId: string = '',
   relBaseByObj: Record<number, number> = {},
 ): VerifyPlan {
+  const gaAssocMem = buildGaAssocMem(steps, gaTable, assocTable, relBaseByObj);
+
   // AbsSegment (MDT-style): read back exactly what planDownload would stream.
   if (isAbsSegmentProcedure(steps)) {
     const ops = planDownload(
@@ -408,7 +458,7 @@ export function planVerify(
         label: `mem@0x${op.addr.toString(16)}`,
       });
     }
-    return { family: 'absmem', mem, props: [] };
+    return { family: 'absmem', mem, props: [], gaAssocMem };
   }
 
   // Legacy RelSegment: read paramMem at each WriteRelMem segment's offset.
@@ -431,7 +481,7 @@ export function planVerify(
         label: `relmem@0x${(base + offset).toString(16)}`,
       });
     }
-    return { family: 'relmem', mem, props: [] };
+    return { family: 'relmem', mem, props: [], gaAssocMem };
   }
 
   // Property-configured device (e.g. KNX IP router): no downloadable parameter
@@ -457,8 +507,8 @@ export function planVerify(
         label: `prop obj=${s.objIdx} pid=${s.propId}`,
       });
     }
-    if (props.length) return { family: 'prop', mem: [], props };
+    if (props.length) return { family: 'prop', mem: [], props, gaAssocMem };
   }
 
-  return { family: 'none', mem: [], props: [] };
+  return { family: 'none', mem: [], props: [], gaAssocMem };
 }

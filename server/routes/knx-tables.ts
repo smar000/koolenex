@@ -235,6 +235,43 @@ export function buildAssocTable(coRows: CoRow[], gaLinks: GaLink[]): Buffer {
   return buf;
 }
 
+// Decode raw GA table bytes (the inverse of buildGATable) back into an
+// ordered list of "main/mid/sub" address strings. Format confirmed via
+// direct byte decode of a real captured Full Download - see
+// docs/knx-device-write-protocol.md §2.6/§1.1 (koolenex repo).
+export function decodeGATable(buf: Buffer): string[] {
+  if (buf.length < 2) return [];
+  const count = buf.readUInt16BE(0);
+  const gas: string[] = [];
+  for (let i = 0; i < count && 2 + i * 2 + 2 <= buf.length; i++) {
+    const raw = buf.readUInt16BE(2 + i * 2);
+    const main = (raw >> 11) & 0x1f;
+    const mid = (raw >> 8) & 0x07;
+    const sub = raw & 0xff;
+    gas.push(`${main}/${mid}/${sub}`);
+  }
+  return gas;
+}
+
+// Decode raw Association table bytes (the inverse of buildAssocTable) into
+// a map of communication-object number -> its GA address (resolved via the
+// paired GA table's own decode, 1-based gaIndex). A com object with
+// multiple GA links gets multiple entries in the returned array.
+export function decodeAssocTable(
+  buf: Buffer,
+  gas: string[],
+): Array<{ coNumber: number; ga: string | null }> {
+  if (buf.length < 2) return [];
+  const count = buf.readUInt16BE(0);
+  const out: Array<{ coNumber: number; ga: string | null }> = [];
+  for (let i = 0; i < count && 2 + i * 4 + 4 <= buf.length; i++) {
+    const gaIndex = buf.readUInt16BE(2 + i * 4); // 1-based
+    const coNumber = buf.readUInt16BE(2 + i * 4 + 2);
+    out.push({ coNumber, ga: gas[gaIndex - 1] ?? null });
+  }
+  return out;
+}
+
 // Test whether a numeric/string value matches an ETS when-test condition.
 export function etsTestMatch(
   val: string | number,

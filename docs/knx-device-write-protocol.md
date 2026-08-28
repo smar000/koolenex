@@ -394,149 +394,43 @@ Consolidated from throughout this document, for visibility:
    unrelated to the write-path findings in this document but affects write *correctness* once
    the write-path itself works.
 7. ~~Whether these findings hold for 1.1.10 specifically re-tested against the current fixed
-   code~~ — **RESOLVED 2026-08-29, see Part 8**: re-tested with a fresh 3-download session;
+   code~~ — **RESOLVED 2026-08-29, see Part 7**: re-tested with a fresh 3-download session;
    confirmed the universal GA/Association mechanism a second time and surfaced a real,
    previously-unverified `LoadImageProp` bug (now fixed).
 
-## Part 6 — GA table / Association table writes were never wired up at all (RESOLVED 2026-08-29)
+## Part 6 — GA table / Association table writes are a universal, mask-defined procedure, not something every app declares (RESOLVED 2026-08-29)
 
-Asked directly: *"Did we factor for GA writes anywhere?"* Answer at the time: **no** — 🟢
-confirmed by reading 1.1.9's real app model (`data/apps/M-0004_A-0025-10-1BA6-O00A6.json`)
-directly: its `loadProcedures` declares only objIdx 4 (parameters). No `RelSegment`/
-`WriteRelMem`/`LoadImageProp` step exists for objIdx 1 (GA table) or objIdx 2 (Association
-table) anywhere in the app's own `Static/LoadProcedures` XML, even though Part 1.1's Stage 3
-table above shows real ETS writes both objects, via the identical RelSegment mechanism used for
-parameters. koolenex's model-extraction code (`server/ets-app.ts`) parses `LoadProcedures`
-faithfully - no synthesis - so this reflects the real app XML, not a parsing bug. 1.1.10's app
-is shaped differently: it declares `LoadImageProp` for objIdx 1/2/3/4 explicitly (a different
-mechanism, property 27, already honored). 🟡 **INFERRED**: real ETS's GA/Association table
-loading is apparently a universal, mask-defined procedure some apps don't need to declare
-explicitly - not confirmed from spec text, only from this one real app's absence of a
-declaration combined with the wire evidence that ETS writes it anyway.
+🟢 Confirmed: real ETS writes the GA table (objIdx 1) and Association table (objIdx 2) during a
+Full Download via the identical RelSegment Unload/StartLoading/LoadData/write/LoadCompleted
+mechanism used for parameters - but not every app's own `LoadProcedures` declares this itself.
+1.1.9's app (`M-0004_A-0025-10-1BA6-O00A6`) declares no `RelSegment`/`WriteRelMem`/`LoadImageProp`
+step at all for objIdx 1/2, and real ETS writes both anyway. 1.1.10's app declares `LoadImageProp`
+for objIdx 1/2/3/4 explicitly instead (a different mechanism - property 27, see Part 7). 🟡
+**INFERRED**: this table-loading procedure is apparently universal and mask-defined, something
+some apps simply don't need to declare - not confirmed from spec text, only from this app's
+absence of a declaration combined with the wire evidence that ETS writes it anyway. Confirmed a
+second time, independently, against 1.1.10 (which *does* write both tables, via the same
+mechanism, despite declaring its GA/Association handling differently).
 
-**Fixed** (koolenex commit `2227b40`): `downloadDevice()` now synthesizes the missing Unload/
-StartLoading/LoadData/write/LoadCompleted sequence for objIdx 1/2 whenever the model hasn't
-already handled them some other way, using the caller-supplied `gaTable`/`assocTable` buffers
-directly as the write payload (their own `.length` supplies the `LoadData` size - no extra
-metadata needed, confirmed to match exactly: 6 bytes for a 2-GA table, 10 bytes for a 2-entry
-association table).
+**Still open**: whether this is truly universal across every mask family (only tested on two
+System B devices), and whether it holds for apps with more than 2 GAs or association entries.
 
-**A second, more serious bug found in the same real-hardware test** (koolenex commit
-`ca7729d`): the moment this fix made koolenex actually write these tables for the first time
-ever, the real device came back with the wrong bytes - `buildGATable()`/`buildAssocTable()`
-(`server/routes/knx-tables.ts`) used a 1-byte count field and, for the association table,
-1-byte `[CO_num, GA_idx]` entries with CO first - none of which matches the real wire format
-confirmed in §2.6/§1.1 (`[count:2][GA:2]...` and `[count:2][gaIndex:2][coNumber:2]...`
-respectively, both 2-byte BE fields, GA index before CO number). **This had never been exercised
-against real hardware before**, since koolenex never wrote these tables at all until the fix
-above landed. Real consequence: this briefly wrote the wrong format to the real testbed device
-(1.1.9), corrupting its on-device GA/Association tables (real data, wrong packing - not erased).
-Fixed and immediately re-verified: re-ran `program-device`, read back both tables, confirmed
-byte-for-byte identical to the real ETS-written format (`000249014904` /
-`00020001000500020008`).
+Implementation history (koolenex code changes, commit hashes, two real bugs found fixing this):
+`docs/follow-ups/2026-08-29-property27-ga-write-wiring-and-ui.md`, part 1.
 
-**How this bears on Part 5, item 3 above** (whether the mask-gating fix generalizes): unrelated
-- this was a pure data-formatting bug in the table builders, not a protocol/mask-family
-question. Both bugs are now covered by dedicated tests
-(`tests/ga-assoc-table-write.test.ts`, updated `tests/protocol.test.ts`).
+## Part 7 — Property 27 (`LoadImageProp`/`WriteProp`): what it is, and where it comes from (RESOLVED 2026-08-29)
 
-**Still open**: whether real ETS's GA/Association loading is *truly* universal across every
-mask family (only tested on two System B devices), and whether the "no declared step" fallback
-correctly generalizes to apps with more than 2 GAs or association entries beyond what's been
-tested here (small real samples throughout).
+Re-testing 1.1.10 against the current write-path code (closing Part 5 item 7) surfaced two real
+bugs in how koolenex's own `LoadImageProp`/`WriteProp` handling worked, both now fixed - but the
+more durable finding is the protocol fact itself, below.
 
-## Part 7 — GA info added to two UI pages: the Parameters tab (side benefit) and the verify compare page (the actual request)
+### Where property 27 comes from - it's in the project file, not decided at download time
 
-A user request to "add GA info" was initially misread as being about the device detail panel's
-Parameters tab. That page showed zero GA/communication-object information, even though the
-panel's own separate GROUP ADDRESSES/GROUP OBJECTS tabs have always covered this at the
-whole-device level - so a cross-reference was added there first (still real, still kept). 🟢
-**CONFIRMED, not speculative** - `server/ets-app.ts`'s `evalDynamic()` already computes, at
-import time, which channel each communication object belongs to (the same `<Channel>` grouping
-that structures the Parameters view itself), stored in each `com_objects` row's `channel`
-column. The client (`client/src/detail/DeviceParameters.tsx`) fetches this via the existing
-`GET /projects/:id/comobjects` endpoint and renders a "COMMUNICATION OBJECTS" panel under
-whichever section is currently active, matched by channel name. Verified live: 1.1.9's "Timer
-configuration" section correctly shows all 6 Timer-channel com objects, including both real GA
-links.
-
-**What was actually asked for, once clarified with a screenshot**: GA info on the *Device vs
-Project verify/compare page* (`Programming` → `Verify`, `client/src/views/
-DeviceCompareResults.tsx`) - the page that reads the device over the bus and diffs it against
-the project's computed image, shown in the same screenshot as this doc's Part 6 GA-write finding
-above. That page had no GA comparison at all, for the same underlying reason as Part 6: the
-verify plan (`planVerify()`) only ever built regions for what the app's model declares, and
-1.1.9's app declares nothing for objIdx 1/2.
-
-**Fixed** (koolenex commit `c41168e`): `planVerify()` now returns a `gaAssocMem` field built the
-same way as the Part 6 write-side fix - resolves the real device-resident base for objIdx 1/2
-(extending `resolveRelmemBases()` to accept extra objIdx targets) whenever the model doesn't
-already declare a step for them, but only for genuinely RelSegment-family apps (at least one
-real `WriteRelMem` step) - AbsSegment/prop-only devices have no confirmed equivalent mechanism.
-The verify-device route decodes the read-back bytes (new `decodeGATable()`/`decodeAssocTable()`
-in `knx-tables.ts`, the inverse of the existing builders) into one comparison row per
-communication object, folded into the same `decoded` array the frontend already renders, under
-a new "Group Addresses" section - no frontend code changes needed, since that page already
-generically renders whatever sections come back.
-
-**A real bug caught by the test written for this, before it ever reached hardware**: a
-communication object with more than one GA link only kept the *last* decoded link, silently
-dropping earlier ones - fixed as part of the same commit.
-
-**Confirmed on real hardware, via the actual UI page** (not just curl): the slide-over now shows
-a "GROUP ADDRESSES" section with both of 1.1.9's real GA links (`9/1/1`, `9/1/4`), both correctly
-matching project vs. device.
-
-**Caveat, don't overclaim** (applies to both UI additions in this Part): channel-name matching
-(Parameters tab) is not a true per-parameter link - KNX has no such concept. A section whose
-channel label doesn't exactly match any com object's `channel` string shows nothing, even if
-conceptually related. Not an issue for the one real app
-tested here, but worth remembering if a future app's channel naming is less consistent.
-
-**A second, real bug found immediately after, testing the differ badge on real hardware**
-(koolenex commit `3bd9ca0`): the actual-bytes read for a GA/Association table region was sized
-off the *project's* currently-computed `expected` buffer length, not the *device's* own real
-on-device table size. Those normally agree, but not always - removing a GA link in the project
-(without a re-download) shrinks the project's computed table while the device's real one stays
-the same, larger size; the read then truncated to the smaller size, and the decoders correctly
-stopped at that truncation point per their own bounds checks, silently reporting real entries
-past it as missing (`actualValue: null`) rather than as a genuine byte-level mismatch. 🟢
-**CONFIRMED on real hardware**: reproduced by temporarily removing one com object's GA link
-project-side only (no device write) - a completely unrelated, still-correctly-linked com object
-came back `actualValue: null` even though its real device value was untouched and correct.
-Fixed with a two-pass read (real 2-byte count field first, then the real full length it implies,
-capped defensively at 2000 bytes) rather than trusting the project's assumed size. Reconfirmed
-correct on real hardware after the fix, same reproduction steps.
-
-**UI refinement, same session**: the two separate "params matched"/"GAs matched" badges were
-combined into one (`All N params / M GAs matched`, or composing whichever side has a nonzero
-count when something differs) - per the user's observation that the page shows both scopes
-together with no real filtering distinction between them, so two badges was pure redundancy
-once neither had anything to report. Commit `6f0bff0`.
-
-## Part 8 — 1.1.10 re-baselined; `LoadImageProp` and `WriteProp` (property 27) both got fixed (RESOLVED 2026-08-29)
-
-Item 7 of Part 5's open questions flagged that 1.1.10 (the only app in this project declaring
-`LoadImageProp`, per Part 6) had never been re-tested against the six write-path fixes in Part 3
-- its earlier "write path proven correct" finding predated all of them. Closed with a fresh
-3-download real-hardware session (Full + 2 Partials, one flipping a boolean status-indicator
-flag, one reverting it) against 1.1.10 specifically.
-
-**Confirms Part 6's universal GA/Association mechanism a second time**: 1.1.10 writes both
-tables via the identical RelSegment Unload/StartLoading/LoadData/write/LoadCompleted sequence
-already established for 1.1.9 - independent real-hardware confirmation, still only two devices/
-one manufacturer.
-
-### Where property 27 actually comes from - it's in the project file, not decided at download time
-
-Before the two bugs below, it's worth being explicit about *why* only 1.1.10 is affected at all,
-since this isn't ETS deciding something dynamically per-device. Every device's app carries its
-own `LoadProcedures` list (parsed by `server/ets-app.ts` from the real `.knxproj`/`.knxprod` XML,
-already fully visible in `data/apps/*.json`) - a per-app, manufacturer-authored recipe of exactly
-what steps to run on download, in order. 1.1.9's app declares no `WriteProp`/`LoadImageProp` step
-for property 27 anywhere, so it never touches this property at all - that's not a gap in our
-model extraction, the real app XML simply doesn't ask for it. 1.1.10's app does, and its full
-declaration (in order) is:
+This isn't ETS deciding something dynamically per-device. Every device's app carries its own
+`LoadProcedures` list (already parsed into `data/apps/*.json`) - a per-app, manufacturer-authored
+recipe of exactly what steps to run on download, in order. 1.1.9's app declares no `WriteProp`/
+`LoadImageProp` step for property 27 anywhere, so it never touches this property at all - the
+real app XML simply doesn't ask for it. 1.1.10's app does, and its full declaration (in order) is:
 
 ```
 RelSegment (mode: full)         — allocate space, Full Download
@@ -551,16 +445,16 @@ LoadImageProp objIdx=4 propId=27
 ```
 
 Checking `data/apps/*.json` across every app that declares a `WriteProp` for objIdx4/propId27
-(not just 1.1.10's - several different manufacturer IDs: `0004`, `0048`, `00C5`, `0233`) shows
-the same two-step, literal-fixed-data shape every time, just with different embedded values.
-**This is exported, manufacturer-authored data ETS ships with the project - not something a
+(not just 1.1.10's - several different manufacturer IDs: `0004`, `0048`, `00C5`, `0233`) shows the
+same two-step, literal-fixed-data shape every time, just with different embedded values. **This
+is exported, manufacturer-authored data ETS ships with the project - not something a
 download-time algorithm computes.**
 
 ### What property 27 actually is, in plain terms
 
-A KNX device management operation always addresses "object N, property M" - `objIdx` is a
-logical object inside the device's own internal object table, not a raw memory address.
-Property 27 happens to exist as an attribute on several of these objects here:
+A KNX device management operation always addresses "object N, property M" - `objIdx` is a logical
+object inside the device's own internal object table, not a raw memory address. Property 27
+happens to exist as an attribute on several of these objects here:
 
 | objIdx | What it is |
 |---|---|
@@ -570,80 +464,29 @@ Property 27 happens to exist as an attribute on several of these objects here:
 | 4 | The application/parameter memory object - the real device settings |
 
 So it isn't its own memory area - it's a per-object "content status/checksum" attribute that
-happens to be shared property ID 27 across object types 1-4. The real wire evidence (below)
-points to it being the device's own record of "what does my currently-loaded content look
-like/hash to", not anything ETS computes and hands over.
+happens to be shared property ID 27 across object types 1-4.
 
-### Bug 1: `LoadImageProp` was writing to a property real ETS only ever reads
+### The two real protocol facts, confirmed on real hardware (3 independent downloads)
 
-🟢 Confirmed, 3 independent real downloads: **all four** of objIdx 1/2/3/4's `LoadImageProp`
-step is read-only in real ETS - byte-identical value before and after the load cycle, every
-time, for every object including 4. It's a read-back/verify step, not a write, despite the step
-name.
+- 🟢 **`LoadImageProp` is read-only for all four objects**, including objIdx4 - byte-identical
+  value before and after the load cycle, every time. It's a verify/read-back step, not a write,
+  despite the step name. The real functional write to objIdx4/property27 comes entirely from the
+  separate `WriteProp` steps shown above.
+- 🟢 **The project file's declared `WriteProp` data for property 27 is always 2 bytes longer than
+  what real ETS actually transmits** - `00 00 28 c0 00 33 00 00 | 00 00` declared (10 bytes) vs.
+  `00 00 28 c0 00 33 00 00` on the wire (8 bytes), confirmed byte-for-byte and consistent across
+  every manufacturer's app that declares this step.
 
-koolenex's pre-existing `LoadImageProp` handler (in place before this finding, never previously
-exercised against real hardware since 1.1.10 is the only app that declares this step at all) got
-this backwards - it blindly wrote for *every* declared object: GA-table bytes to objIdx1,
-Association-table bytes to objIdx2, a stray single `0x04` byte to objIdx3, none of which real
-ETS ever does. (An earlier version of this fix also added a fabricated write for objIdx4,
-reasoning from the wire capture alone before the app-model comparison below caught that this was
-also wrong - see "self-correction" below.)
+koolenex's own handling of both of these had real, previously-unverified bugs (never exercised
+against real hardware before, since 1.1.10 is the only app that declares either step) - now
+fixed, including a same-day self-correction where the first fix itself mis-attributed the real
+objIdx4 writes to the wrong step. Full implementation narrative, commit hashes, and the
+self-correction: `docs/follow-ups/2026-08-29-property27-ga-write-wiring-and-ui.md`, part 3.
 
-**Fixed** (koolenex, `test/relmem-real-device-fixtures` branch, commit `563dbe3`, corrected same
-day): `LoadImageProp` is now read-only for all four objects, full stop. New coverage in
-`tests/knx-connection.test.ts`.
-
-### Bug 2: `WriteProp`'s declared data for property 27 is 2 bytes longer than what ETS actually sends
-
-The real functional write to objIdx4/property 27 doesn't come from `LoadImageProp` at all - it
-comes from the two `WriteProp` steps shown in the app declaration above, using literal fixed
-bytes straight from the project file. Comparing that literal data against the real wire capture
-byte-for-byte:
-
-```
-Project file (declared, 10 bytes):  00 00 28 c0 00 33 00 00 | 00 00
-Real wire (actually sent, 8 bytes): 00 00 28 c0 00 33 00 00
-```
-
-The first 8 bytes match exactly; the file's declared value always carries 2 extra trailing zero
-bytes real ETS never transmits. Checked against every app in `data/apps/*.json` that declares
-this step (multiple manufacturers) - every single one is exactly 10 bytes, always ending in the
-same 2-byte pad beyond a real 8-byte element. Not observed for any other property in that same
-data, so this is scoped specifically to property 27's declared format, not a general artifact of
-how `WriteProp`'s `InlineData` is parsed.
-
-koolenex's pre-existing `WriteProp` case (also untouched before this finding, also never
-exercised against real hardware for this specific property) sent the raw declared value
-unmodified - 2 bytes longer than what real ETS puts on the wire. Untested whether a real device
-would reject, truncate, or otherwise mishandle the extra bytes; fixed defensively rather than
-finding out live.
-
-**Fixed** (same commit): `WriteProp` now trims data to its first 8 bytes specifically when
-`propId === 27`, before sending. Every other property's `WriteProp` data passes through
-unmodified. New coverage in `tests/knx-connection.test.ts`.
-
-### Self-correction worth recording
-
-The first version of the `LoadImageProp` fix, reasoning from the wire capture in isolation,
-mis-attributed the two real objIdx4/property-27 writes to `LoadImageProp` itself and built a
-"read the current array, zero the trailing bytes, write it back" special case to reproduce them.
-Comparing directly against the app's own declared `LoadProcedures` order (only done afterward,
-prompted by a direct question about what the project file itself says) showed those two writes
-line up exactly with the separate, pre-existing `WriteProp` steps instead - `LoadImageProp` for
-objIdx4 contributes nothing but a read, same as objIdx 1/2/3. The corrected fix removes that
-special case entirely; a real functional write for objIdx4 already existed via `WriteProp`, once
-that step's own separate byte-length bug (above) was also fixed. Lesson: when a wire capture
-alone seems to explain a step's behavior, cross-check it against the actual declared step list
-before building special-case logic around it - the file itself is a more reliable source than
-inferring intent from timing.
-
-### Still open
-
-Only one app/device has ever declared either of these steps at all (1.1.10, mask `07b0`), so
-while the *shape* of the fix (property 27's read/write split, and the 10-vs-8-byte trim) is now
-backed by many different manufacturers' declared data in `data/apps/*.json`, the actual live
-wire confirmation is still one real device. Object 3's identity (Part 5 item 2) remains
-unresolved.
+**Still open**: only one app/device has ever declared either step at all (1.1.10, mask `07b0`),
+so while the *shape* of both facts above is now backed by many different manufacturers' declared
+data in `data/apps/*.json`, the actual live wire confirmation is still one real device. Object 3's
+identity (Part 5 item 2) remains unresolved.
 
 ## Sources
 
@@ -659,11 +502,12 @@ unresolved.
   `2026-08-28-ga-wire-format-1.1.9-1.1.10.pcapng` — source for Part 2.6 (GA/Association table
   formats), not independently re-derived in this document.
 - `docs/data/captures/2026-08-29-ets-0-failed-connection-attempts-1.1.10.pcapng` and
-  `2026-08-29-ets-1/2/3-...-1.1.10.pcapng` (knx-ets-manager repo) — primary source for Part 8.
+  `2026-08-29-ets-1/2/3-...-1.1.10.pcapng` (knx-ets-manager repo) — primary source for Part 7.
 - `docs/follow-ups/2026-08-27-relmem-write-scope-investigation.md`,
-  `docs/follow-ups/2026-08-28-write-path-missing-load-sequence.md` (koolenex repo) — the dated
+  `docs/follow-ups/2026-08-28-write-path-missing-load-sequence.md`,
+  `docs/follow-ups/2026-08-29-property27-ga-write-wiring-and-ui.md` (koolenex repo) — the dated
   investigation logs this document consolidates. Read those for the full narrative, including
-  dead ends and the exact chronology of each fix.
+  dead ends, UI/implementation work, and the exact chronology of each fix.
 - `koolenex_reference` memory (knx-ets-manager repo's persistent memory) — broader project
   narrative, including findings unrelated to the write path itself (e.g. the enum-mapping
   retraction in Part 3).

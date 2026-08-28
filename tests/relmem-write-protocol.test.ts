@@ -228,13 +228,19 @@ describe('WriteRelMem protocol-level test — 1.1.10 (real captured memory, base
     }
   });
 
-  it('a chunk straddling the 0xFFFF boundary would still resolve correctly (sanity on chunk math)', async () => {
-    // Not this device's real case (its base alone is already > 0xFFFF, so
-    // every chunk is extended) - included for completeness, mirroring
-    // memory-read.test.ts's equivalent read-side boundary test, using a
-    // synthetic low base instead of real captured data (no real fixture
-    // straddles the boundary since real relmem bases are either always
-    // low or always high per device).
+  it('a chunk straddling the 0xFFFF boundary still resolves to the correct address (sanity on chunk math)', async () => {
+    // Originally this asserted the write path's old conditional behavior
+    // (legacy Memory_Write for chunks whose address fit in 16 bits,
+    // A_MemoryExtended_Write only once it didn't). 2026-08-28 correction:
+    // WriteRelMem now always uses A_MemoryExtended_Write regardless of
+    // address size - a real captured ETS Partial Download against 1.1.9
+    // (address 0x5F53, well within 16 bits) still used the extended service
+    // exclusively, and koolenex's own legacy write for that same address
+    // (byte-identical count/address/data otherwise) was confirmed on real
+    // hardware, twice reproducibly, to silently fail to persist - see
+    // knx-connection.ts's WriteRelMem case and koolenex-reference memory.
+    // This test now only sanity-checks the chunk-address math itself (not
+    // which service gets picked, since it's unconditional now).
     const backing = Buffer.alloc(0x10100);
     const dev = new FakeWritableMemoryDevice('1.1.10', backing);
     const payload = Buffer.alloc(16, 0xaa);
@@ -251,8 +257,10 @@ describe('WriteRelMem protocol-level test — 1.1.10 (real captured memory, base
 
     const sentWrites = dev.writesSent();
     assert.equal(sentWrites.length, 2, 'expected 2 chunks for a 16-byte write at MEM_CHUNK=10');
-    assert.equal(sentWrites[0]!.extended, false, 'first chunk (0xFFF8) fits in 16 bits');
-    assert.equal(sentWrites[1]!.extended, true, 'second chunk (0x10002) does not');
+    assert.equal(sentWrites[0]!.extended, true, 'always A_MemoryExtended_Write now, regardless of address size');
+    assert.equal(sentWrites[0]!.address, 0xfff8);
+    assert.equal(sentWrites[1]!.extended, true, 'always A_MemoryExtended_Write now, regardless of address size');
+    assert.equal(sentWrites[1]!.address, 0x10002);
     assert.deepEqual(
       [...dev.memory.subarray(0xfff8, 0xfff8 + 16)],
       [...payload],

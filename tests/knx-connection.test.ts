@@ -500,7 +500,7 @@ describe('KnxConnection.downloadDevice', () => {
     assert.ok(progress.includes('Download complete'));
   });
 
-  it('uses legacy Memory_Write when the resolved address fits in 16 bits', async () => {
+  it('uses MemoryExtended_Write even when the resolved address fits in 16 bits', async () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
@@ -510,20 +510,28 @@ describe('KnxConnection.downloadDevice', () => {
       { type: 'WriteRelMem', objIdx: 0, propId: 0, size: 8, offset: 0x100 },
     ];
     // No resolvedBases entry → base defaults to 0, so addr = 0x100, well
-    // under 0xFFFF - must keep using the legacy service.
+    // under 0xFFFF. Originally this asserted the legacy service was kept for
+    // addresses that fit in 16 bits - 2026-08-28 correction: a real captured
+    // ETS Partial Download against 1.1.9 (address 0x5F53, also well within
+    // 16 bits) still used A_MemoryExtended_Write exclusively, and koolenex's
+    // own legacy write for that same address (byte-identical count/address/
+    // data otherwise) was confirmed on real hardware, twice reproducibly, to
+    // silently fail to persist - see knx-connection.ts's WriteRelMem case.
+    // WriteRelMem now always uses the extended service, regardless of
+    // address size.
     await conn.downloadDevice('1.1.2', steps, null, null, paramMem, undefined);
 
     const writes = conn.sent
       .map((c) => parseCEMI(c))
       .filter((f) => f && f.apciName === 'Memory_Write');
-    assert.equal(writes.length, 1);
+    assert.equal(writes.length, 0);
     const extWrites = conn.sent
       .map((c) => parseCEMI(c))
       .filter((f) => f && f.apciName === 'MemoryExtended_Write');
-    assert.equal(extWrites.length, 0);
+    assert.equal(extWrites.length, 1);
   });
 
-  it('switches to MemoryExtended_Write when the resolved relmem base pushes the address above 0xFFFF', async () => {
+  it('uses MemoryExtended_Write when the resolved relmem base pushes the address above 0xFFFF (address encoded correctly, not truncated)', async () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';

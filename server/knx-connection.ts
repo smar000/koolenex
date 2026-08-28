@@ -906,28 +906,22 @@ export class KnxConnection extends EventEmitter {
               // the read side (see readRegionInSession). A resolved relmem
               // base can land above 0xFFFF, in which case the legacy service
               // silently truncates to the wrong (low) address and writes
-              // nothing meaningful to the real target. Use
-              // A_MemoryExtended_Write (24-bit address space) whenever the
-              // real address doesn't fit in 16 bits; devices whose address
-              // does fit keep using the legacy service unchanged. See
-              // koolenex-reference memory, 2026-08-26, for the real-hardware
-              // evidence (captured real ETS traffic) this was root-caused
-              // from.
-              const apdu =
-                addr > 0xffff
-                  ? apduMemoryExtendedWrite(seq, addr, chunk)
-                  : apduConnected(
-                      seq,
-                      'Memory_Write',
-                      Buffer.concat([
-                        Buffer.from([
-                          chunk.length,
-                          (addr >> 8) & 0xff,
-                          addr & 0xff,
-                        ]),
-                        chunk,
-                      ]),
-                    );
+              // nothing meaningful to the real target. Originally this only
+              // switched to A_MemoryExtended_Write when the address itself
+              // didn't fit in 16 bits (see koolenex-reference memory,
+              // 2026-08-26). 2026-08-28 correction: a real captured ETS
+              // Partial Download against 1.1.9 (address 0x5F53, well within
+              // 16 bits) still used A_MemoryExtended_Write exclusively -
+              // confirmed via byte-level replay: a verbatim replay of ETS's
+              // own captured frames (all-extended) persisted correctly on
+              // real hardware, while koolenex's own reconstruction (legacy
+              // Memory_Write for this same address, otherwise byte-identical
+              // count/address/data) silently failed to persist, twice,
+              // reproducibly. This device/app appears to only honor
+              // A_MemoryExtended_Write on the RelSegment-gated download path,
+              // regardless of whether the address fits in 16 bits - always
+              // use the extended service here.
+              const apdu = apduMemoryExtendedWrite(seq, addr, chunk);
               const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
               await this.sendCEMI(cemi);
               await delay(30);

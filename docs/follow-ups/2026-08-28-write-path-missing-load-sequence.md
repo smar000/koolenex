@@ -1,5 +1,12 @@
 # Investigation: real device writes never take effect — koolenex's write path skips the entire Unload/Load/LoadCompleted sequence
 
+**See also**: `docs/knx-device-write-protocol.md` — a consolidated, topic-organized, evidence-
+tagged (CONFIRMED/INFERRED/SPECULATIVE) reference covering everything settled in this
+investigation log plus a full frame-by-frame decode of the Full Download and both Partial
+Download captures. This log remains the chronological investigation record (dead ends,
+retracted theories, exact order of discovery); the reference doc is the place to check current
+facts without re-reading the narrative.
+
 **Status: RESOLVED.** Six independent, sequential root causes were found and fixed, each confirmed on real
 hardware: (1) the entire missing Unload/StartLoading/LoadData/LoadCompleted sequence (this doc's original
 finding, below), (2) a Restart-before-LoadCompleted-confirmed race, (3) a missing `A_Authorize_Request`,

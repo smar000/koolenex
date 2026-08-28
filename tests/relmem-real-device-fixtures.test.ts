@@ -92,9 +92,18 @@ describe('real-device relmem fixtures — 1.1.10', () => {
   });
 
   it('actual vs computed-image diff count matches the captured verify-device result (1984)', () => {
-    // Large diff count is expected here (unlike 1.1.9): most of it is the
-    // gap region outside named parameters, where koolenex's blind 0xFF/0x00
-    // fill differs from the device's real (ETS-unknown-to-us) contents.
+    // Large diff count is expected here (unlike 1.1.9). Confirmed 2026-08-29
+    // (correcting an earlier, unverified comment here that wrongly blamed a
+    // "blind 0xFF/0x00 fill" - buildParamMem() has used the real
+    // manufacturer default blob (relSegData) as its base since April 2026,
+    // not a blind fill; that comment was never actually checked against the
+    // code before being written): every one of these 1984 offsets falls
+    // outside any named parameter's byte range (data/apps/*.json
+    // paramMemLayout has zero data for them, not wrong data), and their
+    // real device values follow an incrementing pattern consistent with
+    // device-internal operational/calibration state - not something ETS
+    // itself ever writes either (confirmed absent from every real capture
+    // this project has for this device, across two independent sessions).
     // This is a trip-wire, not a correctness assertion about the gap bytes.
     assert.equal(countDiffs(actual, expected), 1984);
   });

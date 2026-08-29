@@ -384,11 +384,15 @@ Consolidated from throughout this document, for visibility:
    between the two otherwise-identical Partial Download captures? (§1.2)
 2. ~~What object 3 actually represents~~ - **RESOLVED, see Part 10**: the standard KNX Group
    Object Table (object type `9`, confirmed against real KNX Master Data). What remains open is
-   narrower: why ETS only rewrites it on some Full Downloads and not others (Part 10).
+   narrower: why ETS only rewrites it on some Full Downloads and not others — a direct trigger
+   test on 2026-08-29 came back inconclusive (see Part 10's update); still unresolved.
 3. Whether the mask-version gate (§3) generalizes beyond System B, or whether a real legacy
    device needs something different — untested, no legacy hardware available.
 4. Whether the LoadData `mode` byte's Full/Partial meaning holds for objects other than OX=4 —
-   no real Partial-Download LoadData example exists for OX=1/2/3.
+   still no real ETS-captured Partial-Download LoadData example exists for OX=1/2/3. (koolenex's
+   own new `mode: 'partial'` write path, Part 11, now forces this byte for OX=1/2 too and
+   confirmed it's accepted by real hardware - but that's koolenex's own write, not an observed
+   real ETS Partial Download of these objects, so this item stays open as originally scoped.)
 5. The exact meaning of several unidentified property reads in Stage 1 (OX=0 P=15/25/56/78) —
    never looked up against a KNX property ID reference table.
 6. `buildParamMem()`'s padding-bit fill bug (fills unrelated bits sharing a byte with a
@@ -618,11 +622,57 @@ because nothing downstream had been built on it yet.
 
 🔴 **Still genuinely open**: why the Group Object Table is only rewritten in some Full Downloads
 and not others is now a narrower, more answerable question (a real, understood KNX object's
-write-triggering behavior) rather than a speculative one, but it remains unanswered. Possible
-starting point for later investigation: whether the two routine (non-rewriting) sessions also
-skipped writing GA/Association tables, or wrote those unconditionally regardless - if objIdx 1/2
-get written every time but objIdx 3 doesn't, that would narrow down what's actually different
-about the two triggering sessions. Not investigated further today.
+write-triggering behavior) rather than a speculative one, but it remains unanswered.
+
+**A direct trigger test was run 2026-08-29 against 1.1.9 and came back inconclusive, not
+positive or negative** - worth recording precisely rather than as a vague "still open," since
+it rules out one specific interpretation. Setup: an out-of-band write (bypassing any project,
+via `/bus/write-memory`) tampered the device's GA table while ETS's own project was left
+unchanged; a real ETS Full Download of that unchanged project both corrected the tampering
+(reconfirming Part 8 on a second device) AND wrote Object 3. That looks like it confirms the
+"written after tampering" theory - but doesn't, because **every 1.1.9 Full Download captured so
+far writes Object 3, tampered or not** (checked against 2 untampered captures from the same
+day). 1.1.9's baseline is already "always written," so no test on this device can show a
+trigger - the tampering and no-tampering cases are indistinguishable here. The only place this
+has ever been observed to vary is 1.1.10's single 08-28 session (2 of 4 downloads, tracking
+tampering) - genuinely a different device/app, not more units of the same one. 🟡 **Inferred,
+weakly**: Object 3's write-triggering behavior may simply differ per app/device (some always
+write it, some only write it when uncertain), rather than there being one universal rule -
+consistent with the mask-defined-but-app-specific-content pattern already established for this
+object, but not tested. Full narrative and the exact capture comparison table:
+`docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`. Next real test, if
+pursued: 1.1.10 specifically, a controlled untampered-then-tampered A/B rather than relying on
+the single historical 08-28 session.
+
+## Part 11 — koolenex has a real Partial-Download write mode, confirmed round-trip on real hardware (NEW 2026-08-29)
+
+Distinct from the LoadData mode-byte *observation* (Part 1/2, always sourced from real ETS
+traffic) - this part is about koolenex's own write path gaining, for the first time, actual
+Partial-Download behavior rather than always performing a Full-equivalent rewrite regardless of
+what was asked for.
+
+🟢 **Confirmed on real hardware, round trip, first attempt**: koolenex's `downloadDevice()` now
+supports `mode: 'partial'` - before touching an interface object, it reads the object's current
+content within the same management session and skips the entire Unload/StartLoading/LoadData/
+write/LoadCompleted cycle if it already matches the computed image; when a write is genuinely
+needed, the LoadData mode byte is set to the real captured Partial value (`0x00`, per Part 2)
+rather than the model's declared full/combined shape. Tested end-to-end: ETS wrote a GA change
+(Full Download); koolenex reverted it via an ordinary Full Download; koolenex then reverted it
+right back via the new partial mode - verified directly against the device at every step
+(`totalDiffering: 0`). The capture shows the parameter segment (8178 bytes) and Association
+table (10 bytes) - both genuinely unchanged - correctly skipped entirely (no LoadData frames for
+either), while only the GA table (the one real change) was written, with mode byte `0x00`.
+
+**Scope, don't overclaim**: tested only on 1.1.9 (System B, RelSegment/ABB-style app). The
+GA/Association-table skip logic is a best-effort extrapolation of the same pattern used for the
+parameter object - there was no real ETS Partial Download example of a GA/Association table
+write before this test (Part 5 item 4 was still open going in); this round trip is now real
+evidence for that specific device/app, not proof it generalizes to others. The AbsoluteSegment
+(MDT-style) download branch, used by a different manufacturer-app family entirely, is completely
+untouched by this and still only ever performs a full replay - no partial mode exists there.
+
+Full implementation narrative, commit hash, and test coverage:
+`docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`.
 
 ## Sources
 
@@ -647,12 +697,17 @@ about the two triggering sessions. Not investigated further today.
   `2026-08-29-ets-1/2/3-...-1.1.10.pcapng` (knx-ets-manager repo) — primary source for Part 7.
 - `docs/data/captures/2026-08-28-ets-full-download-history-and-blob-params-1.1.10.pcapng`
   (knx-ets-manager repo) — primary source for Parts 8 and 9.
+- `docs/data/captures/2026-08-29-ets-full-download-ga-9-1-4-to-9-1-5-1.1.9.pcapng`,
+  `2026-08-29-koolenex-partial-download-revert-9-1-5-1.1.9.pcapng`, and
+  `2026-08-29-ets-full-download-obj3-trigger-test-1.1.9.pcapng` (knx-ets-manager repo) — primary
+  source for Part 11 and the Part 10 trigger-test update.
 - `docs/follow-ups/2026-08-27-relmem-write-scope-investigation.md`,
   `docs/follow-ups/2026-08-28-write-path-missing-load-sequence.md`,
   `docs/follow-ups/2026-08-29-property27-ga-write-wiring-and-ui.md`,
-  `docs/follow-ups/2026-08-28-full-download-history-and-blob-params.md` (koolenex repo) — the dated
-  investigation logs this document consolidates. Read those for the full narrative, including
-  dead ends, UI/implementation work, and the exact chronology of each fix.
+  `docs/follow-ups/2026-08-28-full-download-history-and-blob-params.md`,
+  `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (koolenex repo) —
+  the dated investigation logs this document consolidates. Read those for the full narrative,
+  including dead ends, UI/implementation work, and the exact chronology of each fix.
 - `koolenex_reference` memory (knx-ets-manager repo's persistent memory) — broader project
   narrative, including findings unrelated to the write path itself (e.g. the enum-mapping
   retraction in Part 3).

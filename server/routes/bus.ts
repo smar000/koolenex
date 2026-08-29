@@ -946,12 +946,19 @@ function buildDeviceProgramming(dev: Device): DeviceProgramming {
   if (model.groupObjectTableSize && model.groupObjectTableSize > 0) {
     const groupObjects: GroupObjectFlags[] = coRows.map((co) => ({
       object_number: co.object_number,
-      // Update has no dedicated raw column (unlike the four below) because
-      // it's always safely recoverable from the composite `flags` string:
-      // buildFlags()'s only lossy case is its ALL-false fallback ('CW'),
-      // which never contains 'U' - so 'U' is present in `flags` iff Update
-      // is genuinely true, with no false-positive/negative case.
-      update: co.flags.includes('U'),
+      // Real bug, fixed 2026-08-29: this used to read `co.flags.includes('U')`
+      // on the reasoning that Update was always safely recoverable from the
+      // composite `flags` string (its only lossy case, the ALL-false
+      // fallback 'CW', never contains 'U'). That reasoning was correct
+      // GIVEN an accurate `flags` string - but `flags` itself was built from
+      // a value that was wrong at the source: ets-parser.ts read Update
+      // directly off the ComObjectRef's own UpdateFlag attribute with no
+      // fallback to the base ComObject's declared value (unlike every other
+      // flag, which already went through the proper base+override merge) -
+      // confirmed live on 1.1.10, where every project-side Update flag was
+      // wrongly off. Now uses the same dedicated raw column (`upd`) the
+      // other four flags already have.
+      update: !!co.upd,
       transmit: !!co.tx,
       readOnInit: !!co.read_on_init,
       write: !!co.write,

@@ -279,16 +279,19 @@ interface ParsedComObject {
   // ets-app.ts's CoDef/CorDef and docs/knx-device-write-protocol.md §10.1.
   read_on_init?: boolean;
   priority?: string;
-  // Raw Read/Write/Communication/Transmit booleans - added alongside
-  // read_on_init/priority above, same day. `flags` (buildFlags()) is a
-  // composite DISPLAY string only, and has a lossy fallback ('CW' when
-  // comm/read/write/tx/u are ALL false - see buildFlags()'s own comment) -
-  // not safe to parse back into individual booleans for a real download.
-  // Object 3's computeGroupObjectByte() needs the real booleans directly.
+  // Raw Read/Write/Communication/Transmit/Update booleans - added alongside
+  // read_on_init/priority above, same day (`update` added later the same
+  // day, once its resolution turned out to be a real bug - see the comment
+  // at its assignment above). `flags` (buildFlags()) is a composite DISPLAY
+  // string only, and has a lossy fallback ('CW' when comm/read/write/tx/u
+  // are ALL false - see buildFlags()'s own comment) - not safe to parse
+  // back into individual booleans for a real download. Object 3's
+  // computeGroupObjectByte() needs the real booleans directly.
   read?: boolean;
   write?: boolean;
   comm?: boolean;
   tx?: boolean;
+  update?: boolean;
 }
 
 interface ParsedSpace {
@@ -925,6 +928,7 @@ export function parseKnxproj(
               write = false,
               comm = false,
               tx = false,
+              update = false,
               readOnInit = false,
               priority = 'low';
             // Fallback: extract base object number from O-{n} pattern in refId
@@ -945,6 +949,7 @@ export function parseKnxproj(
                 write = resolved.write;
                 comm = resolved.comm;
                 tx = resolved.tx;
+                update = resolved.update;
                 readOnInit = resolved.readOnInit;
                 priority = resolved.priority;
                 objNum = resolved.objectNumber ?? objNum;
@@ -966,8 +971,18 @@ export function parseKnxproj(
               }
             }
 
-            const updateFlag = attr(cor, 'UpdateFlag') === 'Enabled';
-            const flags = buildFlags({ read, write, comm, tx, u: updateFlag });
+            // `update` above is now resolved the same way as read/write/
+            // comm/tx (base ComObject + ComObjectRef-override merge, via
+            // resolveCoRef()/resolveCoRefById() - see ets-app.ts's CoDef/
+            // CorDef) - it used to be read directly off the ComObjectRef's
+            // own UpdateFlag attribute with no fallback to the base object's
+            // declared value, which silently defaulted Update to OFF for
+            // every ComObjectRef that didn't explicitly override it (most of
+            // them don't - they inherit the app's base default). Confirmed
+            // as a real bug live: every project-side Update flag on 1.1.10
+            // read off while the real device (correctly programmed by real
+            // ETS) had it on for the same objects.
+            const flags = buildFlags({ read, write, comm, tx, u: update });
             const coObj: ParsedComObject = {
               device_address: ia,
               object_number: objNum,
@@ -988,6 +1003,7 @@ export function parseKnxproj(
               write,
               comm,
               tx,
+              update,
             };
 
             const coGAs: string[] = [],
@@ -1012,7 +1028,7 @@ export function parseKnxproj(
             //   - Remaining GAs: receive only (the object listens on these)
             // For COs with only T or only W, all GAs share the same direction.
             const gaRefs = (linksAttr || '').split(/\s+/).filter(Boolean);
-            const hasBoth = tx && (write || updateFlag);
+            const hasBoth = tx && (write || update);
             gaRefs.forEach((gaRef, idx) => {
               const gaAddr = resolveGA(gaRef);
               if (!gaAddr) return;
@@ -1020,7 +1036,7 @@ export function parseKnxproj(
                 // First = send, rest = receive
                 addGA(gaAddr, idx === 0, idx !== 0);
               } else {
-                addGA(gaAddr, !!tx, !!(write || updateFlag));
+                addGA(gaAddr, !!tx, !!(write || update));
               }
             });
 
@@ -1073,6 +1089,7 @@ export function parseKnxproj(
                   write: boolean;
                   comm: boolean;
                   tx: boolean;
+                  update: boolean;
                   readOnInit: boolean;
                   priority: string;
                   channel: string;
@@ -1102,7 +1119,16 @@ export function parseKnxproj(
                   function_text: merged.function_text,
                   dpt: merged.dpt,
                   object_size: merged.objectSize,
-                  flags: buildFlags(merged),
+                  // buildFlags() destructures a `u` key, not `update` -
+                  // `merged` never had a `u` property under any name (a
+                  // separate, pre-existing instance of the same category of
+                  // bug fixed at the other ParsedComObject construction site
+                  // above: Update was silently never included in `flags`
+                  // here at all, structurally, regardless of the real
+                  // resolved value) - pass it through explicitly rather than
+                  // relying on the object happening to already have the
+                  // right key name.
+                  flags: buildFlags({ ...merged, u: merged.update }),
                   direction:
                     merged.tx && !merged.write
                       ? 'output'
@@ -1116,6 +1142,7 @@ export function parseKnxproj(
                   write: merged.write,
                   comm: merged.comm,
                   tx: merged.tx,
+                  update: merged.update,
                 });
               } catch (e: unknown) {
                 logger.error('ets', 'CO merge error', {

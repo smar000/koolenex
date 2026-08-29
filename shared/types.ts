@@ -111,6 +111,14 @@ export interface ComObject {
   write: number;
   comm: number;
   tx: number;
+  // `upd`, not `update` - UPDATE is a SQL keyword, so the DB column (and
+  // this field) is named `upd` to avoid any risk of an unquoted identifier
+  // collision in raw SQL elsewhere against this table. Added 2026-08-29
+  // fixing a real bug: Update was never given its own raw column when
+  // read/write/comm/tx were, and was separately being resolved wrong
+  // (read directly off the ComObjectRef with no fallback to the base
+  // ComObject's declared value) - see ets-app.ts's CoDef.update comment.
+  upd: number;
 }
 
 export interface ComObjectWithDevice extends ComObject {

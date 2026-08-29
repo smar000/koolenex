@@ -40,6 +40,20 @@ interface CoDef {
   write: string;
   comm: string;
   tx: string;
+  // Update - added 2026-08-29, alongside the fix for a real bug: this field
+  // didn't exist at all until now, so ets-parser.ts read UpdateFlag directly
+  // off the ComObjectRef with no fallback to the base ComObject's own
+  // declared value (unlike every other flag here, which already goes
+  // through resolveCoRef()'s `cor.X ?? co.X` merge) - most real
+  // ComObjectRefs never override Update at all (they inherit the app's
+  // base default), so this silently defaulted Update to OFF for nearly
+  // every communication object, confirmed live on 1.1.10 where every
+  // project-side Update flag read off while the real device (correctly
+  // programmed by real ETS) had it on for the same objects. See
+  // docs/knx-device-write-protocol.md for the write-path implication -
+  // this wasn't just a display bug, `buildGroupObjectTable()` would have
+  // written the same wrong value to a real device.
+  update: string;
   // Read-On-Init and Priority - added 2026-08-29 (koolenex knx-tables.ts's
   // Object 3 Group Object Table needs both; neither was captured before).
   // Real attribute names confirmed against the project's own real app XML
@@ -62,6 +76,7 @@ interface CorDef {
   write: string | null;
   comm: string | null;
   tx: string | null;
+  update: string | null;
   readOnInit: string | null;
   priority: string | null;
 }
@@ -345,6 +360,7 @@ export interface AppIndex {
     write: boolean;
     comm: boolean;
     tx: boolean;
+    update: boolean;
     readOnInit: boolean;
     priority: ComObjectPriority;
   } | null;
@@ -367,6 +383,7 @@ export interface AppIndex {
     write: boolean;
     comm: boolean;
     tx: boolean;
+    update: boolean;
     readOnInit: boolean;
     priority: ComObjectPriority;
     channel: string;
@@ -571,6 +588,7 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
         write: attr(co, 'WriteFlag'),
         comm: attr(co, 'CommunicationFlag'),
         tx: attr(co, 'TransmitFlag'),
+        update: attr(co, 'UpdateFlag'),
         readOnInit: attr(co, 'ReadOnInitFlag'),
         priority: attr(co, 'Priority'),
       };
@@ -593,6 +611,7 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
         write: attr(cor, 'WriteFlag') || null,
         comm: attr(cor, 'CommunicationFlag') || null,
         tx: attr(cor, 'TransmitFlag') || null,
+        update: attr(cor, 'UpdateFlag') || null,
         readOnInit: attr(cor, 'ReadOnInitFlag') || null,
         priority: attr(cor, 'Priority') || null,
       };
@@ -677,6 +696,7 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
       write: (cor.write ?? co.write) === 'Enabled',
       comm: (cor.comm ?? co.comm) === 'Enabled',
       tx: (cor.tx ?? co.tx) === 'Enabled',
+      update: (cor.update ?? co.update) === 'Enabled',
       readOnInit: (cor.readOnInit ?? co.readOnInit) === 'Enabled',
       priority: normalizePriority(cor.priority ?? co.priority),
     });
@@ -1452,6 +1472,7 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
       write: (cor.write ?? co.write) === 'Enabled',
       comm: (cor.comm ?? co.comm) === 'Enabled',
       tx: (cor.tx ?? co.tx) === 'Enabled',
+      update: (cor.update ?? co.update) === 'Enabled',
       readOnInit: (cor.readOnInit ?? co.readOnInit) === 'Enabled',
       priority: normalizePriority(cor.priority ?? co.priority),
       channel: '',

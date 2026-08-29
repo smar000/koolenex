@@ -142,8 +142,8 @@ export function insertParsedData(
     if (!devId) continue;
     run(
       `INSERT INTO com_objects
-      (project_id,device_id,object_number,channel,name,function_text,dpt,object_size,flags,direction,ga_address,ga_send,ga_receive,read_on_init,priority,read,write,comm,tx)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (project_id,device_id,object_number,channel,name,function_text,dpt,object_size,flags,direction,ga_address,ga_send,ga_receive,read_on_init,priority,read,write,comm,tx,upd)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         pid,
         devId,
@@ -164,6 +164,8 @@ export function insertParsedData(
         co.write ? 1 : 0,
         co.comm ? 1 : 0,
         co.tx ? 1 : 0,
+        // `upd`, not `update` - see the DB-column-naming comment in db.ts.
+        co.update ? 1 : 0,
       ],
     );
   }

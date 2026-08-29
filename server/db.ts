@@ -125,7 +125,8 @@ export async function init(
       read          INTEGER DEFAULT 0,
       write         INTEGER DEFAULT 0,
       comm          INTEGER DEFAULT 0,
-      tx            INTEGER DEFAULT 0
+      tx            INTEGER DEFAULT 0,
+      upd           INTEGER DEFAULT 0
     )
   `);
   // Migrations for existing databases
@@ -222,6 +223,15 @@ export async function init(
   migrate('com_objects', 'write', 'INTEGER DEFAULT 0');
   migrate('com_objects', 'comm', 'INTEGER DEFAULT 0');
   migrate('com_objects', 'tx', 'INTEGER DEFAULT 0');
+  // Update - added 2026-08-29, as its own real fix (a real bug: this flag
+  // was never given a dedicated raw column when read/write/comm/tx were,
+  // and separately was resolved wrong - see the comment on CoDef.update in
+  // ets-app.ts). Named `upd`, not `update` - `UPDATE` is a SQL keyword and
+  // an unquoted column literally named that risks breaking any raw SQL
+  // written against this table later; every other layer (ParsedComObject,
+  // ComObject, GroupObjectFlags) still calls it `update`, this is a
+  // DB-column-only rename.
+  migrate('com_objects', 'upd', 'INTEGER DEFAULT 0');
   migrate('devices', 'space_id', 'INTEGER');
   migrate('devices', 'parameters', "TEXT DEFAULT '[]'");
   migrate('devices', 'app_ref', "TEXT DEFAULT ''");

@@ -436,6 +436,43 @@ export function decodeGroupObjectEntry(
   return { flagByte: buf[offset]!, sizeCodeByte: buf[offset + 1]! };
 }
 
+// Reverse of GROUP_OBJECT_PRIORITY_BITS above, for human-readable display.
+const GROUP_OBJECT_PRIORITY_NAMES: Record<number, string> = {
+  0b11: 'Low',
+  0b10: 'Alarm',
+  0b01: 'High',
+  0b00: 'System',
+};
+
+// Reverse of GROUP_OBJECT_SIZE_CODES above, for human-readable display.
+const GROUP_OBJECT_SIZE_NAMES: Record<number, string> = Object.fromEntries(
+  Object.entries(GROUP_OBJECT_SIZE_CODES).map(([name, code]) => [code, name]),
+);
+
+/**
+ * Formats one Object 3 entry (as returned by `decodeGroupObjectEntry()`) into a single
+ * human-readable line for display - added 2026-08-29 for the device-compare page (previously
+ * showed only the raw hex byte pair, e.g. "4f 0c"), covering every bit `computeGroupObjectByte()`
+ * writes plus the size code, not just the ones already shown elsewhere (GA links).
+ * `bit2` is shown as a single `Comm+Linked` value, not split into "Communication" and "Linked"
+ * separately - the byte itself can't distinguish them (§10.1: both are required to set the bit,
+ * and a real device capture alone can't tell you which one, if either, is false when it's clear).
+ */
+export function describeGroupObjectEntry(entry: {
+  flagByte: number;
+  sizeCodeByte: number;
+}): string {
+  const b = entry.flagByte;
+  const yn = (bit: number): string => (b & bit ? 'Yes' : 'No');
+  const priority = GROUP_OBJECT_PRIORITY_NAMES[b & 0b11] ?? `0b${(b & 0b11).toString(2)}`;
+  const size = GROUP_OBJECT_SIZE_NAMES[entry.sizeCodeByte] ?? `code ${entry.sizeCodeByte}`;
+  return (
+    `Update=${yn(1 << 7)} Transmit=${yn(1 << 6)} ReadOnInit=${yn(1 << 5)} ` +
+    `Write=${yn(1 << 4)} Read=${yn(1 << 3)} Comm+Linked=${yn(1 << 2)} ` +
+    `Priority=${priority} Size=${size}`
+  );
+}
+
 // Test whether a numeric/string value matches an ETS when-test condition.
 export function etsTestMatch(
   val: string | number,

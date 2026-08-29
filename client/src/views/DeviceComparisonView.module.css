@@ -83,13 +83,6 @@
   align-items: center;
   gap: 6px;
 }
-.summaryGroupLabel {
-  font-size: 9px;
-  color: var(--dim);
-  white-space: nowrap;
-  cursor: help;
-  border-bottom: 1px dotted var(--dim);
-}
 .summaryBadges {
   display: flex;
   align-items: center;

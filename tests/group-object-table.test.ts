@@ -17,6 +17,7 @@ import {
   computeGroupObjectByte,
   buildGroupObjectTable,
   groupObjectSizeCode,
+  describeGroupObjectEntry,
 } from '../server/routes/knx-tables.ts';
 import type { GroupObjectFlags } from '../server/routes/knx-tables.ts';
 
@@ -422,5 +423,41 @@ describe('buildGroupObjectTable() - full-buffer placement, real device sizes', (
     ];
     const buf = buildGroupObjectTable(98, comObjects);
     assert.equal(buf.toString('hex'), REAL_HEX);
+  });
+});
+
+describe('describeGroupObjectEntry() - human-readable formatting for the device-compare page', () => {
+  it('formats every flag bit, priority, and size - not just a raw hex byte pair', () => {
+    // 0x6f = object 5 with Read-On-Init=on (0x4F | 0x20) - real captured value.
+    const str = describeGroupObjectEntry({ flagByte: 0x6f, sizeCodeByte: 0x0c });
+    assert.equal(
+      str,
+      'Update=No Transmit=Yes ReadOnInit=Yes Write=No Read=Yes Comm+Linked=Yes Priority=Low Size=8 Bytes',
+    );
+  });
+
+  it('Comm+Linked reflects the combined bit 2 - Yes only when both Communication and a real GA link are true (the byte can\'t distinguish which, if either, is false)', () => {
+    // 0x4B = object 5 default with Communication=off (or unlinked) - bit 2 clear either way.
+    const str = describeGroupObjectEntry({ flagByte: 0x4b, sizeCodeByte: 0x00 });
+    assert.match(str, /Comm\+Linked=No/);
+  });
+
+  it('all-zero byte (no com object here) decodes to a fully "No"/System/1 Bit baseline, not garbage - bits 0b00 are genuinely Priority=System (unreachable from ETS, but a real, correct decode of the literal bit pattern), not a default-to-Low guess', () => {
+    const str = describeGroupObjectEntry({ flagByte: 0x00, sizeCodeByte: 0x00 });
+    assert.equal(
+      str,
+      'Update=No Transmit=No ReadOnInit=No Write=No Read=No Comm+Linked=No Priority=System Size=1 Bit',
+    );
+  });
+
+  it('Priority=Alarm/High/System decode correctly from their real bit patterns', () => {
+    assert.match(describeGroupObjectEntry({ flagByte: 0b10, sizeCodeByte: 0 }), /Priority=Alarm/);
+    assert.match(describeGroupObjectEntry({ flagByte: 0b01, sizeCodeByte: 0 }), /Priority=High/);
+    assert.match(describeGroupObjectEntry({ flagByte: 0b00, sizeCodeByte: 0 }), /Priority=System/);
+  });
+
+  it('an unrecognized size code (never confirmed against real hardware, but the sequence is well-known) still shows its own real name, not garbage', () => {
+    const str = describeGroupObjectEntry({ flagByte: 0, sizeCodeByte: 15 }); // 15 = Variable length
+    assert.match(str, /Size=Variable length/);
   });
 });

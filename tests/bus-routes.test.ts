@@ -1606,8 +1606,23 @@ describe('POST /bus/verify-device — Object 3 (Group Object Table) fallback', (
     const co5 = byKey.get('co-5-obj3') as any;
     assert.equal(co5.match, true);
     assert.equal(co5.expectedValue, co5.actualValue);
+    // Human-readable, not a raw hex byte pair - covers object 5's real
+    // expected flags (readOnInit=true, write=false, read=true, comm=true,
+    // linked=true, priority=alarm) plus its size code (default -> 1 Bit).
+    assert.match(co5.expectedValue, /ReadOnInit=Yes/);
+    assert.match(co5.expectedValue, /Write=No/);
+    assert.match(co5.expectedValue, /Read=Yes/);
+    assert.match(co5.expectedValue, /Comm\+Linked=Yes/);
+    assert.match(co5.expectedValue, /Priority=Alarm/);
+    assert.match(co5.expectedValue, /Size=1 Bit/);
     const co7 = byKey.get('co-7-obj3') as any;
     assert.equal(co7.match, true);
+    // object 7: transmit=true, write=true, read=false, comm=true,
+    // linked=false (so Comm+Linked=No despite comm=true), priority=low.
+    assert.match(co7.expectedValue, /Transmit=Yes/);
+    assert.match(co7.expectedValue, /Write=Yes/);
+    assert.match(co7.expectedValue, /Comm\+Linked=No/);
+    assert.match(co7.expectedValue, /Priority=Low/);
     // Object 3 rows stay out of the raw-byte scope (matches GA rows' own convention).
     assert.equal(body.totalBytes, paramMem.length);
   });

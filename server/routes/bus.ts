@@ -15,6 +15,7 @@ import {
   decodeGATable,
   decodeAssocTable,
   decodeGroupObjectEntry,
+  describeGroupObjectEntry,
   resolveParamSegment,
   buildParamMem,
   diffMemory,
@@ -1495,10 +1496,13 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
         [dev.id],
       );
       const obj3Rows: DecodedComparison[] = [];
+      // Human-readable, not a raw hex byte pair - every flag bit
+      // computeGroupObjectByte() writes (Update/Transmit/Read-On-Init/
+      // Write/Read/Comm+Linked), Priority, and the real Object Size, not
+      // just the GA link already shown in its own row above. See
+      // describeGroupObjectEntry()'s own doc comment (knx-tables.ts).
       const fmtEntry = (e: { flagByte: number; sizeCodeByte: number } | null): string =>
-        e
-          ? `${e.flagByte.toString(16).padStart(2, '0')} ${e.sizeCodeByte.toString(16).padStart(2, '0')}`
-          : '(out of range)';
+        e ? describeGroupObjectEntry(e) : '(out of range)';
       for (const co of coRows) {
         const expectedEntry = decodeGroupObjectEntry(
           object3Region.expected,

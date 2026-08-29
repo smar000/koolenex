@@ -16,22 +16,20 @@ function sectionId(name: string): string {
   return 'sec-' + name.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
 }
 
-/** Compose a "5 params / 2 GAs" style count string from two scoped counts,
- * omitting whichever side is zero (e.g. a device with no GA rows, or one
- * where every GA matches while a param differs, only mentions the side
- * that's actually nonzero) rather than always spelling out both. Used for
- * the combined match/differ summary badges - see the comment at their call
- * site in DeviceCompareResults. */
-function composeCount(
-  count: number,
-  gaCount: number,
-  word: string,
-  gaWord: string,
-): string {
-  const parts: string[] = [];
-  if (count > 0) parts.push(`${count} ${word}${count === 1 ? '' : 's'}`);
-  if (gaCount > 0) parts.push(`${gaCount} ${gaWord}${gaCount === 1 ? '' : 's'}`);
-  return parts.join(' / ');
+/** Compose a "5 params / 2 GAs / 1 Object 3" style count string from any
+ * number of scoped counts, omitting whichever entries are zero (e.g. a
+ * device with no GA rows, or one where every GA matches while a param
+ * differs, only mentions the entries that are actually nonzero) rather than
+ * always spelling out every category. Used for the combined match/differ
+ * summary badges - see the comment at their call site in
+ * DeviceCompareResults. Generalized 2026-08-29 from a fixed params/GAs pair
+ * to an arbitrary list, to fold in Object 3's own separately-tracked count
+ * alongside GA's without hardcoding a third fixed parameter. */
+function composeCount(entries: Array<{ count: number; word: string }>): string {
+  return entries
+    .filter((e) => e.count > 0)
+    .map((e) => `${e.count} ${e.word}${e.count === 1 ? '' : 's'}`)
+    .join(' / ');
 }
 
 /** Compact match/differ glyph for the per-row MATCH column - a text Badge
@@ -168,33 +166,51 @@ export function DeviceCompareResults({
   );
 
   // GA link rows (server-side section: 'Group Addresses' - see
-  // docs/knx-device-write-protocol.md Part 7 in the koolenex repo) are
-  // folded into the same `decoded` array as named parameters, but they're a
-  // different kind of thing (a communication object's linked GA(s), not a
-  // byte-mapped parameter value) - the top summary badges below scope
-  // "params matched"/"differ" to exclude them and show their own separate
-  // count, so the wording stays accurate and a GA mismatch can't hide
-  // silently inside a "params matched" number that doesn't actually mention
-  // GAs at all.
+  // docs/knx-device-write-protocol.md Part 7 in the koolenex repo) and
+  // Object 3 rows (server-side section: 'Group Object Table' - flags/
+  // priority/size, Part 19, added 2026-08-29) are folded into the same
+  // `decoded` array as named parameters, but they're both a different kind
+  // of thing (not a byte-mapped parameter value) - the top summary badges
+  // below scope "params matched"/"differ" to exclude both and show their
+  // own separate counts, so the wording stays accurate and a mismatch in
+  // either can't hide silently inside a "params matched" number that
+  // doesn't actually mention them at all.
+  const nonParamSections = new Set(['Group Addresses', 'Group Object Table']);
   const gaDecoded = decoded
     ? decoded.filter((d) => d.section === 'Group Addresses')
     : [];
+  const obj3Decoded = decoded
+    ? decoded.filter((d) => d.section === 'Group Object Table')
+    : [];
   const paramDecoded = decoded
-    ? decoded.filter((d) => d.section !== 'Group Addresses')
+    ? decoded.filter((d) => !nonParamSections.has(d.section))
     : [];
   const matchCount = paramDecoded.filter((d) => d.match === true).length;
   const mismatchCount = paramDecoded.filter((d) => d.match === false).length;
   const gaMatchCount = gaDecoded.filter((d) => d.match === true).length;
   const gaMismatchCount = gaDecoded.filter((d) => d.match === false).length;
+  const obj3MatchCount = obj3Decoded.filter((d) => d.match === true).length;
+  const obj3MismatchCount = obj3Decoded.filter((d) => d.match === false).length;
+  const matchCountEntries = [
+    { count: matchCount, word: 'param' },
+    { count: gaMatchCount, word: 'GA' },
+    { count: obj3MatchCount, word: 'Object 3 row' },
+  ];
+  const mismatchCountEntries = [
+    { count: mismatchCount, word: 'param' },
+    { count: gaMismatchCount, word: 'GA' },
+    { count: obj3MismatchCount, word: 'Object 3 row' },
+  ];
   // How many of those mismatches the current filters (search / only-named)
   // are hiding from the table below - the summary badges below count every
   // decoded parameter, not just the filtered/visible ones, so this makes
   // that gap visible instead of leaving "4 differ" looking wrong next to a
-  // 3-row table. Scoped to exclude GA rows, matching `mismatchCount` above -
-  // otherwise a visible differing GA row would count here but not in the
-  // base it's being subtracted from, going negative.
+  // 3-row table. Scoped to exclude GA/Object-3 rows, matching
+  // `mismatchCount` above - otherwise a visible differing GA/Object-3 row
+  // would count here but not in the base it's being subtracted from, going
+  // negative.
   const shownMismatchCount = filtered.filter(
-    (d) => d.match === false && d.section !== 'Group Addresses',
+    (d) => d.match === false && !nonParamSections.has(d.section),
   ).length;
   const hiddenMismatchCount = mismatchCount - shownMismatchCount;
 
@@ -304,7 +320,7 @@ export function DeviceCompareResults({
                   always the com object's name, never equal to their key). */}
               {decoded && (
                 <div className={styles.summaryGroup}>
-                  {(matchCount > 0 || gaMatchCount > 0) && (
+                  {(matchCount > 0 || gaMatchCount > 0 || obj3MatchCount > 0) && (
                     <button
                       type="button"
                       className={`${styles.filterChipBtn} ${rowFilter === 'match' ? styles.filterChipBtnActive : ''}`}
@@ -317,22 +333,25 @@ export function DeviceCompareResults({
                           ? 'Showing only matching rows — click to show all. '
                           : 'Show only matching rows. ') +
                         'Named, project-configurable parameters' +
-                        (gaDecoded.length ? ' and group-address links' : '') +
+                        (gaDecoded.length ? ', group-address links' : '') +
+                        (obj3Decoded.length ? ', and Object 3 (Group Object Table) entries' : '') +
                         ' only - a smaller, more precise scope than the raw byte count ' +
                         'to the right, which also includes unmapped/padding bytes.'
                       }
                     >
                       <Badge
                         label={
-                          mismatchCount === 0 && gaMismatchCount === 0
-                            ? `All ${composeCount(matchCount, gaMatchCount, 'param', 'GA')} matched`
-                            : `${composeCount(matchCount, gaMatchCount, 'param', 'GA')} match`
+                          mismatchCount === 0 &&
+                          gaMismatchCount === 0 &&
+                          obj3MismatchCount === 0
+                            ? `All ${composeCount(matchCountEntries)} matched`
+                            : `${composeCount(matchCountEntries)} match`
                         }
                         color="var(--green)"
                       />
                     </button>
                   )}
-                  {(mismatchCount > 0 || gaMismatchCount > 0) && (
+                  {(mismatchCount > 0 || gaMismatchCount > 0 || obj3MismatchCount > 0) && (
                     <button
                       type="button"
                       className={`${styles.filterChipBtn} ${rowFilter === 'differ' ? styles.filterChipBtnActive : ''}`}
@@ -353,31 +372,20 @@ export function DeviceCompareResults({
                     >
                       <Badge
                         label={
-                          `${composeCount(mismatchCount, gaMismatchCount, 'param', 'GA')} differ` +
+                          `${composeCount(mismatchCountEntries)} differ` +
                           (hiddenMismatchCount > 0 ? ` (${hiddenMismatchCount} hidden)` : '')
                         }
                         color="var(--red)"
                       />
                     </button>
                   )}
-                  {/* Redundant once the match badge itself says "All N
-                      matched" - the label's whole job was disambiguating
-                      "params (+ GAs)" vs "raw memory" scope, which the
-                      wording above already does inline. Only shown when
-                      there's an actual match/differ split to clarify. */}
-                  {(mismatchCount > 0 || gaMismatchCount > 0) && (
-                    <span
-                      className={styles.summaryGroupLabel}
-                      title={
-                        'Only bytes ETS maps to a named, project-configurable parameter, plus each ' +
-                        "communication object's expected-vs-actual GA link - excludes padding/reserved " +
-                        'bytes, so this is usually a much smaller, more precise count than the raw ' +
-                        'memory total to the right.'
-                      }
-                    >
-                      {gaDecoded.length ? 'named parameters / GAs' : 'named parameters'}
-                    </span>
-                  )}
+                  {/* The group label span (e.g. "named parameters / GAs")
+                      that used to sit here was removed 2026-08-29 per
+                      explicit request - redundant once the match badge
+                      itself already says "All N matched", and updating its
+                      text to also account for Object 3 wasn't worth
+                      keeping. The disambiguating explanation still lives in
+                      each badge's own `title` tooltip above. */}
                 </div>
               )}
               <div className={styles.summaryGroup}>
@@ -491,28 +499,34 @@ export function DeviceCompareResults({
               <Empty msg="No parameters match the current filter." />
             ) : (
               Array.from(bySection.entries()).map(([section, rows]) => {
-                // Group Addresses gets a fixed hue (not the usual name-hash)
-                // plus a distinct .sectionBlockGA/.sectionTitleGA treatment
-                // (stronger border/background) - a hash-derived tint alone
-                // wouldn't reliably read as "different kind of thing" from a
-                // params section, since two hashed hues can land close
-                // together by chance. GA rows are a different domain (a
-                // communication object's linked address, not a byte-mapped
-                // parameter value - see docs/knx-device-write-protocol.md
-                // Part 7 in the koolenex repo), so this section should
-                // always look deliberately distinct, not just "differently
-                // colored today".
+                // Group Addresses / Group Object Table both get a fixed hue
+                // (not the usual name-hash) plus the distinct
+                // .sectionBlockGA/.sectionTitleGA treatment (stronger
+                // border/background, same reusable hue-parameterized CSS,
+                // just a different --section-hue per kind) - a hash-derived
+                // tint alone wouldn't reliably read as "different kind of
+                // thing" from a params section, since two hashed hues can
+                // land close together by chance. Both are a different
+                // domain from a byte-mapped named parameter - GA rows are a
+                // communication object's linked address, Object 3 rows are
+                // its real device-side flags/priority/size (added
+                // 2026-08-29, see docs/knx-device-write-protocol.md Part 19
+                // in the koolenex repo) - so both should always look
+                // deliberately distinct, not just "differently colored
+                // today". Different hues from each other too (205 vs 280)
+                // so the two "special" section kinds don't look identical.
                 const isGA = section === 'Group Addresses';
-                const hue = isGA ? 205 : hueForSection(section);
+                const isObj3 = section === 'Group Object Table';
+                const hue = isGA ? 205 : isObj3 ? 280 : hueForSection(section);
                 return (
                   <div
                     key={section}
                     id={sectionId(section)}
-                    className={`${styles.sectionBlock} ${isGA ? styles.sectionBlockGA : ''}`}
+                    className={`${styles.sectionBlock} ${isGA || isObj3 ? styles.sectionBlockGA : ''}`}
                     style={{ '--section-hue': hue } as React.CSSProperties}
                   >
                     <div
-                      className={`${styles.sectionTitle} ${isGA ? styles.sectionTitleGA : ''}`}
+                      className={`${styles.sectionTitle} ${isGA || isObj3 ? styles.sectionTitleGA : ''}`}
                     >
                       {section}
                       <span className={styles.sectionCount}>{rows.length}</span>

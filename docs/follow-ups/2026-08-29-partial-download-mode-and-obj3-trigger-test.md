@@ -121,11 +121,61 @@ Object 3): a clean, untampered Full Download to confirm the "no write" baseline 
 reproduces, followed by a deliberately tampered one, in a controlled A/B rather than relying
 on the single historical 08-28 session alone.
 
+## Part 4: Object 3's content decoded - a real per-communication-object flag bitfield
+
+User pushed back on the trigger test's framing twice, both corrections real and load-bearing:
+
+1. **"Are you sure obj 3 is a GA holder?"** - a fair check given the name similarity between
+   "Group Address table" (object 1) and "Group Object Table" (object 3). Clarified: they're
+   different objects with different real content - object 1 holds the GAs themselves, object 3
+   holds per-communication-object metadata (flags etc.), confirmed via KNX Master Data (Part 10).
+2. **"Could obj 3 be related to communication flags?"** - a much better-targeted hypothesis than
+   the tampering/uncertain-state theory, given what a Group Object Table actually is.
+
+Tested directly: flipped the **Update** flag on com-object 7 (NTP sync input, off→on) via a real
+ETS Full Download, nothing else changed. Object 3's own 98-byte payload differed from the
+previous capture at **exactly one byte** (offset 14: `0x53`→`0xD3`), and those two values differ
+by **exactly one bit** (`XOR 0x80`). A second test in the same session reverted that flag AND
+flipped **Read-On-Init** on com-object 6 (Date/time input, off→on) - offset 14 correctly reverted
+to `0x53` (confirming the first mapping wasn't a coincidence) while a *different* byte, offset 12,
+changed instead (`0x53`→`0x73`, `XOR 0x20`) - a clean, independent second mapping. Both objects
+sit 2 bytes apart, consistent with a small regular per-object record.
+
+## Part 5: the "GA never touched on Partial Download" claim was wrong - confounded, not tested
+
+User correctly challenged this (stated as fact in Part 4's own trigger-test framing above):
+every Partial Download capture that existed at the time happened to have zero GA changes in it,
+so "never touched" and "only touched when a GA changes" were indistinguishable from that data -
+an overclaim, not a lie, but a real methodology gap. Also separately requested a systematic redo
+of 1.1.10's 2-of-4 Full Download pattern before trusting it (single historical session, never
+reproduced) - noted as still outstanding, not done this session.
+
+Tested directly, twice, in both directions:
+- Real GA change (9/1/4→9/1/5) via genuine Partial Download: `OX=1/2/3` all fired,
+  `OX=4` (unrelated parameters) correctly skipped. (First attempt at this specific test was
+  actually a Full Download by mistake - user caught and corrected it immediately; kept as a
+  labeled record, not counted as a Partial Download result.)
+- Reverting that same GA change (9/1/5→9/1/4) plus reverting the Read-On-Init flag from Part 4,
+  same download: same result, `OX=1/2/3` fired, `OX=4` skipped, and Object 3's content correctly
+  showed the flag reverted (offset 12 back to `0x53`).
+
+**Clean, reproduced conclusion**: on Partial Downloads, GA table / Association table / Object 3
+are written together exactly when a GA/link genuinely changes, and skipped together otherwise -
+not "never touched," a real conditional trigger, symmetric in both directions. Full details and
+the exact per-capture table: reference doc §10.2.
+
 ## Still open, for the next session
 
-- The Object 3 write-trigger question, still open - see the table above and the honest
-  "wrong device tested" conclusion. Next test should target 1.1.10.
-- Whether the partial-download GA/Association-table skip logic generalizes beyond this one
-  device/app - it's a best-effort extrapolation of the parameter-object pattern, now proven
+- **1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo** -
+  explicitly requested by the user, not yet done. Multiple clean baseline Full Downloads first,
+  then a deliberate change, before treating the 08-28 figure as established rather than one
+  unreproduced data point.
+- Why Object 3 is written on *every* 1.1.9 Full Download (the "differs from default" theory is
+  now refuted for this device - see reference doc §10.1) is still open for the Full Download case
+  specifically, separate from the now-resolved Partial Download case (§10.2).
+- The general Object 3 record layout (which bit means which flag, for every communication
+  object) is only mapped at two positions so far (com-objects 6 and 7) - not a full decode.
+- Whether the partial-download GA/Association-table skip logic (Part 11) generalizes beyond this
+  one device/app - it's a best-effort extrapolation of the parameter-object pattern, now proven
   correct for 1.1.9 specifically, not proven to generalize.
 - Everything else already listed in the reference doc's Part 5.

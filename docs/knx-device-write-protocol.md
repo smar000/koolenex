@@ -1,1271 +1,490 @@
-# KNX device write protocol — consolidated reference
+# KNX device write protocol — reference
 
-**Status: living reference document, not an investigation log.** Everything here is either
-directly sourced from a real captured ETS session (cited by capture file + frame number) or
-explicitly marked as a hypothesis/guess. This document supersedes nothing — the dated
-`docs/follow-ups/*.md` files remain the historical investigation record — but is intended as
-the one place to check before touching device-write code again, instead of reconstructing the
-picture from those logs. Update this file, not a new dated follow-up, when a fact here changes.
+**⚠️ Not an official or KNX-Association-endorsed document.** Everything below is this project's
+own best-effort interpretation of observed device behavior, reverse-engineered from real network
+traffic — not a reproduction of, or a substitute for, the official KNX specification. Where a
+finding isn't independently confirmed against real hardware, it's tagged as such (see "How to
+read this document" below); treat unconfirmed items as working hypotheses, not documented fact.
+
+This document describes how a KNX configuration tool (ETS, the standard KNX Engineering Tool
+Software) writes project data onto a physical KNX device over KNXnet/IP — the sequence of
+messages sent, what each one means, and the byte layouts involved. It's written to be useful to
+anyone implementing a KNX device-write path, independent of any particular tool — it's a
+reference to how the protocol actually behaves on real hardware, not documentation of any one
+codebase.
+
+**Methodology**: every fact here was derived from real ETS 6.3 download sessions against
+physical devices, with the actual network traffic captured and decoded byte-by-byte — not taken
+from the KNX specification or ETS's own documentation directly. Where a byte's meaning is stated
+without a spec citation, treat it as an empirically observed pattern (tagged accordingly, see
+below), not a documented guarantee. For narrative/history behind these findings (how each one was
+discovered), see the dated files under `docs/follow-ups/*.md`.
 
 ## How to read this document
 
-Every factual claim below is tagged:
+Every factual claim is tagged:
 
-- 🟢 **CONFIRMED** — directly observed in a real captured ETS session or on real hardware, with
-  the capture file and frame number(s) cited. Trust this.
-- 🟡 **INFERRED** — a reasonable conclusion from confirmed evidence, but not independently
-  verified in isolation (e.g. "X is present in every capture, so it's probably required" without
-  a controlled test that removes X and shows failure).
-- 🔴 **SPECULATIVE** — a guess, theory, or hypothesis with no direct evidence. Treat these as
-  open questions, not facts. Several speculative theories elsewhere in this project's history
-  turned out to be wrong when actually tested (see "Retracted theories" below) — do not
-  upgrade a 🔴 to a 🟢 without a real test.
+- 🟢 **CONFIRMED** — directly observed on real captured traffic or real hardware (see
+  [Sources](#sources)). Trust this.
+- 🟡 **INFERRED** — a reasonable conclusion from confirmed evidence, not independently verified
+  in isolation.
+- 🔴 **SPECULATIVE** — a guess or open question. Not a fact.
 
-Sample-size caveats apply throughout: **all real-hardware evidence in this document comes from
-exactly two physical devices, both Albrecht Jung, both on one local testbed, both the same KNX
-mask family (System B, `0x07B0`)**. Nothing here has been confirmed against a different
-manufacturer, a different mask family, or hardware outside this testbed. Where this matters for
-a specific claim it's called out again inline, but keep it in mind throughout.
+**Sample size, throughout**: all real-hardware evidence here comes from exactly two physical
+devices, both from one manufacturer (Albrecht Jung), both the same KNX "mask version" (a device
+classification explained in §1) — System B, `0x07B0`. Nothing here has been confirmed against a
+different manufacturer, a different mask version, or other hardware, unless noted.
 
-## Devices/apps this document is grounded in
+## Some KNX terms used throughout
 
-| Device | Individual addr | Mask version | App ID | Serial | Role |
-|---|---|---|---|---|---|
-| Jung KNX IP Router (additional function) | 1.1.9 | `07B0` (System B) 🟢 | `M-0004_A-0025-10-1BA6-O00A6` | `00A625401D94` | Primary test device — every capture in this document except where noted |
-| Jung 4-gang dimmer actuator | 1.1.10 | `07B0` (System B) 🟢 | `M-0004_A-3030-23-F0EA-O000A` | (not recorded here) | Secondary test device — real base > `0xFFFF` (`0xC3000`), used for the address-truncation finding and cross-checks |
+A device's application logic exposes **communication objects** — application-level "channels"
+(e.g. "switch output 1", "dimming value"). Each communication object can be linked to one or more
+**group addresses (GAs)** — the "topic" addresses devices actually exchange values over on the
+bus. A communication object's value has a **Datapoint Type (DPT)**, KNX's standard classification
+of a value's format and size (e.g. "1 bit", "1 byte unsigned", "4 byte float").
 
-Mask versions confirmed via a live `A_DeviceDescriptor_Read` against the real testbed
-(2026-08-28, this session) and cross-referenced against this project's own bundled KNX Master
-Data (`data/knx_master_<projectId>.xml`), whose `<MaskVersion>` table classifies mask `07B0`
-(and the PL/RF/IP medium variants `17B0`/`27B0`/`57B0`) as `ManagementModel="SystemB"` — a real
-KNX-standardized device-family classification, not manufacturer-specific config. 🟢
+Internally, a device organizes its own configuration data into **interface objects** — logical
+sub-components addressed by a small integer, the **object index**. This document is mostly about
+four of them: object 1 (the table of group addresses in use), object 2 (which communication
+object is linked to which group address), object 3 (each communication object's own flags — see
+§6.4), and object 4 (the device's actual application settings — every parameter a user configures
+in the tool). Within an interface object, individual named attributes are called **properties**,
+each addressed by a **property ID**.
 
-## Part 1 — The real ETS download sequence
+Every device also reports a 2-byte **mask version** — a KNX-standardized code identifying which
+"generation"/family of device management model it implements (e.g. `0x07B0` = "System B"). This
+matters because it changes which lower-level services the device actually supports (§4.1).
 
-### 1.1 Full Download, decoded frame-by-frame
+## Test hardware
 
-Source: `docs/data/captures/2026-08-28-ets-1-full-download-1.1.9.pcapng` (real ETS "Download
-All" to 1.1.9, captured 2026-08-28, part of a 3-download session also covering both Partial
-Download variants below — same device, same session, cleanest available apples-to-apples
-comparison). All frame numbers below refer to this file. 🟢 throughout this subsection unless
-marked otherwise.
-
-**Stage 0 — connection churn before the real work starts** (frames 13-109): ETS opens and closes
-several short-lived management connections, doing a `DevDescrRead`, an `IndAddrSerNumRead`
-(serial-number broadcast lookup), and even a defensive `RestartReq` — then disconnects and
-reconnects several more times before settling into the connection that does the actual work.
-🟡 **INFERRED**: this looks like ETS's own pre-flight device-identity/health checks, possibly
-including a defensive restart if it isn't sure of the device's prior state — not confirmed from
-any ETS documentation, just observed behavior. Not everything here is necessarily required for a
-correct download; don't assume every frame in this stage matters.
-
-**Stage 1 — identity/config reads** (frames 109-166), all `A_PropertyValue_Read` unless noted:
-
-| Frame | Object | Property | Purpose (as far as known) |
+| Device | Individual address | Mask version | Role |
 |---|---|---|---|
-| 111 | OX=0 | P=56 | 🔴 unidentified — some device object (OX=0) property |
-| 117 | — | — | `A_Authorize_Request` (key `0xFFFFFFFF`) — see §2.2 |
-| 123 | OX=2 | — | `A_PropertyDescription_Read` P=23 → response `PDT=20 N=1024 R=3 W=3` — 🔴 purpose unconfirmed, likely a capability probe of the Association table object before touching it |
-| 129 | OX=0 | P=11 | Serial number readback (response matches the device's real serial `00A625401D94`) |
-| 135 | OX=0 | P=25 | 🔴 unidentified, 2-byte response `$0080` |
-| 141 | OX=0 | P=78 | 🔴 unidentified, 6-byte response `$000000250001` (looks like a hardware-type field) |
-| 147 | OX=0 | P=15 | 🔴 unidentified, 10-byte response `$048C0000000000000000` |
-| 154 | OX=0 | P=12 | 🔴 unidentified, 2-byte response `$0004` (matches the manufacturer ID field seen elsewhere) |
-| 160 | OX=0 | P=78 | Same property re-read a second time — 🔴 unclear why |
-| 166 | OX=4 | P=13 | `PID_PROGRAM_VERSION` read — response `$0004002510`, written back verbatim later (§2.4) |
+| KNX IP router (additional function) | 1.1.9 | `07B0` (System B) 🟢 | Primary test device |
+| 4-gang dimmer actuator | 1.1.10 | `07B0` (System B) 🟢 | Secondary test device — real memory addresses above `0xFFFF`, and the only one of the two whose configuration declares the checksum step described in §7 |
 
-**Stage 2 — Unload every relevant object, in reverse index order** (frames 172-196):
-`A_PropertyValue_Write` OX=5,4,3,2,1, P=5 (`PID_LOAD_STATE_CONTROL`), value `$04 00...` (event
-`0x04` = Unload). Each gets a `PropertyValue_Response` of `$00` (state = Unloaded). Note **OX=5
-is unloaded but never loaded again** in this capture — it has no data to write this session.
+Mask versions confirmed via a live device-descriptor read against real hardware (§2.1), and
+cross-checked against the KNX standard's own published mask-version table, which classifies
+`07B0` (and its variants `17B0`/`27B0`/`57B0`, for different physical media) as management model
+"System B" — a real KNX-standardized device-family classification, not manufacturer-specific.
 
-**Stage 3 — per-object StartLoading → LoadData → memory write(s), in this exact order**
-(frames 202-315): **4, then 3, then 1, then 2** — not simple ascending or descending index
-order. 🟡 **INFERRED** this load order may be app-model-specific (dependency ordering between
-objects) rather than a fixed rule — not tested against a different app.
+## 1. Session overview
 
-For each object: `A_PropertyValue_Write` OX=n, P=5, event `0x01` (StartLoading) → response state
-`$02` (Loading); then `A_PropertyValue_Write` OX=n, P=5, event `0x03` + 9-byte extra (LoadData —
-see §2.3 for the exact byte layout) → response state stays `$02`; then the real memory write(s)
-for that object, via `A_PropertyValue_Read` P=7 (`PID_TABLE_REFERENCE`, resolves the object's
-real relmem base) followed by one or more `A_MemoryExtended_Write` frames:
+Every real device-configuration session follows the same shape:
 
-| Object | LoadData size/fill/mode | Real base (P=7 response) | Memory write(s) |
-|---|---|---|---|
-| OX=4 (parameters) | size=`0x1FF2`=8178, fill=`0xFF`, mode=`0x01` (Full) | `0x00005F0E` | `0x005F53` (1 byte, `$80`) + `0x005FD3` (3 bytes, `$D06001`) |
-| OX=3 (unidentified, 98 bytes) | size=`0x0062`=98, fill=`0x00`, mode=`0x00` | `0x0000570C` | one single 98-byte write at `0x00570C` (frame 289) — **ETS does not always chunk writes into small pieces**; it wrote the entire object in one frame here |
-| OX=1 (GA table) | size=`0x0006`=6, fill=`0x00`, mode=`0x00` | `0x00004000` | `0x004000` (6 bytes, `$000249014904` — decodes as `[count=2][GA 9/1/1][GA 9/1/4]`, confirmed by direct byte decode) |
-| OX=2 (Association table) | size=`0x000A`=10, fill=`0x00`, mode=`0x00` | `0x0000470A` | `0x00470A` (10 bytes, `$00020001000500020008` — decodes as `[count=2][gaIndex=1,coNumber=5][gaIndex=2,coNumber=8]`, confirmed by direct byte decode) |
+1. **Bootstrap**: connect, read device identity, authorize (§2).
+2. **Per-object write cycle**, for each interface object that needs a change: mark it unloaded →
+   start loading → declare the data that's coming → the real memory/property write(s) →
+   mark it loaded again (§3–§4).
+3. **Finalize**: write a version marker back, then restart the device (§5).
 
-Every `A_MemoryExtended_Write` gets an `A_MemoryExtended_Write_Response` with an `Error` byte
-(observed value `0x01` on every successful write in this capture — 🔴 **SPECULATIVE**: this is
-almost certainly not "an error occurred" given every one of these writes demonstrably succeeded;
-more likely a status/return code whose exact KNX-spec meaning isn't confirmed here — Wireshark's
-own dissector just labels the field "Error", which may not match the KNX spec's own field name)
-plus a 2-byte trailing value that looks like a CRC of the written data (e.g. `$E304` for the
-1-byte `$80` write, `$FD7B` for the 3-byte write) — 🔴 not decoded/verified against a real CRC
-algorithm, just an observed pattern.
+A **Full Download** runs this cycle for every relevant interface object, regardless of whether
+its content actually changed — though the underlying memory write itself only ever writes the
+bytes that actually differ (§6.1), never the whole object unconditionally. A **Partial Download**
+is a stricter version of the same sequence: only the interface objects whose content genuinely
+changed go through the cycle at all — everything else is skipped outright, with no "mark
+unloaded" step and no write. The two are otherwise frame-for-frame identical, distinguished by
+one single signal in the data (§4.2).
 
-**Stage 4 — `PID_PROGRAM_VERSION` write-back** (frame 318): `A_PropertyValue_Write` OX=4, P=13,
-value `$0004002510` — the *exact same value* read back in Stage 1 (frame 166/169), written back
-verbatim right before `LoadCompleted`. See §2.4 for why this matters.
+## 2. Session bootstrap
 
-**Stage 5 — LoadCompleted, objects 4, 3, 2, 1** (frames 324-350): `A_PropertyValue_Write` P=5,
-event `0x02` → response state `$01` (Loaded), confirming each object durably committed.
+### 2.1 Connection and identity
 
-**Stage 6 — Restart** (frame 357): `A_Restart_Request` (`$0100`), gets a real
-`RestartResp` (`$000008` — 🔴 the trailing bytes' exact meaning, e.g. a process-time-in-seconds
-field, is not confirmed; the user separately observed the physical device's own display say
-"waiting up to 9 seconds" during a real restart, which is close to but not exactly the `8` in
-this response — plausible link, not confirmed identical encoding).
+A **device-descriptor read** is sent as the very first message of every real session 🟢 — the
+device's response carries its mask version (§ above). 🟡 **INFERRED**: the tool almost certainly
+uses this to decide device-family-specific behavior later (which memory-write service to use,
+§4.1) — not confirmed from any spec text, but consistent with it being the literal first thing
+done every time, and with the real mask-gated finding in §4.1.
 
-### 1.1' Complete annotated timeline — 1.1.10 Full Download, every read and every write, one real clean session
+Before the real work starts, several short-lived connections are opened and closed, doing
+identity reads and a broadcast lookup of the device's serial number by address, sometimes
+including a defensive restart request 🟢 — then the connection that does the actual work begins.
+🟡 **INFERRED**: pre-flight identity/health checks; not everything here is necessarily required
+for a correct download.
 
-Source: `docs/data/captures/2026-08-29-ets-full-download-1.1.10-systematic-1-clean.pcapng`
-(knx-ets-manager repo) — a genuinely clean session (no project changes at all), chosen because
-1.1.10's app is the richest available: it's the only one that exercises the property-27 checksum
-mechanism (§Part 8), so this single timeline shows everything 1.1.9's sequence has *and* the
-checksum read/write cycle 1.1.9's app never touches at all (§Part 8, §10.3). 🟢 throughout, every
-row a real captured frame - request frames only shown (each has a matching response, omitted for
-readability unless its content matters).
+Identity/status values read early in every session (all simple property reads on object 0 unless
+noted):
 
-| Stage | Frame(s) | What happens |
+| Property purpose | Notes |
+|---|---|
+| Serial number | Readback, matches the device's real serial |
+| Association-table capability descriptor (a property read on object 2) | Same single read every session, Full or Partial |
+| Application version marker (object 4) | Read here, written back verbatim later — see §4.3 |
+| A handful of other status fields | 🔴 Several of these values' exact meaning was never looked up against a KNX property reference — not required to understand the write path |
+
+None of these early reads are content-dependent — none of them could reveal whether a device's
+memory content had been tampered with out-of-band (relevant to §7.3).
+
+### 2.2 Authorize
+
+An authorize request/response exchange, using an access-level key. Sent once, early, with the
+well-known default key (`0xFFFFFFFF` — used when a device has no special access restriction
+configured); the response carries a 1-byte access level (`0` = full access, observed in every
+capture). 🟢 Present in every real capture. 🔴 whether a device configured with a non-default
+access key would behave differently is untested (this testbed's devices are presumed
+factory-default).
+
+## 3. The load state machine
+
+Each interface object tracks its own state — **Unloaded**, **Loading**, or **Loaded** — via a
+dedicated "load state control" property. Writing a specific event value to that property drives
+the object through the state machine 🟢, confirmed identically across every real session
+observed:
+
+| Event written | Meaning | Resulting state |
 |---|---|---|
-| Connection churn | `Connect`→`SysNwkParamRead`→`DevDescrRead`→`Disconnect`, `IndAddrSerNumRead` (broadcast), `Connect`→`DevDescrRead`→`Disconnect`, `Connect`→`DevDescrRead` | Several short-lived connections and device-identity checks before the real session starts, including a `DevDescrRead` seen twice in immediate succession, and (only in this specific capture) a defensive `RestartReq` mid-churn — see §1.1 Stage 0 for the same pattern on 1.1.9 |
-| Identity reads | `PropValueRead OX=0 P=56`, `FuncPropExtRead OT=17 OI=1 P=51` (×2), `PropValueRead OX=0 P=11` | Static identity/status fields - none of these are content-dependent, none could reveal an out-of-band tamper |
-| `AuthReq`/`AuthResp` | `AuthReq $FFFFFFFF` → `AuthResp L=0` | §2.2 |
-| Capability probe | `PropDescrRead OX=2 P=23` → `N=1600 R=3 W=3` | Association-table capability descriptor - same single frame in every 1.1.9/1.1.10 session, Full or Partial |
-| More identity reads | `PropValueRead OX=0 P=11`, `OX=4 P=5` (state check), `OX=4 P=13` (`PID_PROGRAM_VERSION`, read here, written back verbatim later), `OX=5 P=5`, `OX=0 P=12/25/78/15` | Same shape as §1.1 Stage 1 for 1.1.9 |
-| **Checksum read** | `PropValueRead OX=3 P=27` → `$000003AE0033C327`; `PropValueRead OX=4 P=27 N=2` → `$000028C0003365E4000000010133DCBD` | **The trigger signal (§Part 8)** - both come back valid/normal in this clean session. Fires here, well before any Unload/write decision. **1.1.9's app never sends this read at all**, at any stage, in any capture (§Part 8/§10.3) |
-| Unload | `PropValueWrite OX=4/2/1 P=5 $04...` (reverse order) | Object 3 stays untouched in this session entirely - not unloaded, not reloaded, because the checksum read above came back clean |
-| StartLoading + LoadData + write: OX=4 (parameters) | `P=5 $01...` → Loading; `P=5 $030B000028C100000000` (LoadData); `PropValueRead OX=4 P=7` → base `0x0C3000`; `MemExtWrite X=$0C58C0 $01` (**1 byte**) | Only one real byte differs from what's already on the device - even on a "Full" Download, ETS only writes what's actually different (§Part 7's established finding, reconfirmed here) |
-| Property-27 recompute write (OX=4 only) | `PropValueWrite OX=4 P=27 $000028C000330000`; `PropValueWrite OX=4 P=27 X=2 $0000000101330000` | The two-step `WriteProp` sequence from §Part 7 - re-primes the checksum after the (tiny) real content write above |
-| StartLoading + LoadData + write: OX=1 (GA table) | `P=5 $01...` → Loading; `P=5 $030B0000000600000000`; `PropValueRead OX=1 P=7` → base `0x0F0000`; `MemExtWrite N=6 X=$0F0000 $00020A010A02` | GA table rewritten unconditionally, as always on Full Download (§Part 6), even though no GA link changed in this clean session |
-| StartLoading + LoadData + write: OX=2 (Association table) | `P=5 $01...` → Loading; `P=5 $030B0000000A00000000`; `PropValueRead OX=2 P=7` → base `0x0C0000`; `MemExtWrite N=10 X=$0C0000 $00020001001F00020020` | Same unconditional pattern as GA table |
-| `PID_PROGRAM_VERSION` write-back | `PropValueWrite OX=4 P=13 $0004303023` | §2.4 - identical value read back in Stage 1, written verbatim |
-| LoadCompleted | `PropValueWrite OX=4/2/1 P=5 $02...` → responses `$01` (Loaded) | Object 3 excluded - never touched this session |
-| Post-load checksum reads (`LoadImageProp`, read-only) | `PropValueRead OX=1 P=27`, `OX=2 P=27`, `OX=3 P=27` (same `$...C327` as the pre-load read - unloaded, unchanged), `OX=4 P=27 N=2` (same value as the pre-load read - confirms the tiny real write didn't change the checksum's own tracked content) | §Part 7's read-only `LoadImageProp` fact, shown for every object including the untouched Object 3 |
-| Restart | `RestartReq $0100` → `RestartResp $000000` | §1.1 Stage 6 |
+| Unload | Mark the object as no longer valid, about to be replaced | Unloaded |
+| StartLoading | Begin a new load | Loading |
+| LoadData (+ 9 extra bytes, §4.2) | Declare what's about to be written — size, mode, fill value | Stays Loading |
+| LoadCompleted | Commit the load | Loaded |
 
-**What this timeline demonstrates end-to-end that no single earlier capture showed on its own**:
-the property-27 checksum read happens once, early, before any Unload decision - not interleaved
-with the write phase, not re-checked mid-session except via the read-only `LoadImageProp` calls
-at the very end (which confirm the writes didn't disturb it, not re-decide anything). Object 3 is
-completely absent from Unload/StartLoading/LoadData/write/LoadCompleted in this clean session -
-its checksum is read once at the very start and once at the very end, both times identical,
-consistent with §10.3's finding that it's excluded from the write plan entirely when the checksum
-looks clean.
+Objects that need writing are unloaded first, in reverse index order (e.g. 4 then 3 then 2 then
+1), then loaded in a fixed order that is **not** simple ascending or descending index order
+(observed order: 4, then 3, then 1, then 2) 🟡 — likely dependency ordering between objects
+specific to the application, not verified against other configurations.
 
-### 1.2 Partial Download, decoded frame-by-frame — and the differences from Full
+## 4. Wire format reference
 
-Source: `2026-08-28-ets-2-partial-download-ntp-off-1.1.9.pcapng` and
-`2026-08-28-ets-3-partial-download-ntp-on-1.1.9.pcapng` — same device, same session,
-immediately following the Full Download above; the only real project change between the two
-Partial captures was flipping one boolean parameter ("Use standard NTP server", relmem offset
-69, absolute address `0x5F53`) off then back on. 🟢
+### 4.1 Memory write services
 
-**Structurally, a Partial Download is a strict subset of the Full sequence** — same stages, same
-frame types, in the same relative order, with two real differences:
+Two different lower-level services exist for writing raw memory content into a device: a
+**legacy** form (16-bit address) and an **extended** form (24-bit address, needed for memory
+locations above `0xFFFF`). **Real ETS used the extended form exclusively for every write
+observed on this testbed** — including for addresses that fit easily in 16 bits, not just the
+ones that structurally require the 24-bit form. 🟢, confirmed across every Full and Partial
+Download captured, both devices.
 
-1. **Only OX=4 (parameters) goes through Unload→StartLoad→LoadData→write→LoadCompleted.**
-   Objects 1/2/3/5 are read (`PropValueRead OX=4 P=5`, `OX=5 P=5` — a quick state check, not a
-   full reload) but never unloaded or reloaded — their data didn't change, so ETS skips them
-   entirely. 🟢 confirmed directly (compare the frame list in both partial captures against the
-   full one — no `PropValueWrite ... P=5` frames appear for OX=1/2/3/5 in either partial
-   capture).
-2. **The `LoadData` "mode" byte is `0x00`, not `0x01`.** Exact same LoadData otherwise
-   (`030B00001FF200FF0000` vs the Full Download's `030B00001FF201FF0000` — only byte 5 differs).
-   See §2.3 — this is the confirmed Full-vs-Partial signal, not a "combined declaration" flag as
-   originally guessed.
+The response to each such write carries a 1-byte status field (observed value `0x01` on every
+successful write — 🔴 **SPECULATIVE**: given every one of these writes demonstrably succeeded,
+this is unlikely to mean "an error occurred"; more likely a status/return code whose exact
+meaning per the KNX spec isn't confirmed here) plus a 2-byte trailing value that looks like a
+checksum of the written data 🔴 (pattern observed, not verified against a specific algorithm).
 
-**The actual memory write differs in size between the two Partial captures, unexplained:**
+**Mask-version gating** (the most consequential finding here — it directly gates whether a write
+silently fails):
 
-| Capture | Target value | Memory write |
-|---|---|---|
-| NTP off (`ets-2`) | `0x00` (bit 7 clear) | `A_MemoryExtended_Write N=5 X=$005F53 $0000000000` (frame 138) — **5 bytes** |
-| NTP on (`ets-3`) | `0x80` (bit 7 set) | `A_MemoryExtended_Write X=$005F53 $80` (frame 138) — **1 byte** (no `N=` shown = defaults to 1) |
+- 🟢 Both real devices tested report mask `0x07B0` ("System B").
+- 🟢 Real ETS used the extended write service exclusively for both.
+- 🟢 A verbatim byte-for-byte replay of a real captured ETS write against real hardware
+  persisted correctly. An identical write attempted using the legacy service instead (chosen
+  because the target address happened to fit in 16 bits) failed to persist — reproducibly, with
+  no error returned at any protocol layer.
+- 🟡 **INFERRED, not proven**: that mask `0x07B0` ⇒ "requires the extended service" generalizes
+  to every System B device, not just these two. Reasonable given the shape of KNX's own device
+  classification, but the sample is two devices from one manufacturer.
+- 🔴 Whether legacy (pre-System-B) mask families genuinely *require* the legacy service, or would
+  also tolerate the extended one, is untested — no such device has ever been available to test.
 
-🔴 **SPECULATIVE, genuinely open**: why does turning the parameter off write 5 bytes but turning
-it on write only 1? Two candidate explanations, neither tested: (a) ETS may be writing a wider
-byte range because some other, nearby parameter also needed to change state as a side effect of
-this one (e.g. a dependent/gated parameter becoming inactive), even though the project diff we
-made was a single boolean; (b) some encoding-size difference tied to the specific bit pattern.
-Not investigated further — flagging so a future session doesn't have to rediscover this
-asymmetry from scratch.
+**Gotcha**: at least one common packet-capture tool's own protocol dissector has repeatedly
+mis-displayed this write's target address in its one-line summary view (observed showing one
+address when the real decoded address, from the raw bytes, was a different one). Never trust a
+capture tool's own summary/quick-view for a memory-write address — always manually decode the
+raw bytes.
 
-Otherwise the two Partial captures are frame-for-frame identical (same `PropDescrRead`, same
-`AuthReq`, same PID13 read-then-writeback, same `RestartReq`) — a real, controlled, isolated
-confirmation that the sequence generalizes across at least a true/false toggle of the same
-parameter. 🟢
+### 4.2 The 9-byte "LoadData" declaration
 
-### 1.3 Timing observations
-
-🟢 Confirmed durations, this specific capture only (not necessarily representative of every
-device/network):
-- ACK round-trip: typically 5-15ms per frame.
-- `PropertyValue_Response` for a Load State transition: usually fast (~10-60ms) except
-  `StartLoading`→`LoadData` and `LoadCompleted`, which can take 300-600ms (see the confirmed
-  real-hardware "Restart race" bug this caused in koolenex — §3).
-- Full Download total wall time (Stage 1 through Restart confirmation): ~6 seconds.
-- Partial Download total wall time: ~2.7 seconds.
-- 🔴 **SPECULATIVE**: whether these timings scale with parameter memory size, network
-  conditions, or are fairly fixed regardless — not tested with a larger parameter set.
-
-## Part 2 — Wire format reference
-
-### 2.1 `A_DeviceDescriptor_Read`/`Response`
-
-Sent as the very first frame of every real ETS management session in every capture this project
-has (🟢, seen in Full Download, both Partial Downloads, and the earlier 2026-08-27/28 captures).
-Response carries a 2-byte mask version (e.g. `$07B0`). 🟡 **INFERRED**: real ETS almost
-certainly uses this to decide device-family-specific behavior (which memory service to use,
-which property-based model to assume) — not confirmed from ETS source, but strongly suggested by
-it being the literal first thing ETS does before anything else, every time, and by the real
-mask-version-gated memory-write finding in §3.
-
-### 2.2 `A_Authorize_Request`/`Response`
-
-APCI `0x3D1`/`0x3D2` (not registered in koolenex's `parseCEMI`'s named extended-APCI table —
-decodes as `apciName: 'OTHER'`; matching frames requires recomputing the full 10-bit APCI
-manually: `((apdu[0]&0x03)<<8)|apdu[1]`). Sent once, early, with the well-known/default key
-`0xFFFFFFFF`; response carries a 1-byte access level (`0` = full access, observed in every
-capture on this testbed). 🟢 Present in every real capture. 🔴 **SPECULATIVE**: whether a real
-project with non-default access keys configured would show a different key/response — untested,
-this testbed's devices are presumed factory-default.
-
-### 2.3 Load State Machine (`PID_LOAD_STATE_CONTROL` = property 5)
-
-Event → resulting state, confirmed across the Full Download and both Partial Downloads (🟢, 3
-independent real sessions, consistent every time):
-
-| Event (sent) | Meaning | Resulting state (in response) |
-|---|---|---|
-| `0x04` | Unload | `0x00` (Unloaded) |
-| `0x01` | StartLoading | `0x02` (Loading) |
-| `0x03` + 9-byte extra | LoadData (see below) | `0x02` (stays Loading) |
-| `0x02` | LoadCompleted | `0x01` (Loaded) |
-
-**`LoadData`'s 9-byte extra payload**, confirmed byte-for-byte identical layout across 6
-independent real examples now (4 from the original Full Download investigation, plus the 2
-Partial Download examples in this session) 🟢:
+Before writing the real content, the tool declares what's about to come, as 9 extra bytes on the
+LoadData event (§3). Confirmed byte-for-byte identical layout across every real example
+observed 🟢:
 
 ```
-byte:    0     1-2    3-4         5      6      7-8
-         SCF   rsvd   size(BE)    mode   fill   rsvd
+byte:    0     1-2      3-4         5      6      7-8
+         flag  reserved size (BE)   mode   fill    reserved
 ```
 
-- `SCF` (Segment Control Field?) — always observed as `0x0B`. 🔴 exact meaning per KNX spec not
-  looked up, name is a guess.
-- `size` — matches the object's real total write-segment size exactly, every time observed
-  (8178, 98, 10, 6 bytes for OX=4/3/2/1 respectively). 🟢
-- `mode` — **`0x01` on the one Full Download observed, `0x00` on both Partial Downloads
-  observed, for the same object (OX=4) on the same device.** 🟢 Real meaning: Full vs Partial
-  download type. This corrects an earlier, wrong hypothesis (see "Retracted theories" below).
-  🔴 **not confirmed for objects other than OX=4** — the only real LoadData examples for OX=1/2/3
-  all come from Full Downloads (mode always `0x00` there too, which happens to be consistent
-  with "Partial" only by coincidence since those objects are never loaded on a Partial Download
-  at all — no real Partial-Download LoadData example exists for OX=1/2/3 to check against).
-- `fill` — the byte value ETS declares for filling any part of the segment it doesn't explicitly
-  write (`0xFF` for OX=4, `0x00` for OX=1/2/3, consistent with what's actually observed on real
-  device memory for unwritten "gap" bytes in the koolenex-reference memory's separate
-  investigation). 🟢 for the value pattern; 🔴 for *why* OX=4 specifically uses `0xFF` while the
-  others use `0x00` — not investigated, could be manufacturer/app-specific rather than a general
+- **flag** — always observed as one specific fixed value. 🔴 exact spec meaning not looked up;
+  doesn't appear to vary.
+- **size** — matches the object's real total write-segment size exactly, every time (e.g. 8178,
+  98, 10, or 6 bytes, depending on the object). 🟢
+- **mode** — **one value means a Full Download, a different value means a Partial Download**,
+  confirmed for the parameter-memory object across one real Full and two real Partial Downloads
+  on the same device. 🟢 for that object; 🔴 not independently confirmed for the other objects
+  (no real Partial-Download example of this declaration exists for them, since those objects
+  were only ever loaded at all during a Full Download in every real capture available).
+- **fill** — the byte value the tool declares for filling any part of the segment it doesn't
+  explicitly write (observed as one value for the parameter object, a different value for the
+  others, both consistent with what's actually found on real device memory for genuinely
+  untouched "gap" bytes). 🟢 for the value pattern; 🔴 for *why* the parameter object specifically
+  differs from the others — not investigated, may be configuration-specific rather than a general
   rule.
 
-### 2.4 `PID_PROGRAM_VERSION` (property 13, object 4) read-back-and-write-back
+### 4.3 Version-marker read-back-and-write-back
 
-Confirmed in every real capture (Full and both Partials): ETS reads this early (Stage 1), then
-writes the *identical* value back verbatim right before `LoadCompleted`. 🟢 the pattern itself.
-🔴 **SPECULATIVE** *why*: theorized as "registering the freshly-loaded segment as belonging to a
-known application, without which `LoadCompleted` might not durably commit" — this is a plausible
-explanation consistent with the fact that omitting this step (before it was discovered and added
-to koolenex) correlated with writes not persisting, but no controlled test isolates this single
-step's necessity from the other five fixes made the same day (see §3) — treat the *mechanism* as
-speculative even though the *pattern* itself is solid.
+The tool reads a version-identifier property on the parameter object early in the session, then
+writes the *identical* value back verbatim right before the final "mark loaded" step, in every
+real capture (Full and Partial). 🟢 the pattern. 🔴 **SPECULATIVE** *why*: plausibly
+"re-registering the freshly-loaded segment as belonging to a known application version, without
+which the final commit might not durably take effect" — consistent with the fact that omitting
+this step (in an early, buggy write-path implementation) correlated with writes not persisting,
+but no controlled test isolates this one step's necessity on its own.
 
-### 2.5 Memory write services: `A_Memory_Write` vs `A_MemoryExtended_Write`
+## 5. Session finalization
 
-Two services exist: legacy `A_Memory_Write` (16-bit address, APCI `0xA` in the 4-bit table) and
-`A_MemoryExtended_Write` (24-bit address, APCI `0x1FB`). **Real ETS used `A_MemoryExtended_Write`
-exclusively for every write observed on this testbed** — including for 1.1.9's address `0x5F53`,
-which fits easily in 16 bits, not just 1.1.10's `0xC3000`+ addresses which structurally require
-it. 🟢, confirmed across Full Download and both Partial Downloads for 1.1.9, and separately for
-1.1.10.
+A restart request is sent once, at the very end, and gets a real response acknowledging it. 🟢
+the pattern; 🔴 the response's trailing bytes' exact meaning (possibly a "how many seconds this
+will take" field) is not spec-confirmed.
 
-**This correlates with, but is not proven to be caused by, the device's mask version being
-System B** (both tested devices are `0x07B0`). 🟡 **INFERRED, not proven**: no device with a
-different (non-System-B) mask version has ever been tested against this write path on real
-hardware — see §3 for the full reasoning and the current fallback behavior for untested mask
-families. Response format: `A_MemoryExtended_Write_Response` carries an `Error`-labeled byte
-(see §1.1's caveat about this field's real meaning) plus what looks like a 2-byte CRC.
+**Timing** (this testbed only, not necessarily representative elsewhere) 🟢: round-trip
+acknowledgement typically 5–15ms per message; most load-state transitions ~10–60ms, except
+"start loading → declare data" and the final "mark loaded" step, which can take 300–600ms — worth
+knowing if a write-path implementation has a timeout waiting for the device to restart and
+respond again afterward. Full Download total wall time ~6s; Partial Download ~2.7s. 🔴 whether
+these scale with parameter memory size or network conditions is untested.
 
-**`A_MemoryExtended_Write`'s frame is easy to mis-decode manually**: `tshark`'s own KNXnet/IP
-dissector has repeatedly mis-displayed this frame's address in its summary column (e.g. showing
-`X=$0A5F` when the real decoded address was `0x5F0E` — see
-`2026-08-28-koolenex-write-attempt-1.1.9.pcapng` frame 13, and the earlier 2026-08-26
-investigation). 🟢 **Never trust the summary column for a `MemWrite`/`MemExtWrite` address** —
-always manually decode the raw hex bytes, following the same offset logic `parseCEMI()`/
-`apduConnected` use internally.
+## 6. Per-object write mechanics
 
-### 2.6 GA table and Association table wire formats (objects 1 and 2)
+### 6.1 Object 4 — application parameter memory
 
-Confirmed on real, non-degenerate group addresses (2026-08-28, prior session) — not re-derived
-in this document, cited here for completeness:
+The largest object, holding every user-configured setting. 🟢 **A Full Download only writes bytes
+that actually differ from what's already on the device** — confirmed directly (a real "clean"
+Full Download, with zero actual configuration changes, wrote a single differing byte, not the
+whole multi-thousand-byte segment) and confirmed history-independent: a device carrying stale or
+out-of-band content is detected and corrected (§7.3), not silently trusted just because it
+happens to match.
 
-- **GA table** (object 1): `[count:2][GA:2]...`, standard raw 16-bit main(5)/middle(3)/sub(8)
-  encoding, no reordering. 🟢, but **small sample**: 2 devices, one manufacturer, one testbed.
-  Confirmed directly in this session too — see the OX=1 decode in §1.1's Stage 3 table.
-- **Association table** (object 2): `[gaIndex:2][coNumber:2]` per entry, 1-based,
-  position-referencing (not value-referencing). 🟢, same sample-size caveat. Confirmed directly
-  in this session too — see the OX=2 decode in §1.1's Stage 3 table.
-- **Entry order within the Association table encodes which link is the Send GA** (2026-08-29) -
-  🟢 confirmed directly: for a communication object with multiple links, the first entry (in
-  table order, not necessarily lowest `gaIndex`) is the send link; swapping which GA sends swaps
-  the two entries' order with no other change anywhere (Object 3, the GA table itself unaffected).
-  Not a separate flag anywhere - order is the encoding.
-- Full decode logic and fixtures: `tests/relmem-real-device-fixtures.test.ts`, and
-  `decodeGaTable()`/`decodeAssocTable()` in the codebase.
+**Sub-byte-packed parameters and padding bits**: when a parameter occupies only part of a byte
+(e.g. a single-bit setting sharing a byte with other unrelated bits), the byte's other,
+unrelated bits — not covered by any parameter — should be zero-filled, not left at whatever
+generic "unwritten gap" fill value the rest of the segment uses. 🟢 confirmed against real
+device content: a real single-bit setting's real on/off values are `0x80`/`0x00` (only the one
+bit varying), not `0xFF`/`0x7F` as a naive "fill the rest with the generic gap value" approach
+would produce. Bytes genuinely untouched by any parameter still use the generic fill value.
 
-### 2.7 Object 3 — see Part 10
+**Large "blob" parameters**: some parameters use a multi-hundred-byte raw-data type rather than a
+simple scalar/text/numeric value (their declared maximum size, in bytes, is stated directly in
+the project data). 🟢 confirmed against real project data and real device content: **the wire
+format for one of these is a 4-byte length value (big-endian) followed by the actual payload**,
+not the raw payload alone. 🔴 whether this framing (a length prefix before the payload)
+generalizes to every blob-typed parameter, or is specific to the one case it was confirmed
+against, is unconfirmed.
 
-Present in every 1.1.9 Full Download, written as a single 98-byte block at its own
-PID-7-resolved base. Identity, decoded content, and write-trigger: Part 10.
+### 6.2 Object 1 — group address table
 
-## Part 3 — Which memory service a device actually needs: the mask-version finding
+Wire format: a 2-byte count, followed by one 2-byte group address per entry, in the standard raw
+16-bit main/middle/sub-group encoding, no reordering. 🟢, small sample (2 devices, one
+manufacturer).
 
-This is the most consequential, and most carefully qualified, finding in this document — it
-directly gates whether a write silently fails.
+### 6.3 Object 2 — association table
 
-**🟢 CONFIRMED facts:**
-- Both real devices tested (1.1.9, 1.1.10) report mask version `0x07B0` via a live
-  `A_DeviceDescriptor_Read`.
-- This project's own bundled KNX Master Data (`data/knx_master_<projectId>.xml`) classifies mask
-  `0x07B0` (and its PL/RF/IP siblings `0x17B0`/`0x27B0`/`0x57B0`) as `ManagementModel="SystemB"`
-  — a real, standardized KNX classification distinct from the legacy `Bcu1`/`Bcu2`/`BimM112`/
-  `PropertyBased` families that occupy other mask ranges in the same table.
-- Real ETS used `A_MemoryExtended_Write` exclusively for both these devices, for every observed
-  write, regardless of whether the address fit in 16 bits.
-- A verbatim byte-for-byte replay of a real captured ETS Partial Download (all 49 request
-  frames, unmodified) against real hardware persisted the write correctly.
-- koolenex's own reconstruction of the *identical* operation (same address, same count, same
-  data), using the legacy `A_Memory_Write` service instead (because the address fit in 16 bits),
-  silently failed to persist — twice, reproducibly, with no error of any kind at any protocol
-  layer.
+Wire format: one entry per link, each a pair of 2-byte numbers — which group-address-table
+position it refers to, and which communication object it's linked to — 1-based, referring to
+table *position*, not a value match. 🟢, same sample caveat.
 
-**🟡 INFERRED, not proven:**
-- That mask-`0x07B0` ⇒ "requires extended writes" as a general rule for *all* System B devices,
-  not just these two specific ones. This is a reasonable inference (both real data points are
-  consistent with it, and it matches the general shape of KNX's own device-generation
-  classification), but the sample is exactly two devices from one manufacturer.
-- That legacy/non-System-B devices (`Bcu1`/`Bcu2`/`BimM112`/`PropertyBased` masks) genuinely
-  *require* the legacy service rather than also tolerating extended writes. No such device has
-  ever been tested against this write path at all.
+**Entry order encodes which link is the "send" link.** For a communication object with multiple
+links, the first entry in table order (not necessarily the lowest position number) is the one it
+actively transmits on; the rest are receive-only. 🟢 confirmed directly: swapping which of two
+group addresses a communication object sends on swaps the order of the two matching entries here,
+with no other change anywhere (the object-3 flags described below, and the group address table
+itself, are both unaffected). Link direction is **not** represented anywhere else — this entry
+order is the only encoding of it.
 
-**Current implementation** (koolenex, `server/knx-connection.ts`'s `WriteRelMem` case, commit
-`95805ff`): reads the device's real mask version via `A_DeviceDescriptor_Read` at the start of
-every RelSegment-driven download session (mirroring what real ETS itself does — §2.1), then:
-- Mask low byte `0xB0` (confirmed System B) → always `A_MemoryExtended_Write`, regardless of
-  address size.
-- Anything else (unrecognized mask, or the device never answers the descriptor read) → falls
-  back to the original conservative address-size heuristic (`addr > 0xFFFF` → extended, else
-  legacy).
+### 6.4 Object 3 — per-communication-object flags table
 
-The fallback branch is **only protocol-level tested** (fake device in
-`tests/relmem-write-protocol.test.ts`), never against real legacy hardware. If a real
-BCU1/BCU2/System-7-family device is ever available to test, that closes the one remaining real
-gap in this finding.
+🟢 This is the standard KNX "Group Object Table" — confirmed via a live object-type property read
+on a real device, cross-referenced against the KNX standard's own published interface-object-type
+list. Distinct from the group address table (object 1, holds the addresses themselves) and the
+association table (object 2, maps links to communication objects) — a table specifically about
+each communication object's own settings (its flags, priority, and expected data size).
 
-### Do not re-propose these — already tested and found wrong
+**Size and location**: per-device/configuration — 98 bytes at one address on one device, 942
+bytes at a different address on the other (readable via a standard "give me this object's real
+memory location" property, stable across sessions). The size is computable directly:
+`size = 2 × (highest communication-object number the configuration statically declares) + 2` —
+deliberately the configuration's total possible range, not a given device's currently-linked
+subset (space is pre-allocated for every communication object the configuration could ever
+expose). Confirmed exact against both real testbed devices.
 
-- LoadData mode byte = "combined full+par declaration": wrong. Real meaning is Full(`0x01`) vs
-  Partial(`0x00`) download type (§2.3).
-- Always use `A_MemoryExtended_Write` unconditionally for every device: wrong; gate on mask
-  version (above), not a blanket rule.
-- koolenex's enum-to-byte mapping was wrong (unrelated 2026-08-26 bug theory): wrong; the parser
-  is faithful, the real mechanism was conditional-activation gating (see `koolenex_reference`
-  memory).
-- Object 3 tied to application-version management, or to "differs from manufacturer default": both
-  wrong (Part 10).
-- Object 3 written whenever a GA/parameter change is present in the project, tampered or not: wrong
-  (Part 10.3) - only an out-of-band write (bypassing ETS) triggers it.
-
-## Part 4 — Known gotchas (tooling and methodology)
-
-- **`tshark`'s KNXnet/IP dissector mis-displays `Memory_Write`/`MemoryExtended_Write` addresses
-  in its summary/Info column** on at least one confirmed occasion (§2.5). Always manually decode
-  the raw `-x` hex for these frames; never trust the summary column for the address field.
-- **KNXnet/IP tunneling for this router uses TCP, not UDP.** A `udp port 3671` capture filter
-  catches nothing from real ETS sessions — use a host-only filter (`host <router-ip>`, no
-  port/proto restriction). koolenex's own connection is UDP-only by contrast (confirmed via
-  code review — no TCP networking code anywhere in `server/*.ts`), which is why neither tool's
-  own bus monitor could ever see the other's traffic before tshark was introduced.
-- **Windows/git-bash path translation**: `node` as a native Windows process does not reliably
-  translate git-bash-style `/tmp/...` or even `/c/...` paths when spawning child processes via
-  `cmd.exe`, or sometimes even for direct `fs` calls. Use explicit
-  `C:/Users/...`-style forward-slash paths for direct Node file I/O, and run `tshark` via a
-  shell directly (never have Node itself spawn it) — write to files, then have Node read the
-  pre-written files.
-- **A_MemoryExtended_Write_Response's leading byte, and `RestartResp`'s trailing bytes, have
-  observed but not spec-confirmed meanings** — see §1.1 and §2.5. Don't assert a specific
-  interpretation without checking the actual KNX Interworking spec.
-
-## Part 5 — Genuinely open questions
-
-Consolidated from throughout this document, for visibility:
-
-1. Why does the NTP-parameter write differ in byte count (5 bytes for "off" vs 1 byte for "on")
-   between the two otherwise-identical Partial Download captures? (§1.2)
-2. ~~Object 3's identity, content, and write-trigger~~ - **RESOLVED, see Part 10**: the standard
-   Group Object Table; content fully decoded as `offset = 2 × com-object number` (confirmed not
-   to reindex when objects are disabled/unlinked), with a per-object flag byte (Update=bit7,
-   Transmit=bit6, Read-On-Init=bit5, Write=bit4, Read=bit3, bit2=Communication flag AND has a
-   real GA link - both required, indifferent to link count or send/receive direction,
-   Priority=bits1:0), cross-confirmed on a second object, a third object with a different
-   DPT/size, a second device/app entirely, multiple links, and mixed send/receive links (§10.1;
-   link direction itself is encoded as Association-table entry order, §2.6, not in Object 3 at
-   all). Write trigger resolved for both Partial
-   (§10.2, conditional on any communication-object-level change, not just GA links) and Full
-   Downloads (§10.3, conditional on an anomalous `OX=4 P=27` checksum read - itself tied to
-   Part 8's comprehensive-rewrite trigger). **Still open**: bit 2's exact semantics beyond the
-   observed correlation; 1.1.9 writes
-   Object 3 on every Full Download tested, never yet shown skipping it - not reconciled with
-   1.1.10's conditional behavior, and 1.1.9's app doesn't even declare property 27.
-3. Whether the mask-version gate (§3) generalizes beyond System B, or whether a real legacy
-   device needs something different — untested, no legacy hardware available.
-4. Whether the LoadData `mode` byte's Full/Partial meaning holds for objects other than OX=4 —
-   still no real ETS-captured Partial-Download LoadData example exists for OX=1/2/3. (koolenex's
-   own new `mode: 'partial'` write path, Part 11, now forces this byte for OX=1/2 too and
-   confirmed it's accepted by real hardware - but that's koolenex's own write, not an observed
-   real ETS Partial Download of these objects, so this item stays open as originally scoped.)
-5. The exact meaning of several unidentified property reads in Stage 1 (OX=0 P=15/25/56/78) —
-   never looked up against a KNX property ID reference table.
-6. ~~`buildParamMem()`'s padding-bit fill bug (fills unrelated bits sharing a byte with a
-   sub-byte-packed parameter as `1` instead of the real device's `0`)~~ — **FIXED 2026-08-29, see
-   Part 20**.
-7. ~~Whether these findings hold for 1.1.10 specifically re-tested against the current fixed
-   code~~ — **RESOLVED 2026-08-29, see Part 7**: re-tested with a fresh 3-download session;
-   confirmed the universal GA/Association mechanism a second time and surfaced a real,
-   previously-unverified `LoadImageProp` bug (now fixed).
-
-## Part 6 — GA table / Association table writes are a universal, mask-defined procedure, not something every app declares (RESOLVED 2026-08-29)
-
-🟢 Confirmed: real ETS writes the GA table (objIdx 1) and Association table (objIdx 2) during a
-Full Download via the identical RelSegment Unload/StartLoading/LoadData/write/LoadCompleted
-mechanism used for parameters - but not every app's own `LoadProcedures` declares this itself.
-1.1.9's app (`M-0004_A-0025-10-1BA6-O00A6`) declares no `RelSegment`/`WriteRelMem`/`LoadImageProp`
-step at all for objIdx 1/2, and real ETS writes both anyway. 1.1.10's app declares `LoadImageProp`
-for objIdx 1/2/3/4 explicitly instead (a different mechanism - property 27, see Part 7). 🟡
-**INFERRED**: this table-loading procedure is apparently universal and mask-defined, something
-some apps simply don't need to declare - not confirmed from spec text, only from this app's
-absence of a declaration combined with the wire evidence that ETS writes it anyway. Confirmed a
-second time, independently, against 1.1.10 (which *does* write both tables, via the same
-mechanism, despite declaring its GA/Association handling differently).
-
-**Still open**: whether this is truly universal across every mask family (only tested on two
-System B devices), and whether it holds for apps with more than 2 GAs or association entries.
-
-Implementation history (koolenex code changes, commit hashes, two real bugs found fixing this):
-`docs/follow-ups/2026-08-29-property27-ga-write-wiring-and-ui.md`, part 1.
-
-## Part 7 — Property 27 (`LoadImageProp`/`WriteProp`): what it is, and where it comes from (RESOLVED 2026-08-29)
-
-Re-testing 1.1.10 against the current write-path code (closing Part 5 item 7) surfaced two real
-bugs in how koolenex's own `LoadImageProp`/`WriteProp` handling worked, both now fixed - but the
-more durable finding is the protocol fact itself, below.
-
-### Where property 27 comes from - it's in the project file, not decided at download time
-
-This isn't ETS deciding something dynamically per-device. Every device's app carries its own
-`LoadProcedures` list (already parsed into `data/apps/*.json`) - a per-app, manufacturer-authored
-recipe of exactly what steps to run on download, in order. 1.1.9's app declares no `WriteProp`/
-`LoadImageProp` step for property 27 anywhere, so it never touches this property at all - the
-real app XML simply doesn't ask for it. 1.1.10's app does, and its full declaration (in order) is:
+**Record layout** — a 2-byte header followed by 2 bytes per communication object:
 
 ```
-RelSegment (mode: full)         — allocate space, Full Download
-RelSegment (mode: par)          — allocate space, Partial Download
-WriteProp  objIdx=4 propId=27   data: 000028c0003300000000   (literal, fixed bytes from the file)
-WriteProp  objIdx=4 propId=27   data: 00000001013300000000   (literal, fixed bytes from the file)
-WriteRelMem objIdx=4            — the real parameter settings
-LoadImageProp objIdx=1 propId=27
-LoadImageProp objIdx=2 propId=27
-LoadImageProp objIdx=3 propId=27
-LoadImageProp objIdx=4 propId=27
-```
+bytes 0-1:   header — total declared communication-object count, big-endian
 
-Checking `data/apps/*.json` across every app that declares a `WriteProp` for objIdx4/propId27
-(not just 1.1.10's - several different manufacturer IDs: `0004`, `0048`, `00C5`, `0233`) shows the
-same two-step, literal-fixed-data shape every time, just with different embedded values. **This
-is exported, manufacturer-authored data ETS ships with the project - not something a
-download-time algorithm computes.**
+byte offset within the table (for communication object number N, N ≥ 0) = 2 × N
 
-### What property 27 actually is, in plain terms
-
-A KNX device management operation always addresses "object N, property M" - `objIdx` is a logical
-object inside the device's own internal object table, not a raw memory address. Property 27
-happens to exist as an attribute on several of these objects here:
-
-| objIdx | What it is |
-|---|---|
-| 1 | Group Address table |
-| 2 | Association table |
-| 3 | Group Object Table (KNX standard type `9`) - real size is per-app (98 bytes for 1.1.9, 942 for 1.1.10); see Part 10 |
-| 4 | The application/parameter memory object - the real device settings |
-
-So it isn't its own memory area - it's a per-object "content status/checksum" attribute that
-happens to be shared property ID 27 across object types 1-4.
-
-### The two real protocol facts, confirmed on real hardware (3 independent downloads)
-
-- 🟢 **`LoadImageProp` is read-only for all four objects**, including objIdx4 - byte-identical
-  value before and after the load cycle, every time. It's a verify/read-back step, not a write,
-  despite the step name. The real functional write to objIdx4/property27 comes entirely from the
-  separate `WriteProp` steps shown above.
-- 🟢 **The project file's declared `WriteProp` data for property 27 is always 2 bytes longer than
-  what real ETS actually transmits** - `00 00 28 c0 00 33 00 00 | 00 00` declared (10 bytes) vs.
-  `00 00 28 c0 00 33 00 00` on the wire (8 bytes), confirmed byte-for-byte and consistent across
-  every manufacturer's app that declares this step.
-
-koolenex's own handling of both of these had real, previously-unverified bugs (never exercised
-against real hardware before, since 1.1.10 is the only app that declares either step) - now
-fixed, including a same-day self-correction where the first fix itself mis-attributed the real
-objIdx4 writes to the wrong step. Full implementation narrative, commit hashes, and the
-self-correction: `docs/follow-ups/2026-08-29-property27-ga-write-wiring-and-ui.md`, part 3.
-
-**Still open**: only one app/device has ever declared either step at all (1.1.10, mask `07b0`),
-so while the *shape* of both facts above is now backed by many different manufacturers' declared
-data in `data/apps/*.json`, the actual live wire confirmation is still one real device. Object 3's
-identity (Part 5 item 2) remains unresolved.
-
-## Part 8 — Full Download's comprehensive-rewrite fallback, and its real detection mechanism (RESOLVED 2026-08-28; trigger mechanism identified 2026-08-29)
-
-Part 7 established that ETS only writes named-parameter bytes that differ from a file-derivable
-target. Does a device carrying stale content from elsewhere (a different, discarded project; a
-factory reset) keep that content forever, if it happens to already match what the *current*
-project's target computation predicts needs no write?
-
-🟢 **No.** A value written directly into device memory bypassing ETS entirely (koolenex's own
-debug write route, simulating stale/foreign content) is detected on the very next real Full
-Download - not via a minimal, targeted correction, but a **comprehensive rewrite**: nearly the
-entire 10433-byte parameter segment, the Group Object Table (Part 10), and both the GA and
-Association tables - essentially everything, not a delta. Reproduced on both 1.1.9 and 1.1.10
-(2026-08-28 and 2026-08-29 respectively), each time regardless of exactly how the injected write
-was declared on the wire. **The rewrite's content is correct, not a blind reset** - real
-previously-captured device values are written back correctly (e.g. `2` stays `2`), which directly
-enabled Part 9's finding.
-
-### The detection mechanism: a property-27 checksum read, confirmed 2026-08-29
-
-🟢 **Confirmed, reproduced across 5 independent real Full Downloads on 1.1.10**: early in every
-session, before any load/write decision, ETS reads `PropertyValue_Read OX=4 P=27` (the same
-content-dependent checksum property established in Part 7). In every genuine session - two clean
-baselines, a real GA-link change, a real parameter change - this read returns the identical, valid
-2-element checksum (`$000028C0003365E4000000010133DCBD`). In the one session preceded by an
-out-of-band write bypassing ETS, the identical read instead returns **empty** (`N=0`) - the
-device's own checksum computation broke down as a direct, observable consequence of the tampering.
-This is not a raw memory read of the parameter/GA/Object-3 content (no `Memory_Read`/
-`MemoryExtended_Read` frame appears in any of these captures, confirmed directly) - it's a
-property-level read whose *result* differs based on device state, and it happens well before the
-Unload/StartLoading cycle begins. This is the real, evidenced trigger signal for the comprehensive
-rewrite - not a guess. See Part 10.3 for the exact 5-capture comparison table.
-
-**Still open**: whether this generalizes beyond 1.1.10's app (only device/app this has been
-checked against), and the precise decision rule ETS applies once it sees an anomalous checksum
-(e.g. whether *any* anomaly triggers the same universal comprehensive rewrite, or the response is
-graded).
-
-## Part 9 — The "1984-byte gap" is a parser bug (manufacturer-shipped blob parameters), not device-internal state (RESOLVED 2026-08-28)
-
-An earlier working theory (Part 6/relmem-fixtures test comments, now corrected) held that the
-~1984-byte mismatch between koolenex's computed parameter image and the real device was opaque,
-device-internal operational/calibration state outside ETS's own writable scope. That theory was
-never rigorously tested - it was retired once the Part 8 finding above showed ETS's comprehensive
-rewrite writes *real, correct* values into this exact region, not a static default, which isn't
-consistent with "ETS never touches this."
-
-🟢 **Confirmed root cause, fully resolved (verified against the real .knxproj XML, not just
-inferred)**: `paramMemLayout` (koolenex's own extracted parameter data) already declares
-parameters in this region - labeled "Characteristic curve value domain" - but under-declares
-their size. Each was recorded as 1 byte (`bitSize: 8`), while its real `defaultValue` is a
-base64-encoded blob that decodes to **512 bytes**. These are ordinary manufacturer-declared
-parameters (this device's app declares 6 conditional alternates per dimming channel - a
-"curve type" selector, one alternate active per channel) - nothing ETS computes dynamically.
-`buildParamMem()` had no code path to apply a multi-hundred-byte blob default (only scalar/
-text/float value types), so this region silently fell through to the segment's fill/default in
-koolenex's own computed image.
-
-**The real wire format, confirmed directly against a real `.knxproj`'s raw XML** (a different,
-older export of the same project - the app definitions inside a `.knxproj` are identical across
-exports of the same product/app version, so this is valid evidence for the live project too):
-`<ParameterType><TypeRawData MaxSize="516" /></ParameterType>` - koolenex's parser never handled
-`TypeRawData` at all (every branch checks for `TypeNumber`/`TypeFloat`/`TypeTime`/`TypeText`
-before falling through to a generic `TypeRestriction`-based branch that only reads
-*TypeRestriction's own* `SizeInBit` - absent here, hence the `bitSize=8` fallback). `MaxSize` is
-in **bytes**: 516 = 4 + 512, and the real device's own leading 4 bytes at each curve's offset
-decode as a big-endian `uint32` of `512` - exactly the payload length. **The real format is a
-4-byte big-endian length prefix followed by the payload**, not the raw 512-byte table alone -
-what first looked like an inexplicable "offset off by 4" (and, before that, a seemingly
-unrelated separate 16-byte gap after each blob) was actually the same length prefix the whole
-time, on both ends: the earlier "16 remaining unexplained bytes" (4 bytes after each naively-
-placed 512-byte window) was the table's own real tail, misplaced by the same 4 bytes.
-
-**Verified at project scale, and fully closed**: swept every `paramMemLayout` entry for this
-under-declared-size pattern. Found 24 such entries - 4 channels x 6 alternates - at four offsets
-exactly 532 bytes apart (532 = 516 + 16, the per-channel unit including the small "curve
-correction" parameter that precedes it). Fixed in two places: `ets-app.ts` now reads
-`TypeRawData`'s `MaxSize` into `bitSize` (bytes, correctly), and `buildParamMem()` now emits the
-real `[4-byte BE length][payload]` framing whenever a blob's declared size matches that shape
-(falling back to writing the raw payload with no framing otherwise, for a stale pre-fix cache or
-a genuinely different blob shape not yet seen). **Result: 0 diffs across all four 516-byte
-regions** against the real device, confirmed with a fresh re-parse of the real XML - the ~1984-
-byte gap is fully resolved, not just mostly.
-
-**Still open**: whether this `TypeRawData`/length-prefix framing generalizes to other blob-typed
-parameters or other manufacturers' apps - confirmed for this one app's "Characteristic curve
-value domain" parameters only; `buildParamMem()`'s fallback (raw payload, no framing) is a
-deliberate safety net for an unverified shape, not assumed correct.
-
-## Part 10 — Object 3 (interface object index 3): the standard Group Object Table, one of the four objects Property 27 (Part 7-8) applies to
-
-Object 3 is addressed here purely as a KNX interface object - "object 3" means objIdx 3, not
-property 27 itself. The connection to Property 27: objIdx 3 is one of the four interface objects
-(1/2/3/4, see Part 7) that each carry their own property-27 content-status/checksum value -
-`PropValueRead OX=3 P=27` appears in the same `LoadImageProp` read cycle as objIdx 4's checksum
-(§1.1', Part 8's trigger finding), just device/app-scoped to 1.1.10 the same way the rest of
-property 27 is (1.1.9's app never touches property 27 in any form, on any object - Part 8).
-
-🟢 **Identity and structure, confirmed directly**:
-- **Object 3 is the standard KNX "Group Object Table" object** (type `9`). Read live via
-  `PID_OBJECT_TYPE` (property 1) on the real device, cross-referenced against koolenex's own
-  bundled real KNX Master Data (`data/knx_master_1.xml`):
-  `<InterfaceObjectType Number="9" Name="OT_GROUP_OBJECT_TABLE" Text="Group Object Table Object" />`.
-  Confirmed the same way for objIdx 1/2/4 too (Address Table/Association Table/Application
-  Program), validating the method. Distinct from the GA table (object 1, holds the group
-  addresses themselves) and the Association table (object 2, maps GA links to communication
-  objects) - an easy name mix-up to avoid.
-- Real size and base are per-device/app: **98 bytes at `0x00570C`** for 1.1.9; **942 bytes at
-  `0x0C2000`** for 1.1.10 (`PID_TABLE_REFERENCE`, stable across sessions). Content is almost
-  entirely zero-filled in both cases - a small structure repeating once per channel/object.
-  Table size itself is computable: `2 × maxComObjectNumber + 2` (Part 14), also the value the
-  table's own leading 2-byte header holds (Part 17).
-- Not declared in either app's own `LoadProcedures` XML - written via the same universal,
-  mask-defined mechanism as the GA/Association tables (Part 6).
-
-### 10.1 Content: a per-communication-object flag+size record, fully decoded and cross-app confirmed
-
-🟢 **CONFIRMED - full record layout for Object 3, TWO bytes per communication object (a flag byte
-and a size-code byte - see Part 17), offset computed by a real formula, decoded via a systematic
-bit-by-bit mapping session (2026-08-29) plus a later cross-device Data-Type test (Part 17)**. Bytes
-0-1 are a separate 2-byte header (total declared object count, Part 17), not part of this
-per-object sequence.
-
-```
-byte offset within Object 3 = 2 × communication-object number
-```
-
-The flag byte (below) sits at this offset; the immediately following byte is the object's KNX
-standard Group Object Size code (Part 17) - originally assumed to always be `0` (unused padding)
-until a real cross-device test found it varies by DPT for non-1-bit objects.
-
-```
-bit:    7      6         5           4      3     2                       1  0
+  flag byte:
+  bit:  7      6         5           4      3     2                       1  0
         Update Transmit  Read-On-Init Write  Read  Comm-flag AND has-link  Priority
+
+  companion byte: standard KNX "Group Object Size" code (see table below)
 ```
 
-Priority (bits 1:0), values confirmed by direct empirical mapping in decreasing order:
-
-| Priority | Bits |
-|---|---|
-| Low | `11` |
-| Alarm | `10` |
-| High | `01` |
-| System | `00` 🟡 inferred by pattern, not directly tested - per KNX's own documentation (support.knx.org, "Group Object"), System priority is not settable from ETS at all, so no real project can exercise this value; the pattern-inferred bits are the practical answer |
-
-**Methodology**: toggled one flag at a time on communication object 7 (1.1.9), always confirming
-the resulting single-bit change against the previous known state, then reverted everything to
-manufacturer default and did a full-session byte comparison against the very first (pre-testing)
-baseline capture - zero diffs, confirming the whole sequence was self-consistent and fully
-reversible. The formula and bit layout were then independently verified on a **second
-communication object on the same device** (object 6, offset 12 = 2×6, Update and Read both
-matched exactly, including an additive two-flags-at-once case computed correctly in advance) and,
-decisively, on **a completely different device and app** (1.1.10, object 96 "dimming channel 4",
-offset `0xC0` = 2×96, matching manufacturer-declared defaults for that object exactly except one
-bit) - determined blind, from the capture alone, by computing the expected default byte from the
-app's own XML and diffing against the real captured value, which correctly identified the single
-changed flag (Write) before being told what had changed. This cross-device, cross-app,
-predicted-not-fitted match is strong evidence this is a genuine mask/device-generation-level
-standard structure, not an app-specific quirk. **Read-On-Init (bit 5)** was independently
-reconfirmed a second time, blind, on a third object (object 5, an 8-byte `DPST-19-1` date/time
-object - a different DPT/size than every other object tested, confirming the record format is
-independent of the object's own payload size).
-
-**Bit 2 = effective communication state: `Communication flag AND has a real GA link` - both
-required.**
-
-🟢 Confirmed directly, three real hardware tests: object 5 (linked, Communication enabled)
-showed bit 2 = `1`, consistently. Removing communication object 8's only GA link (Communication
-still enabled) flipped its bit 2 from `1` to `0`, corroborated independently by the GA and
-Association tables shrinking to remove that link in the same download. Disabling Communication on
-object 5 while its GA link stayed fully intact (checked explicitly - GA and Association tables
-byte-for-byte unchanged) also flipped bit 2 from `1` to `0` - two independent routes to the same
-bit, only one of which touches the link tables at all. Objects 6 and 7 (never linked,
-Communication toggled both ways across many tests) always showed bit 2 = `0`, consistent with the
-AND relationship.
-
-**Multiple GA links tested**: object 5 with a second GA link added (both links confirmed in the
-Association table, `[gaIndex 1, gaIndex 2] → com-object 5`) and Communication re-enabled still
-shows bit 2 = `1`, byte-for-byte identical to the single-link case - a plain boolean
-("has at least one link"), not something that varies with link count.
-
-**Scope**: the AND-relationship (flag enabled AND link present) correctly predicts every result
-observed across all tests on three objects, one and two links, and mixed send/receive links (see
-below).
-
-**Link direction (Send vs receive-only) is not represented in Object 3 at all - it lives in the
-Association table's entry order instead.** 🟢 Confirmed directly: with the same two GA links on
-object 5, swapping which one is the "Send" link (ETS's own rule: the first-added link sends, the
-rest are receive-only) left Object 3 and the GA table byte-for-byte unchanged, but flipped the
-order of the two entries in the Association table (`[gaIndex 2, gaIndex 1]` → `[gaIndex 1,
-gaIndex 2]`, same two entries, same target com-object, order swapped). Object 3's bit 2 tracks
-only "has at least one link," indifferent to direction.
-
-**Complete bit accounting**: `7=Update, 6=Transmit, 5=Read-On-Init, 4=Write, 3=Read,
-2=Communication-AND-linked, 1:0=Priority`. Every bit has an observed, evidenced role.
-
-**The offset formula does not reindex when an object is disabled** - 🟢 confirmed directly:
-disabling Communication on a lower-numbered object (6) left every higher-numbered object's byte
-(7 at offset 14, 8 at offset 16) completely unmoved - no table-compaction/reindexing occurs. The
-formula `offset = 2 × communication-object number` can be used unconditionally, regardless of
-which objects are linked or Communication-enabled elsewhere in the app.
-
-**Still open**: whether the formula/layout holds for a genuinely different mask family (only
-System B tested throughout this project - flagged as a standing gap, not investigable until
-non-System-B hardware becomes available).
-
-### 10.2 Partial Download write-trigger: conditional on any communication-object-level change
-
-🟢 **Confirmed, reproduced many times, both directions (1.1.9)**: on a Partial Download, GA table
-/ Association table / Object 3 are written together exactly when a communication object's state
-genuinely changes - a GA link, a flag, or Priority - and skipped together otherwise. This is
-broader than an earlier framing of this finding ("conditional on a GA/link change") - the bit-
-mapping session above ran many Partial Downloads changing only a flag or Priority, never a GA
-link, and every one still wrote all three objects together; a plain, no-change download in
-between correctly skipped them.
-
-| Partial Download | What changed | OX=1/2/3 |
-|---|---|---|
-| NTP flag toggle (×2, 2026-08-28) | nothing (Partial, different objects) | not written |
-| GA 9/1/4→9/1/5 (2026-08-29) | GA link | written |
-| GA 9/1/5→9/1/4 + flag revert, same download | GA link + flag | written |
-| Read/Write/Transmit/Priority flag changes (2026-08-29 mapping session, ~8 downloads) | flag or Priority only, no GA link touched | written every time |
-| Reset-to-default downloads (×2) | flags reverted | written (content matched pre-testing baseline exactly) |
-
-Object 3's content is correct every time, not a blind rewrite - every flag/Priority change and
-every revert produced exactly the predicted byte. Confirmed for 1.1.9 only.
-
-### 10.3 Full Download write-trigger: resolved via a systematic controlled redo (1.1.10, 2026-08-29)
-
-🟢 **Confirmed, five real Full Downloads in one controlled session, 1.1.10**: Object 3 is written
-exactly when the device's `OX=4 P=27` checksum read (Part 8) comes back anomalous, which happens
-only after an out-of-band write - not for any kind of genuine, ETS-driven change.
-
-| # | Change | Origin | `OX=4 P=27` checksum | Object 3 written? |
-|---|---|---|---|---|
-| 1 | none | — | valid | No |
-| 2 | none | — | valid | No |
-| 3 | parameter byte (offset 172) | out-of-band, bypassing ETS | **empty (`N=0`)** | **Yes** |
-| 4 | GA link re-point | genuine, via ETS | valid | No |
-| 5 | same offset-172 byte, real value | genuine, via ETS | valid | No |
-
-Test 5 is the decisive control: the *exact same byte* as test 3, written via ETS instead of
-bypassing it, produces a valid checksum and no Object 3 write - isolating the origin of the write
-(ETS session vs. out-of-band) as the real variable, not the byte or parameter itself. This
-directly refutes two prior hypotheses tested along the way: neither "any project change to a
-parameter" nor "any project change to a GA link" (test 4) triggers Object 3 - only an anomalous
-checksum does, which only an out-of-band write produces. This also supersedes the earlier 1.1.9
-data (which showed Object 3 written on every Full Download, tampered or not, without a systematic
-redo isolating the variable) and the historical unreproduced 1.1.10 session from 2026-08-28 - both
-are now explained by this same mechanism.
-
-**1.1.9 still writes Object 3 on every Full Download tested (5 for 5, never once skipped)** - not
-yet reconciled with 1.1.10's conditional behavior, but now with a specific, well-supported
-explanation rather than an open mystery: **1.1.9's app never sends the `OX=4 P=27` read, or any
-property-27 request of any kind, at any stage** - confirmed by checking every read-type frame
-(`PropValueRead`, `PropDescrRead`) across all 9 real 1.1.9 captures this project has (5 Full, 4
-Partial). The complete list of what 1.1.9's app *does* read, every session: identity/status
-fields (`OX=0 P=11/12/15/25/56/78`), an Association-table capability probe (`OX=2 P=23`),
-`PID_PROGRAM_VERSION` (`OX=4 P=13`, read back and written verbatim - not compared for anomalies),
-quick load-state checks (`OX=4/5 P=5`, Partial only), and each object's base address
-(`OX=1/2/3/4 P=7`) - none of these are content-dependent, device-computed values the way the
-checksum is; none could reveal an out-of-band write. 🟡 **INFERRED, well-supported but not a
-controlled causal test**: since ETS's own `LoadProcedures` action plan is built statically from
-the app's declared steps (Part 7's established fact - not decided dynamically at download time),
-and 1.1.9's plan simply never includes a property-27 step, ETS has no verification signal
-available for this app at all. Given that, "always write Object 3" is the sensible safe default
-when no cheap trust-verification mechanism exists - a real, coherent explanation, not a guess, but
-not proven by an experiment that isolates causation (e.g. no app has ever been found or
-constructed with property 27 declared for some objects and not others). Whether the
-checksum-trigger mechanism generalizes to other apps that *do* declare property 27 is also open.
-
-## Part 11 — koolenex has a real Partial-Download write mode, confirmed round-trip on real hardware (NEW 2026-08-29)
-
-Distinct from the LoadData mode-byte *observation* (Part 1/2, always sourced from real ETS
-traffic) - this part is about koolenex's own write path gaining, for the first time, actual
-Partial-Download behavior rather than always performing a Full-equivalent rewrite regardless of
-what was asked for.
-
-🟢 **Confirmed on real hardware, round trip, first attempt**: koolenex's `downloadDevice()` now
-supports `mode: 'partial'` - before touching an interface object, it reads the object's current
-content within the same management session and skips the entire Unload/StartLoading/LoadData/
-write/LoadCompleted cycle if it already matches the computed image; when a write is genuinely
-needed, the LoadData mode byte is set to the real captured Partial value (`0x00`, per Part 2)
-rather than the model's declared full/combined shape. Tested end-to-end: ETS wrote a GA change
-(Full Download); koolenex reverted it via an ordinary Full Download; koolenex then reverted it
-right back via the new partial mode - verified directly against the device at every step
-(`totalDiffering: 0`). The capture shows the parameter segment (8178 bytes) and Association
-table (10 bytes) - both genuinely unchanged - correctly skipped entirely (no LoadData frames for
-either), while only the GA table (the one real change) was written, with mode byte `0x00`.
-
-**Scope, don't overclaim**: tested only on 1.1.9 (System B, RelSegment/ABB-style app). The
-GA/Association-table skip logic is a best-effort extrapolation of the same pattern used for the
-parameter object - there was no real ETS Partial Download example of a GA/Association table
-write before this test (Part 5 item 4 was still open going in); this round trip is now real
-evidence for that specific device/app, not proof it generalizes to others. The AbsoluteSegment
-(MDT-style) download branch, used by a different manufacturer-app family entirely, is completely
-untouched by this and still only ever performs a full replay - no partial mode exists there.
-
-Full implementation narrative, commit hash, and test coverage:
-`docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`.
-
-## Part 12 — Object 3 wired into the real write path; a latent LoadImageProp bug fixed along the way (NEW 2026-08-29)
-
-`buildGroupObjectTable()` (Part 10, `server/routes/knx-tables.ts`) is now invoked from
-`downloadDevice()` itself, via the same undeclared-table mechanism GA/Association tables use
-(Part 6): `DownloadExtra.groupObjectTable` triggers a full Unload/StartLoading/LoadData/write/
-LoadCompleted cycle for objIdx 3 when the app model doesn't declare its own write step for it,
-following the same full/partial mode policy as GA/Association. 🟡 **Not yet independently proven
-on real hardware for Object 3 itself** — the GA/Assoc precedent this borrows from is
-real-hardware-proven (Part 6, Part 11); this is a best-effort extrapolation, not a controlled
-test. No caller constructs a real `groupObjectTable` yet (`bus.ts`'s `buildDeviceProgramming()`
-doesn't build one) — that's blocked separately on Read-On-Init and Priority not being captured by
-the ETS-XML parser/DB schema at all (found while investigating this wiring, not yet fixed).
-
-🟢 **A real, previously-undetected bug found and fixed in the process**: the "already declared,
-don't duplicate" check that gates the undeclared-table fallback was counting a declared
-`LoadImageProp` step as "this object already handled" — but Part 7 established `LoadImageProp` is
-read-only for every objIdx, confirmed against 3 independent real 1.1.10 downloads. For 1.1.10's
-app specifically, which declares `LoadImageProp` for objIdx 1/2/3, this silently suppressed the
-real GA/Association table write for exactly the app the whole undeclared-table mechanism (Part 6)
-was built to fix — never caught before because that mechanism had only ever been validated
-against real ETS's own captures, never exercised end-to-end through koolenex's own write path for
-1.1.10. Fixed: only a genuine `WriteRelMem` step (an actual content-write declaration) now counts
-as "already handled". All 1225 tests pass, including two existing tests whose expectations were
-built on the old wrong assumption and updated accordingly.
-
-Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 12).
-
-## Part 13 — Read-On-Init and Priority now captured by the ETS-XML parser (NEW 2026-08-29)
-
-The parser/schema gap Part 12 flagged - `server/ets-app.ts`'s `buildFlags()` only ever extracted
-Communication/Read/Write/Transmit/Update, never Read-On-Init or Priority, both required to compute
-Object 3's byte (§10.1) - is now closed. Real attribute names/vocabulary confirmed against this
-project's own real app XML: `ReadOnInitFlag="Enabled"/"Disabled"` (same vocabulary as the other
-flags), `Priority="Low"/"Alarm"/"High"/"System"` (present on both the `ComObject` definition and,
-observed on 1.1.10's app, overridden per-instance on individual `ComObjectRef`s - the parser
-follows the same `cor.X ?? co.X` override pattern already used for the other flags).
-`resolveCoRef()`/`resolveCoRefById()` now return both fields; `ParsedComObject` and the
-`com_objects` DB table (`read_on_init`, `priority`) carry them through to storage. 5 new tests
-(`tests/com-object-read-on-init-priority.test.ts`), golden-cased against real attribute
-combinations from this project's own app XML. All 1230 tests pass.
-
-**Still not done**: `bus.ts`'s `buildDeviceProgramming()` doesn't yet construct a real
-`groupObjectTable` from this newly-available data and pass it to `downloadDevice()` - this closes
-the data-capture gap only, not the "no real caller exists yet" gap from Part 12.
-
-Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 13).
-
-## Part 14 — buildDeviceProgramming() now constructs and passes a real Object 3 (NEW 2026-08-29)
-
-The last remaining gap from Part 12 - "no real caller builds a `groupObjectTable`" - is closed.
-`/bus/program-device`'s `buildDeviceProgramming()` (`server/routes/bus.ts`) now builds a real
-`GroupObjectFlags[]` from `com_objects` and calls `buildGroupObjectTable()`, passed through to
-`downloadDevice()`'s `extra.groupObjectTable`.
-
-🟢 **Real table size, resolved from real data**: `size = 2 × maxComObjectNumber + 2`, where
-`maxComObjectNumber` is the highest `Number` across **every** `ComObject` the app statically
-declares - confirmed exact against both real testbed apps' actual on-wire sizes (1.1.9: max
-object# 48 → 98 bytes; 1.1.10: max object# 470 → 942 bytes, both from §10's identity section).
-Deliberately the app's total static declaration range, not a given device's linked/instantiated
-subset - real ETS pre-allocates Object 3 space for every com object the app could ever expose,
-confirmed by the real byte counts not correlating with any per-device active-object count.
-
-🟢 **A real correctness fix found while implementing this**: `com_objects.flags` (the composite
-display string from `buildFlags()`) has a lossy all-false fallback (`'CW'`) - not safe to parse
-back into individual Read/Write/Communication/Transmit booleans for a real download. Added
-dedicated raw `read`/`write`/`comm`/`tx` columns (mirroring `read_on_init`/`priority` from Part
-13) rather than parsing `flags`. Update alone stays safely derived from `flags` (documented why:
-`'U'` can never appear via the fallback path, so no false positive/negative is possible for it).
-
-🟢 **A parallel copy of the LoadImageProp `declaredTableObjIdxs` bug (Part 12) found and fixed**:
-`/bus/verify-device`'s own copy of this check had the identical bug - counting a declared
-`LoadImageProp` step as "already handled". Fixed the same way (only `WriteRelMem` counts); no
-existing test pinned the old behavior, all tests pass unchanged.
-
-New tests (`tests/bus-routes.test.ts`) exercise every new column across two communication objects
-and assert a byte-for-byte match against `buildGroupObjectTable()` computed independently, plus
-confirm `groupObjectTable` stays `null` when the app model has no `groupObjectTableSize`. All 1232
-tests pass.
-
-🟡 **Still not proven on real hardware through this exact path**: only the computation and the
-wiring are tested end-to-end at the unit level; no device has actually been written to via
-`/bus/program-device` with a real `groupObjectTable` yet.
-
-Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 14).
-
-## Part 15 — First real dry-run comparison: koolenex's computed Object 3 vs. a real captured write (NEW 2026-08-29)
-
-Before any real device write is attempted through the new code path, a dry run compared koolenex's
-*computed* Object 3 for 1.1.9 (via the real parse→DB→`buildDeviceProgramming()` pipeline, driven
-against the real, live Test Bed `.knxproj` - no synthetic fixtures) against the actual bytes ETS
-wrote to the real device in its LAST real Object 3 write of the whole 2026-08-29 session
-(`2026-08-29-ets-partial-download-obj3-swap-send-direction-1.1.9.pcapng`, frame 198, `MemExtWrite
-N=98 X=$00570C`, 16:10:31).
-
-🟢 **93 of 98 bytes match exactly, byte-for-byte** - including all 23 "Mapper object" channel
-objects (9 through 28) and every flag bit of every populated communication object except one. This
-is real, direct confirmation that `computeGroupObjectByte()`/`buildGroupObjectTable()` (Part 10.1,
-Part 14) correctly reproduces real ETS's own computation for the overwhelming majority of a real
-device's actual Object 3 content, computed from the real project - not a synthetic fixture.
-
-🟢 **The one flag-byte diff (object 8, offset 16: computed `0x4f` vs real `0x4b`) is explained by
-genuine project/device state drift, confirmed by cross-checking the SAME capture's Association
-table write**: the real Association table sent in this exact download (`00020001000500020005`)
-contains only object 5's two links - zero entries for object 8 - so the device's real "has a GA
-link" bit for object 8 was genuinely `0` at write time. The live project, however, currently
-declares GA `9/1/5` for object 8 (`ga_address='9/1/5'` in `com_objects`), which is why koolenex
-correctly computed `linked=true` for the CURRENT project state. This is not a bug in the
-computation - it's the project having moved on (a GA link added since) without a corresponding
-re-download to the device. Not investigated further, but the mechanism is understood precisely.
-
-🟢 **RESOLVED, see Part 17**: 4 bytes at what were originally assumed to be unused "padding"
-offsets (1, 7, 9, 11 - the odd byte of each 2-byte slot) hold real nonzero content on the device
-(`0x30`, `0x09`, `0x09`, `0x0c` respectively), isolated specifically to the app's lowest-numbered,
-built-in "internal clock" objects (the nonexistent "object 0" slot, and objects 3/4/5 -
-`UhrzeitGO`/`DatumGO`/`DatumUhrzeitGO`). These are the KNX standard Group Object Size code and a
-real table-count header, not padding at all - see Part 17 for the full resolution.
-
-Full methodology (dry-run script, real command output, byte-level tables): `docs/follow-ups/
-2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 15).
-
-## Part 16 — Mystery padding-byte test: a real controlled experiment, one clean negative result (NEW 2026-08-29)
-
-Direct follow-up to Part 15's open question. A real, controlled single-variable test: toggled
-**Read-On-Init** (Disabled→Enabled) on communication object 3 (`UhrzeitGO`, "Time – output" - one
-of the four objects with an unexplained nonzero padding byte) and did a real Full Download to
-1.1.9, capturing before and after.
-
-🟢 **Result: exactly 1 byte differs between the two full 98-byte captures** - offset 6 (object 3's
-own flag byte) changed `0x4B` → `0x6B`, precisely the predicted `+0x20` (bit 5, Read-On-Init) -
-independent confirmation of the record layout on a third real object (previously only objects
-5/6/7 had been directly tested). **Every other byte, including the mystery padding byte right next
-to it (offset 7, `0x09`), is byte-for-byte identical before and after.**
-
-🟢 **This ruled out one specific hypothesis and pointed the way to the real answer**: the mystery
-byte does NOT respond to a Read-On-Init change on the SAME object it sits next to - ruling out
-"it's simply another com-object flag we haven't decoded yet," at least for Read-On-Init
-specifically. That negative result, combined with the byte being fixed regardless of any flag
-edit across the ENTIRE session (confirmed by scanning all 28 real 1.1.9 captures - see Part 17),
-correctly pointed away from flags entirely and toward something static per-object instead - which
-Part 17 identifies precisely.
-
-Full methodology and the real byte tables: `docs/follow-ups/2026-08-29-partial-download-mode-and-
-obj3-trigger-test.md` (Part 16).
-
-## Part 17 — Mystery byte solved: it's the KNX standard Group Object Size code, plus a real table-count header (NEW 2026-08-29)
-
-User-directed: asked whether all previous captures showed any change in these companion bytes, and
-independently proposed the winning hypothesis directly: "Could it be Data Type?"
-
-🟢 **Confirmed, real cross-device test**: scanning all 28 real 1.1.9 captures from across the
-entire 2026-08-29 session (every full and partial download, every flag/GA/priority/comm edit made
-to any object) found the 4 companion bytes at offsets 1/7/9/11 are byte-for-byte identical in
-**every single one** - `0x30`/`0x09`/`0x09`/`0x0c`, always, regardless of what changed. Pulled the
-real `ObjectSize` declarations for the objects involved from both testbed apps' own XML and
-checked them against the real captured byte at that object's offset:
-
-| Device | Object | Real DPT / size | Companion byte | KNX Group Object Size code |
-|---|---|---|---|---|
-| 1.1.9 | 3 (`UhrzeitGO`) | DPST-10-1, 3 bytes | `0x09` | 9 = 3 Byte |
-| 1.1.9 | 4 (`DatumGO`) | DPST-11-1, 3 bytes (different DPT, same size) | `0x09` | 9 = 3 Byte |
-| 1.1.9 | 5 (`DatumUhrzeitGO`) | DPST-19-1, 8 bytes | `0x0c` | 12 = 8 Byte |
-| 1.1.10 | 34 | DPST-3-7, 4 bit | `0x03` | 3 = 4 Bit |
-| 1.1.10 | 35/36 | DPST-5-1, 1 byte | `0x07` | 7 = 8 Bit/1 Byte |
-
-4 for 4, on two completely different devices and manufacturers' apps (the 1.1.10 check reconstructed
-its 942-byte Object 3 from 5 chunked `MemExtWrite` frames in `2026-08-29-ets-full-download-1.1.10-
-systematic-3-tampered.pcapng`, base `0xC2000`, 228-byte chunks). These are exactly the well-known
-KNX standard **Group Object Size** 4-bit code: `0`=1 Bit, `1`=2 Bit, `2`=3 Bit, `3`=4 Bit, `4`=5
-Bit, `5`=6 Bit, `6`=7 Bit, `7`=8 Bit/1 Byte, `8`=2 Byte, `9`=3 Byte, `10`=4 Byte, `11`=6 Byte,
-`12`=8 Byte, `13`=10 Byte, `14`=14 Byte, `15`=variable length. Every ordinary object with companion
-byte `0x00` throughout this whole project has, without exception, been a real `1 Bit` DPT (code
-`0`) - a fifth, extensively-repeated confirmation. This also fully explains Part 16's negative
-result: the byte is fixed by the object's static DPT declaration, not any user-editable flag, so
-no flag change could ever have moved it.
-
-🟢 **A second, independent finding from the same scan**: bytes 0-1 - previously assumed to be a
-slot for a nonexistent "object 0" - are a real 2-byte big-endian header holding the app's total
-declared communication-object count. Read as one 16-bit value: `0x0030` = **48** for 1.1.9,
-`0x01D6` = **470** for 1.1.10 - both exactly matching `maxComObjectNumber` (Part 14), the same
-value the table's own overall SIZE is computed from (`2 × maxComObjectNumber + 2`).
-
-**Implemented in real, tested code**: `groupObjectSizeCode()` (new, `server/routes/knx-tables.ts`)
-maps ETS's real `ObjectSize` strings to the code; `GroupObjectFlags` gained `objectSize`;
-`buildGroupObjectTable()` now writes both the header and every object's companion byte, derived
-entirely from `size` and the existing `comObjects` list (no new parameters needed - the header
-count is recovered as `(size - 2) / 2`). `bus.ts`'s `buildDeviceProgramming()` passes
-`objectSize: co.object_size` through. 11 new tests, including a full 98-byte real-capture
-reproduction (`2026-08-29-ets-full-download-obj3-trigger-test-1.1.9.pcapng`, header included,
-byte-for-byte). All 1243 tests pass.
-
-🟢 **Re-verified end to end against real data**: re-ran the Part 15 dry-run comparison after this
-fix (real project → real DB → `buildDeviceProgramming()`, no synthetic fixtures) against
-`2026-08-29-ets-full-download-obj3-trigger-test-1.1.9.pcapng`: **97 of 98 bytes now match exactly**
-(up from 93/98 before this fix) - the one remaining diff is the already-fully-explained object 8
-state-drift case from Part 15, not a computation gap.
-
-Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
-(Part 17).
-
-## Part 18 — Object 3's write CONFIRMED on real hardware, first attempt (NEW 2026-08-29)
-
-The last standing gap from Parts 12-17 - Object 3's write, unlike GA/Association's, had never been
-independently exercised against real hardware through koolenex's own code path - is now closed.
-
-🟢 **CONFIRMED, first attempt, exact match**: a surgical, Object-3-only write to 1.1.9 (real
-project → real DB → `_buildDeviceProgramming()` → `downloadDevice('1.1.9', [], null, null, null,
-onProgress, { groupObjectTable, mode: 'full' })` - `steps=[]` and `gaTable`/`assocTable`/`paramMem`
-all `null` so nothing else touches the device, avoiding the object 8 GA-link state-drift side
-effect Part 15 identified). Real protocol sequence completed cleanly: `DeviceDescriptor_Read` →
-`Authorize` → `Unload`/`StartLoading`/`LoadData`/`LoadCompleted` (objIdx 3) → `Restart` →
-`Download complete`, chunked in 10-byte `MemExtWrite` frames at base `0x00570C` (koolenex's own
-chunking convention - real ETS itself sometimes writes the same amount in one frame, per §1.1',
-both are valid on the wire). Read back `PID_TABLE_REFERENCE` (objIdx 3) and the full 98-byte
-region immediately after: **byte-for-byte identical to what was computed and written, all 98
-bytes, no diffs** (one transient `Tunneling ACK timeout` on the very first read attempt - the
-device briefly unresponsive right after `Restart`, exactly as expected; a fresh connection and
-retry a few seconds later succeeded cleanly).
-
-This is the first-ever real-hardware confirmation of Object 3's write through koolenex's own code
-- previously this inherited the GA/Association precedent by construction only (same underlying
-mechanism, Part 6/11) without independent proof for Object 3 itself. That gap is now closed.
-
-Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
-(Part 18).
-
-## Part 19 — `/bus/verify-device` now checks Object 3 too, plus a third LoadImageProp bug fixed (NEW 2026-08-29)
-
-Closes a real, standing gap: Object 3's write was confirmed on real hardware (Part 18), but the
-read-back/verify route never compared it against a device - only GA/Association tables were.
-
-🟢 **A third, previously-unfixed copy of the LoadImageProp bug (Part 12) found and fixed**:
-`knx-download-plan.ts`'s `buildGaAssocMem()` (used by `planVerify()`, which `/bus/verify-device`
-calls) still counted a declared `LoadImageProp` step as "already handled" - the same latent bug
-already fixed on the write side (`knx-connection.ts`) and the route-level base-resolution gate
-(`routes/bus.ts`). This meant verify would have silently skipped comparing GA/Association content
-at all for an app shaped like 1.1.10's (declares `LoadImageProp` for objIdx 1/2/3) - never caught
-before because no dedicated unit tests existed for `planVerify()` at all. Fixed identically: only
-`WriteRelMem` counts as declared.
-
-**Implementation**: `VerifyPlan.gaAssocMem` renamed to `undeclaredTableMem` (the old name became
-misleading once it covers three tables) and gains Object 3 support, gated the same way as GA/
-Association. Object 3's own comparison, unlike GA/Association's, doesn't need the dynamic "read
-the real count field first" probe - its size is already known (`groupObjectTableSize`) rather than
-being a variable, user-editable-link-count table. New `decodeGroupObjectEntry()`
-(`knx-tables.ts`) - the inverse of `buildGroupObjectTable()`'s placement - surfaces one comparison
-row per communication object (`co-N-obj3`, section "Group Object Table"), matching the GA rows'
-existing "named comparison, not raw bytes" convention.
-
-6 new tests (4 for `planVerify()` directly - none existed before this at the unit level; 2 for
-`/bus/verify-device` via the "fake" `MockBus` device, extended to serve Object 3 reads). All 1249
-tests pass.
-
-Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
-(Part 19).
-
-## Part 20 — `buildParamMem()`'s padding-bit fill bug FIXED (NEW 2026-08-29)
-
-Closes a real, standing gap flagged since 2026-08-28 (Part 4 item 6): a sub-byte parameter's
-"padding" bits (unnamed bits sharing its byte, not covered by any tracked parameter) were filled
-with `1`s (the default `fill` value) instead of the real device's `0`. Real evidence, unchanged
-since it was first found: a real 1-bit boolean at offset 69 - real device/ETS value is `0x80` when
-the flag is on (bit 7 set, all other 7 bits **clear**), not `0xFF` as `buildParamMem()` computed.
-
-🟢 **Fixed**: a pre-pass before the main per-parameter loop zero-fills any byte a sub-byte field
-(`bitOffset !== 0 || bitSize % 8 !== 0`) declares it occupies, before the real `writeBits()` calls
-run - so padding bits start at `0` and only the field's own bits get set from its real value.
-`fill` itself is unchanged for genuinely unnamed bytes (no parameter touches them at all - real
-captures have consistently shown `0xFF` for those elsewhere in this project). Explicitly skips any
-byte already seeded by `relSegHex` (a real captured default in the one app that uses it) - zeroing
-that would destroy real, already-correct content, not fix anything.
-
-6 new tests (`tests/knx-tables.test.ts`) - the real captured on/off case, unnamed bytes staying at
-`fill`, multiple sub-byte fields sharing one byte, byte-aligned params completely unaffected, and
-`relSegHex`-seeded bytes surviving the pre-pass untouched. All 1255 tests pass (zero regressions -
-no existing test exercised a sub-byte parameter before this fix).
-
-Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
-(Part 20).
-
-## Part 21 — Object 3's flags/priority/size shown on the device compare page, as per-flag chips (UPDATED 2026-08-29)
-
-UI follow-up to Part 19: the verify-device response already carried Object 3 comparison rows, but
-as a raw hex byte pair (`"4f 0c"`) - none of the underlying data was actually legible. Went through
-several more rounds of real, live user feedback before settling on the current design - kept here
-as the current, correct state; the intermediate attempts (a single wrapped sentence, a row-wide
-tooltip, "Object 3"/"flag row" wording) are in the follow-up doc's narrative, not repeated here.
-
-**Current design**: Object 3 rows show one small letter chip per boolean flag (green = set, muted
-= clear) in real ETS's own checkbox order - Communication, Read, Write, Transmit, Update, Read On
-Init (`C R W T U RI`) - not the underlying bit order. Priority/Size sit alongside as plain compact
-text. A chip gets a red ring when the project and device sides genuinely disagree on that one
-specific flag, so a single-bit difference is visible without comparing both rows letter by letter.
-Each chip carries its OWN short tooltip (just that one flag's name, e.g. "Read: Yes") rather than
-one composite-sentence tooltip for the whole row - an earlier version wrapped the whole chip row in
-a single tooltip anchored at the row's left edge, which pushed a wide (up to 380px) box off the
-right side of the screen for columns near the viewport edge. Server-side,
-`decodeGroupObjectEntryFlags()` (`knx-tables.ts`) provides the same six bits plus Priority/Size as
-real structured booleans, not a string to re-parse - `describeGroupObjectEntry()` builds its
-sentence from this same decode. Object 3 rows get the same distinct-section styling GA rows already
-have, and their own tracked match/differ counts composed into the summary badges (`composeCount()`
-generalized from a fixed pair to an arbitrary list). Chips are deliberately plain `<span>`s, not
-buttons yet - structured so a future click-to-edit pass can wire an `onClick` directly onto each
-chip without restructuring the display again (see the koolenex-ui-todo memory).
-
-**Terminology**: "Object 3" is meaningless to anyone who isn't a KNX protocol engineer, so every
-user-facing spot (section header, sections-jump popover, log lines) renders it as "Communication
-Flags" instead, via a single `displaySectionName()` mapping in `DeviceCompareResults.tsx` - the
-server's own `section: 'Group Object Table'` string, and every test/route that compares against it,
-is untouched. Similarly the per-row unit was originally labeled "Object 3 row", then briefly "flag
-row" - both wrong, since one row bundles a whole communication object's flags (up to 6 booleans +
-Priority + Size) compared as one unit, so "N flags differ" would undercount whenever two or more
-flags on the same object differ at once (a real, common case - e.g. toggling Communication moves
-the same bit Comm+Linked already occupies). Settled on "Comm Object" (shortened from "communication
-object" per follow-up feedback) - accurate regardless of how many individual flags inside that one
-row actually differ.
-
-**Summary badges**: the standalone "X/Y bytes match" raw-memory badge was removed once Object 3 (and
-GA) rows existed - it was telling the same story as the named-row badges, just a noisier, harder-to-
-interpret scope, so it read as a second, contradictory-sounding source of truth rather than new
-information (the exact complaint that triggered this: "log shows everything matched, but we show a
-row differing"). Its number/scope explanation now lives in the match/differ badges' own tooltips
-instead. A third, neutral "All" chip was added alongside the green/red match/differ badges so both
-can be viewed together without toggling a colored badge back off - previously the only "show
-everything" affordance was re-clicking whichever badge was already active, not discoverable as its
-own action.
-
-**Log line, and a real consistency bug found live while testing this**: the top-level `match` flag
-(and the log line/UI states derived from it) was computed purely from `totalDiffering === 0` - raw
-parameter memory bytes only, since GA/Association/Object 3 are deliberately kept OUT of that scope
-(`undeclaredTableMem`'s own doc comment). A genuine Object 3 mismatch therefore left the overall
-status saying "matches computed image" while the per-row table correctly showed a real
-disagreement - a real, visible inconsistency, not a display bug. Fixed: `match` now also requires
-every decoded row (GA + Object 3) to match, not just the raw byte total. The log line itself went
-through a second round of feedback once that landed: it was still saying "0/N bytes differ" for an
-Object-3-only mismatch (accurate but confusing, since that scope genuinely never included Object 3),
-and later "Communication Flags differ" with no count at all. Now quotes real "N/M bytes match"
-figures for BOTH scopes it can (parameter memory always; Object 3 via new
-`flagsTotalBytes`/`flagsDifferingBytes` response fields, computed from the same buffer the
-per-communication-object decode above already reads - see routes/bus.ts), and names any remaining
-mismatching section (GA links have no byte-level total at all) with a real count, e.g.
-`"≠ 1.1.10 — parameter memory 10428/10433 bytes match; 3 Comm Objects differ"` instead of a bare
-"Communication Flags differ".
-
-**Log panel now auto-closes** when the device-compare slide-over opens (from Verify, or from
-clicking a device row directly) - the two were otherwise fighting for the same screen space right
-after the slide-over became the thing actually being looked at.
-
-8+ new tests across the whole sequence, all 1263 pass throughout (unchanged by this round - it's
-client display/log wording plus one small server-side byte-diff addition, no protocol/write-path
-behavior changed). Server and client both typecheck/build/lint clean throughout.
+The offset formula does not shift when an object is disabled or unlinked 🟢 — confirmed directly
+(disabling a lower-numbered object's communication left every higher-numbered object's byte
+position unmoved). Safe to use unconditionally, without needing to know which objects are
+currently active.
+
+**Flag bits**, confirmed by systematic one-flag-at-a-time real hardware testing (each change
+made individually, its exact effect on this table observed, then reverted), cross-confirmed on a
+second communication object on the same device, a third object with a different data type/size,
+and blind on a second device entirely (the expected byte was predicted purely from the
+configuration data before capturing the real device, and matched exactly):
+
+- **Update, Transmit, Read-On-Init, Write, Read** — plain per-object on/off settings, each
+  independently confirmed. (Read-On-Init means: read this object's current value from the bus
+  automatically when the device starts up.)
+- **Bit 2 = "Communication enabled AND has at least one real link" — both required, a combined
+  state, not the Communication setting alone.** 🟢 Confirmed via three independent real tests:
+  removing a linked object's only group-address link flips this bit to off even with
+  Communication still enabled; disabling Communication on a linked object also flips it to off
+  even with the link left fully intact; an object with two links shows the same bit as one link
+  (a plain "has at least one link" boolean, not sensitive to how many). Link *direction* is not
+  represented here at all (§6.3).
+- **Priority** (the last 2 bits) — one of four levels a communication object can be sent/received
+  at on the bus:
+
+  | Priority | Bits |
+  |---|---|
+  | Low | `11` |
+  | Alarm | `10` |
+  | High | `01` |
+  | System | `00` 🟡 inferred by pattern — this level isn't reachable from ETS's own user interface at all (per KNX's own documentation), so no real configuration can exercise this value directly to confirm it |
+
+**Group Object Size code** (the companion byte) — the standard KNX 4-bit code for a
+communication object's expected data size, confirmed 4-for-4 against real declared sizes on two
+devices/manufacturers:
+
+| Code | Size | Code | Size |
+|---|---|---|---|
+| 0 | 1 Bit | 8 | 2 Byte |
+| 1 | 2 Bit | 9 | 3 Byte |
+| 2 | 3 Bit | 10 | 4 Byte |
+| 3 | 4 Bit | 11 | 6 Byte |
+| 4 | 5 Bit | 12 | 8 Byte |
+| 5 | 6 Bit | 13 | 10 Byte |
+| 6 | 7 Bit | 14 | 14 Byte |
+| 7 | 8 Bit / 1 Byte | 15 | variable length |
+
+🔴 Whether this record layout holds for a device outside the "System B" mask family (§ above) is
+untested — only System B has ever been available.
+
+**Write triggers** (§7.2/§7.3 describe the general mechanism this table shares with objects 1/2;
+specifics for this table):
+
+- **Partial Download**: written together with objects 1/2 exactly when any communication
+  object's state genuinely changes — a group-address link, a flag, or Priority — confirmed
+  across many real downloads, both directions (written when something changed, correctly skipped
+  when nothing did).
+- **Full Download**: on the device whose configuration declares the checksum step (§7), written
+  exactly when that checksum comes back looking wrong (§7.3) — not for any kind of genuine
+  configuration change on its own. On the device whose configuration never declares that step at
+  all (so has no way to detect tampering), it's written on every Full Download tested,
+  unconditionally. 🟡 A coherent, well-supported explanation — a device with no verification
+  signal defaults to always rewriting this table just to be safe — but not a controlled test that
+  isolates the cause.
+
+## 7. The content-status ("checksum") property and the safety-net rewrite
+
+### 7.1 What it is, precisely
+
+**Property ID 27**, read/written on interface objects 1 (group address table), 2 (association
+table), 3 (per-communication-object flags table), and 4 (parameter memory) — the same property
+number, repeated across four different objects, one content-status value per object. It's
+effectively a checksum the device itself computes over that specific object's own content, so
+the configuration tool can ask "does what's on you still match what I last wrote?" without
+reading the raw memory bytes back and comparing them directly. A real example of a valid value
+read from object 4's property 27 on the test device that uses it: `000028C0003365E4000000010133DCBD`
+(16 bytes) — this exact value recurs identically across every genuine session with no tampering.
+
+Whether a device's configuration even makes use of property 27 at all comes from the
+configuration data itself, not a decision the tool makes dynamically: every device's own
+configuration carries a "what to do on download" recipe (a list of load-procedure steps) —
+authored by the device's manufacturer as part of the product data, not computed at download time.
+Only configurations whose recipe includes a property-27 step touch it at all; one of this
+project's two test devices' recipes never mentions property 27, so it is completely absent from
+every session with that device — no read, no write, in any form, at any stage.
+
+The device that does declare it has, in its recipe, two separate "write this literal fixed byte
+value into object 4's property 27" steps, positioned before the step that writes the real
+parameter content, followed by a "read (not write) object N's property 27" step for each of
+objects 1, 2, 3, and 4, positioned at the very end of the session.
+
+Two real wire facts about this mechanism, confirmed on real hardware across multiple independent
+downloads, on the one device whose configuration declares it:
+
+- 🟢 **The end-of-session read step really is read-only, for all four objects it's used on** —
+  the value read back is byte-identical to what was there before the session started. Despite
+  being labeled as a "load" step in the configuration data, it never writes anything; the only
+  actual write to property 27 anywhere in the whole session comes from the two "write this
+  literal value" steps against object 4 specifically, near the start.
+- 🟢 **The literal byte value declared in the configuration data for those two write steps is
+  always exactly 2 bytes longer than what's actually sent over the wire** — the tool drops the
+  last 2 declared bytes before transmitting.
+
+🔴 Only one device configuration has ever declared property 27 at all — the *shape* of both
+facts above is backed by many different manufacturers' declared configuration data (the same
+two-step pattern, just with different embedded byte values, recurs across several unrelated
+manufacturer IDs), but live wire confirmation is from this one real device only.
+
+### 7.2 The group-address/association/flags tables are written by a mechanism outside any one configuration's control
+
+🟢 Real ETS writes the group address table and association table during a Full Download via the
+identical unload/start-loading/declare-data/write/mark-loaded mechanism used for parameters —
+regardless of whether the device's own configuration recipe (§7.1) declares a step for them at
+all. One test device's configuration declares no step whatsoever for these two tables, and ETS
+writes both anyway; the other device's configuration declares the read-only checksum-verification
+step instead (§7.1), and ETS still writes both via this same separate mechanism. 🟡
+**INFERRED**: this table-writing procedure is apparently universal, tied to the device's mask
+version rather than something each configuration must ask for — not confirmed from spec text,
+only from the absence of a declaration combined with real wire evidence. Confirmed independently
+on both test devices. 🔴 whether this holds for every mask family, or for configurations with
+many more group-address/association entries, is untested.
+
+### 7.3 The safety-net rewrite, and what triggers it
+
+Does a device carrying stale content — from a different, discarded configuration, or a factory
+reset — keep that content forever, if it happens to already match what the *current*
+configuration's target computation predicts needs no write?
+
+🟢 **No.** A value written directly into device memory bypassing the configuration tool entirely
+is detected on the very next real Full Download — not via a minimal targeted correction, but a
+**comprehensive rewrite**: nearly the entire parameter segment, the per-communication-object
+flags table, and both the group-address and association tables. Reproduced on both test devices.
+The rewrite's content is correct, not a blind reset to factory defaults — real, previously
+in-place values are written back correctly where they should stay unchanged.
+
+🟢 **The detection mechanism, confirmed across 5 independent real Full Downloads on the device
+whose configuration declares property 27 (§7.1)**: early in every session, before any load/write
+decision, the tool reads object 4's property 27. In every genuine session — two clean baselines,
+a real group-address-link change, a real parameter change — this read returns the same valid
+16-byte value, e.g. `000028C0003365E4000000010133DCBD`. In the one session preceded by an
+out-of-band write (a value written directly into device memory, bypassing the tool entirely), the
+identical read instead returns **empty — zero bytes, not a different-but-valid value** — the
+device's own checksum computation broke down as a direct, observable consequence of the
+tampering. This is not a raw memory read (no memory-read message of any kind appears in any of
+these captures) — it's a property-level read whose *result* differs based on device state, and it
+happens well before the unload/reload cycle begins for any object.
+
+A decisive control test isolated the real variable: writing the *exact same byte* via the
+configuration tool (instead of bypassing it) produces a valid checksum and no comprehensive
+rewrite — the origin of the write (genuine tool-driven session vs. out-of-band) is what matters,
+not the byte or parameter itself. Neither "any configuration change to a parameter" nor "any
+configuration change to a group-address link" triggers the comprehensive rewrite on its own.
+
+🔴 Whether this generalizes beyond the one device configuration checked (the only one that
+declares the checksum mechanism at all) is untested, as is the precise decision rule once an
+anomaly is detected (whether it's graded, or always the same universal rewrite).
+
+## 8. Known tooling/methodology gotchas
+
+- **At least one common packet-capture tool's own protocol dissector mis-displays memory-write
+  addresses in its summary/quick-view column** (§4.1). Always manually decode the raw bytes;
+  never trust a summary column for a memory-write's address.
+- **This router's KNXnet/IP tunneling connection uses TCP, not UDP** — a UDP-only capture filter
+  catches nothing from real sessions against it. Worth checking which transport a given device
+  actually uses before assuming the KNXnet/IP default.
+- **Windows path handling across tools**: a process spawned as a native Windows executable does
+  not reliably translate Unix-style paths (`/tmp/...`, `/c/...`), whether passed as arguments or
+  used in direct file-system calls from within a cross-platform runtime. Use explicit
+  `C:/Users/...`-style forward-slash paths for direct file I/O on Windows, and prefer writing
+  intermediate results to files rather than piping between processes when mixing a Unix-style
+  shell with native Windows tools.
 
 ## Sources
 
-- `docs/data/captures/2026-08-29-ets-*-obj3-map-*-1.1.9.pcapng` (12 captures: read/write/
-  transmit/comm flag tests and their reverts/reproductions on com-objects 6 and 7, three Priority
-  values, two full-session reset sanity checks), `2026-08-29-ets-download-obj3-map-flag-1.1.10.pcapng`
-  (knx-ets-manager repo) — primary source for §10.1's full bit-mapping/offset-formula finding and
-  §10.2's broadened trigger description.
-- `docs/data/captures/2026-08-29-ets-partial-download-obj3-map-followup-1.1.9.pcapng` (Read-On-Init
-  reconfirmed blind on a third object, object 5, a different DPT/size) and
-  `2026-08-29-ets-partial-download-obj3-map-followup-2-1.1.9.pcapng` (two simultaneous changes
-  decoded correctly in one download - object 5's Read-On-Init reverted, object 8's GA link
-  removed, bit 2's GA-link correlation confirmed by a real link removal corroborated by the GA
-  and Association tables shrinking in lockstep) (knx-ets-manager repo) — primary source for
-  §10.1's bit-2/Read-On-Init follow-up findings.
-- `docs/data/captures/2026-08-29-ets-partial-download-obj3-map-comm-reindex-test-1.1.9.pcapng`
-  (disabling Communication on a lower-numbered object does not shift higher-numbered objects'
-  offsets) and `2026-08-29-ets-partial-download-obj3-comm-flag-linked-object-1.1.9.pcapng`
-  (disabling Communication on a *linked* object flips bit 2 while the GA/Association tables stay
-  byte-for-byte unchanged - the decisive test that corrected the earlier wrong "Communication
-  flag has zero representation" claim) (knx-ets-manager repo) — primary source for §10.1's
-  corrected bit-2 finding and the offset-formula reindexing check.
-- `docs/data/captures/2026-08-29-ets-partial-download-obj3-multilink-test-1.1.9.pcapng`
-  (knx-ets-manager repo) — a second GA link added to a communication object already linked once;
-  bit 2 stays a plain boolean, unaffected by link count. Primary source for §10.1's multi-link
-  finding.
-- `docs/data/captures/2026-08-29-ets-partial-download-obj3-swap-send-direction-1.1.9.pcapng`
-  (knx-ets-manager repo) — swapped which of two existing GA links is the Send link; Object 3 and
-  the GA table stayed byte-for-byte unchanged, the Association table's two entries swapped order.
-  Primary source for §2.6/§10.1's link-direction finding.
-- `docs/data/captures/2026-08-28-ets-full-download-history-and-blob-params-1.1.10.pcapng`,
-  cross-checked against every other saved capture (`grep -c "OX=3 P=5"` across
-  `docs/data/captures/*.pcapng`), a live `PID_OBJECT_TYPE`/`PID_TABLE_REFERENCE` read via
-  `POST /bus/read-property`, and koolenex's own bundled real KNX Master Data
-  (`data/knx_master_1.xml`, `<InterfaceObjectType>` entries) for the standard object-type name —
-  primary source for Part 10.
-- `docs/data/captures/2026-08-28-ets-1-full-download-1.1.9.pcapng` — primary source for Part 1.1
-  and most of Part 2.
-- `docs/data/captures/2026-08-28-ets-2-partial-download-ntp-off-1.1.9.pcapng` and
-  `2026-08-28-ets-3-partial-download-ntp-on-1.1.9.pcapng` — primary source for Part 1.2.
-- `docs/data/captures/2026-08-28-verbatim-replay-success-1.1.9.pcapng` and
-  `2026-08-28-koolenex-legacy-write-fail-1.1.9.pcapng` — primary source for Part 3.
-- `docs/data/captures/2026-08-28-koolenex-write-attempt-1.1.9.pcapng` — source for the tshark
-  address-mis-display gotcha (Part 4) and the original missing-Load-sequence finding.
-- `docs/data/captures/2026-08-27-full-download-1.1.9-1.1.10.pcapng` and
-  `2026-08-28-ga-wire-format-1.1.9-1.1.10.pcapng` — source for Part 2.6 (GA/Association table
-  formats), not independently re-derived in this document.
-- `docs/data/captures/2026-08-29-ets-0-failed-connection-attempts-1.1.10.pcapng` and
-  `2026-08-29-ets-1/2/3-...-1.1.10.pcapng` (knx-ets-manager repo) — primary source for Part 7.
-- `docs/data/captures/2026-08-28-ets-full-download-history-and-blob-params-1.1.10.pcapng`
-  (knx-ets-manager repo) — primary source for Parts 8 and 9.
-- `docs/data/captures/2026-08-29-ets-full-download-ga-9-1-4-to-9-1-5-1.1.9.pcapng`,
-  `2026-08-29-koolenex-partial-download-revert-9-1-5-1.1.9.pcapng`, and
-  `2026-08-29-ets-full-download-obj3-trigger-test-1.1.9.pcapng` (knx-ets-manager repo) — primary
-  source for Part 11 and Part 10.3's trigger-test update.
-- `docs/data/captures/2026-08-29-ets-full-download-obj3-flag-trigger-test-1.1.9.pcapng` and
-  `2026-08-29-ets-full-download-obj3-flag-trigger-test-2-1.1.9.pcapng` (knx-ets-manager repo) —
-  primary source for Part 10.1's decoded flag↔bit mappings.
-- `docs/data/captures/2026-08-29-ets-partial-download-ga-change-9-1-4-to-9-1-5-1.1.9.pcapng` and
-  `2026-08-29-ets-partial-download-ga-plus-flag-revert-1.1.9.pcapng` (knx-ets-manager repo) —
-  primary source for Part 10.2's Partial-Download trigger resolution. (A third, mistakenly-
-  triggered Full Download in between,
-  `2026-08-29-ets-partial-download-ga-change-9-1-5-to-9-1-4-1.1.9.pcapng`, is kept for the record
-  but is NOT a Partial Download despite its filename - real Full Download signature on the wire,
-  confirmed by the user afterward as a misclick.)
-- `docs/data/captures/2026-08-29-ets-full-download-1.1.10-systematic-{1,2}-clean.pcapng`,
-  `...-3-tampered.pcapng`, `...-4-real-param-change.pcapng`, and
-  `...-5-real-offset172-change.pcapng` (knx-ets-manager repo) — the 5-download controlled redo,
-  primary source for Part 8's checksum-trigger finding and Part 10.3.
-- `docs/follow-ups/2026-08-27-relmem-write-scope-investigation.md`,
-  `docs/follow-ups/2026-08-28-write-path-missing-load-sequence.md`,
-  `docs/follow-ups/2026-08-29-property27-ga-write-wiring-and-ui.md`,
-  `docs/follow-ups/2026-08-28-full-download-history-and-blob-params.md`,
-  `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (koolenex repo) —
-  the dated investigation logs this document consolidates. Read those for the full narrative,
-  including dead ends, UI/implementation work, and the exact chronology of each fix.
-- `koolenex_reference` memory (knx-ets-manager repo's persistent memory) — broader project
-  narrative, including findings unrelated to the write path itself (e.g. the enum-mapping
-  retraction in Part 3).
-- `docs/data/captures/2026-08-29-koolenex-first-real-object3-write-1.1.9.pcapng` (knx-ets-manager
-  repo) — primary source for Part 18, the first real koolenex-driven Object 3 write and its
-  read-back verification.
+Real capture files backing every 🟢-tagged claim above live in this project's `docs/data/
+captures/` directory, organized by date and topic — session bootstrap and the overall Full/
+Partial Download walkthrough (§1–§5), memory-service/mask-version gating (§4.1), group-address
+and association table formats (§6.2–§6.3), the per-communication-object flags table's full
+bit-mapping (§6.4), the content-status/checksum mechanism and its safety-net rewrite trigger
+(§7), and the tshark address-mis-display gotcha (§8). The dated files under `docs/follow-ups/
+*.md` consolidate the full investigation narrative, including dead ends and exact chronology, for
+anyone who wants the "how this was found" story rather than just the current facts above.

@@ -864,6 +864,42 @@ export function buildParamMem(
     buf = Buffer.alloc(size, fill);
   }
 
+  // Padding-bit fill fix (2026-08-29, root-caused 2026-08-28, docs/follow-
+  // ups/2026-08-28-write-path-missing-load-sequence.md's "wrong padding-bit
+  // fill" section): a byte that's only PARTLY a named parameter (a sub-byte
+  // field like a 1-bit boolean sharing its byte with unnamed/reserved bits)
+  // real ETS/the real device leaves those OTHER bits at 0, not `fill`.
+  // Confirmed directly: a real 1-bit boolean at offset 69, bitOffset 0,
+  // bitSize 1 - real device value is 0x80 when the flag is on (bit 7 set,
+  // all other bits CLEAR), not 0xFF as this function previously computed
+  // (it correctly toggled bit 7 via writeBits() below, but left the other 7
+  // bits at whatever `fill` was - 0xFF's all-1s by default). `fill` itself
+  // stays correct and unchanged for genuinely UNNAMED bytes (no parameter
+  // touches them at all) - real captures have consistently shown 0xFF for
+  // those (see e.g. docs/knx-device-write-protocol.md §1.1). This only
+  // re-zeroes the specific bytes a sub-byte field's OWN declared layout
+  // says it occupies, before the real per-param writeBits() calls below run
+  // (which then correctly set that field's own bits from its real value,
+  // on top of the now-zeroed padding). Skips any byte relSegBase already
+  // seeded with real captured content (relSegBase IS a real device default
+  // in the one app that uses it - overwriting it with 0 would destroy real,
+  // already-correct padding bits, not fix anything).
+  const relSegCoveredLen = relSegBase ? Math.min(relSegBase.length, size) : 0;
+  for (const info of Object.values(paramMemLayout)) {
+    if (info.offset === null || info.offset === undefined) continue;
+    const isSubByte = !(info.bitOffset === 0 && info.bitSize % 8 === 0);
+    if (!isSubByte) continue;
+    const spanBytes = Math.max(
+      1,
+      Math.ceil((info.bitOffset + info.bitSize) / 8),
+    );
+    for (let i = 0; i < spanBytes; i++) {
+      const byteIdx = info.offset + i;
+      if (byteIdx < relSegCoveredLen || byteIdx >= buf.length) continue;
+      buf[byteIdx] = 0;
+    }
+  }
+
   const conditionallyActive =
     dynTree && params
       ? evalConditionallyActiveParamRefs(dynTree, params, currentValues)

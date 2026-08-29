@@ -915,6 +915,46 @@ wiring are tested end-to-end at the unit level; no device has actually been writ
 
 Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 14).
 
+## Part 15 — First real dry-run comparison: koolenex's computed Object 3 vs. a real captured write (NEW 2026-08-29)
+
+Before any real device write is attempted through the new code path, a dry run compared koolenex's
+*computed* Object 3 for 1.1.9 (via the real parse→DB→`buildDeviceProgramming()` pipeline, driven
+against the real, live Test Bed `.knxproj` - no synthetic fixtures) against the actual bytes ETS
+wrote to the real device in its LAST real Object 3 write of the whole 2026-08-29 session
+(`2026-08-29-ets-partial-download-obj3-swap-send-direction-1.1.9.pcapng`, frame 198, `MemExtWrite
+N=98 X=$00570C`, 16:10:31).
+
+🟢 **93 of 98 bytes match exactly, byte-for-byte** - including all 23 "Mapper object" channel
+objects (9 through 28) and every flag bit of every populated communication object except one. This
+is real, direct confirmation that `computeGroupObjectByte()`/`buildGroupObjectTable()` (Part 10.1,
+Part 14) correctly reproduces real ETS's own computation for the overwhelming majority of a real
+device's actual Object 3 content, computed from the real project - not a synthetic fixture.
+
+🟢 **The one flag-byte diff (object 8, offset 16: computed `0x4f` vs real `0x4b`) is explained by
+genuine project/device state drift, confirmed by cross-checking the SAME capture's Association
+table write**: the real Association table sent in this exact download (`00020001000500020005`)
+contains only object 5's two links - zero entries for object 8 - so the device's real "has a GA
+link" bit for object 8 was genuinely `0` at write time. The live project, however, currently
+declares GA `9/1/5` for object 8 (`ga_address='9/1/5'` in `com_objects`), which is why koolenex
+correctly computed `linked=true` for the CURRENT project state. This is not a bug in the
+computation - it's the project having moved on (a GA link added since) without a corresponding
+re-download to the device. Not investigated further, but the mechanism is understood precisely.
+
+🔴 **A genuine, unexplained open finding**: 4 bytes at otherwise-unused "padding" offsets (1, 7, 9,
+11 - the odd byte of each 2-byte slot, which `buildGroupObjectTable()` always leaves at `0`) hold
+real nonzero content on the device (`0x30`, `0x09`, `0x09`, `0x0c` respectively), isolated
+specifically to the app's lowest-numbered, built-in "internal clock" objects (the nonexistent
+"object 0" slot, and objects 3/4/5 - `UhrzeitGO`/`DatumGO`/`DatumUhrzeitGO`). Every other odd byte
+in the buffer (including all 23 Mapper-channel objects) is correctly `0` on both sides. Not
+resolved: whether this is firmware-internal state for these specific built-in objects (speculative
+- unconfirmed), a genuinely different record layout for this particular sub-range, or something
+else entirely. Flagged here rather than guessed at further - a real target for a future controlled
+test (a real ETS download that deliberately changes one of these low object numbers' own flags,
+watching whether these specific padding bytes move in response).
+
+Full methodology (dry-run script, real command output, byte-level tables): `docs/follow-ups/
+2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 15).
+
 ## Sources
 
 - `docs/data/captures/2026-08-29-ets-*-obj3-map-*-1.1.9.pcapng` (12 captures: read/write/

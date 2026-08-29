@@ -581,6 +581,72 @@ device has been written to via `/bus/program-device` with a real `groupObjectTab
 write itself remains unproven on real hardware through this exact path, inheriting only the
 GA/Assoc precedent's proof by construction (same underlying mechanism, Part 6/11).
 
+## Part 15: first real dry-run comparison against a real captured write
+
+User-directed, explicitly separated from an actual real-hardware write: "Before we do that, let's
+do a final dry run, where we compare Koolenex's output with our actual previously captured ETS
+data."
+
+**Methodology**: rather than a synthetic fixture, drove the REAL pipeline against the REAL, live
+Test Bed `.knxproj`. Added two minimal test-only export aliases (matching the existing
+`_apduPropertyValueWrite` convention): `insertParsedData` (`routes/projects.ts`) and
+`_buildDeviceProgramming` (`routes/bus.ts`). A small standalone script then:
+1. `db.init({ inMemory: true })` - no risk to the real `koolenex.db`.
+2. `parseKnxproj()` on the real `.knxproj` buffer (the exact same parser the real import route
+   uses) → real `devices`/`comObjects`/`groupAddresses`/`paramModels`.
+3. `insertParsedData()` + `saveModelsAndMasterXml()` - the exact same insert/model-write logic the
+   real `/api/projects/import` route uses.
+4. Looked up device `1.1.9`, called `_buildDeviceProgramming(dev)` - the exact same function
+   `/bus/program-device` calls, but with no bus connection at all (nothing was written anywhere,
+   nothing touched the real device).
+5. Compared `built.groupObjectTable` byte-for-byte against a real capture.
+
+**Picking the comparison target**: rather than the earliest/most-documented Object 3 capture
+(frame 289 from an EARLIER session, referenced in §1.1'), deliberately picked the chronologically
+LAST real Object 3 write of the entire 2026-08-29 session for 1.1.9
+(`2026-08-29-ets-partial-download-obj3-swap-send-direction-1.1.9.pcapng`, 16:10:31) - the live
+project's state should be closest to that capture's, minimizing the risk of comparing against a
+stale historical device state (a real risk given how many flag/GA changes 1.1.9 went through this
+one session). Decoded via `tshark`'s `cemi.data` field (a cleaner field for this purpose than the
+raw `data.data`/`-x` hex-dump approach used in earlier sessions - confirmed it exposes exactly the
+cEMI-layer payload, verified against the full `-V` decode which independently confirmed
+`MemExtWrite N=98 X=$00570C`).
+
+**Result**: 93/98 bytes matched exactly, first attempt - including every one of the 23 real
+"Mapper object" channel objects (9-28) and every populated communication object's flag bits except
+one. This is the first real evidence that the computation (Part 10.1/Part 14) reproduces real
+ETS's own Object 3 content correctly for a real device's actual current data, not just synthetic
+fixtures.
+
+**Diagnosing the 5 diffs, not just reporting them**: rather than stop at "5 bytes differ", dumped
+every parsed `com_objects` row for 1.1.9 and cross-checked against the SAME capture's own
+Association table write (frames 210/211, decoded the same way): `00020001000500020005` - count=2,
+both entries pointing to communication object 5, zero entries for object 8. This directly proves
+object 8 was genuinely unlinked on the device at write time, while the live project currently
+declares `ga_address='9/1/5'` for object 8 - explaining the one flag-byte diff (computed `0x4f`
+assumes linked=true, matching the CURRENT project; real `0x4b` reflects the device's OLDER,
+unlinked state) as real state drift, not a computation bug. Confirmed by direct evidence in the
+same capture, not inferred.
+
+**The remaining 4 diffs are a genuine open question, left open rather than guessed at**: bytes at
+offsets 1/7/9/11 - the "unused" odd companion byte of each 2-byte slot per the established record
+format - hold real nonzero content (`0x30`/`0x09`/`0x09`/`0x0c`) specifically for the app's
+lowest-numbered built-in "internal clock" objects (the nonexistent object-0 slot, and objects 3/4/5
+- `UhrzeitGO`/`DatumGO`/`DatumUhrzeitGO`, the app's own time/date/datetime output objects). Every
+other odd byte in the entire 98-byte buffer, including all 23 Mapper-channel objects, is correctly
+zero on both sides - ruling out a systematic offset/alignment bug (which would misalign object 0's
+own even byte too, and it doesn't - both sides agree it's `0`). One speculative theory considered
+but explicitly NOT asserted as fact (marked 🔴 in the reference doc): these might be
+firmware-internal state for the app's own built-in objects, not sourced from the ETS project XML
+at all - plausible given these are the app's distinctive non-generic objects, but not tested.
+Real, controlled next step if this is investigated further: a real ETS download that deliberately
+changes one of objects 0/3/4/5's own flags, watching whether these specific padding bytes move.
+
+**What was NOT done**: no code was changed based on this finding (no guessing/patching without
+evidence, per this whole session's standing practice - see [[dont_jump_to_conclusions]]). No real
+device write was attempted - this was explicitly a compute-only dry run, exactly as the user asked
+for, kept separate from "let's actually try a real write" as its own future step.
+
 ## Still open, after Part 6's redo
 
 - ~~1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo~~ -
@@ -617,5 +683,11 @@ GA/Assoc precedent's proof by construction (same underlying mechanism, Part 6/11
   independently exercised against real hardware through this code path - it inherits the GA/Assoc
   precedent by construction (same mechanism) but isn't itself confirmed. This is now the ONLY
   remaining gap between here and a real device write - every wiring/data gap above it is closed
-  (Parts 12-14).
+  (Parts 12-14). A real dry-run comparison (Part 15) found the computation itself matches real
+  captured data at 93/98 bytes (95%), with the one real diff fully explained by state drift.
+- **NEW (Part 15)**: 4 bytes at otherwise-unused "padding" offsets (1/7/9/11) hold real nonzero
+  content on the device, specific to the app's built-in "internal clock" objects (0/3/4/5) - not
+  reproduced by `buildGroupObjectTable()`, not yet explained. A real, genuine open question - see
+  Part 15's full writeup for the evidence and a possible (unconfirmed) firmware-internal-state
+  theory.
 - Everything else already listed in the reference doc's Part 5.

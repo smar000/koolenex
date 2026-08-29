@@ -646,19 +646,27 @@ property 27 is (1.1.9's app never touches property 27 in any form, on any object
   objects) - an easy name mix-up to avoid.
 - Real size and base are per-device/app: **98 bytes at `0x00570C`** for 1.1.9; **942 bytes at
   `0x0C2000`** for 1.1.10 (`PID_TABLE_REFERENCE`, stable across sessions). Content is almost
-  entirely zero-filled in both cases - a small structure repeating once per channel/object, with
-  the rest padding.
+  entirely zero-filled in both cases - a small structure repeating once per channel/object.
+  Table size itself is computable: `2 × maxComObjectNumber + 2` (Part 14), also the value the
+  table's own leading 2-byte header holds (Part 17).
 - Not declared in either app's own `LoadProcedures` XML - written via the same universal,
   mask-defined mechanism as the GA/Association tables (Part 6).
 
-### 10.1 Content: a per-communication-object flag record, fully decoded and cross-app confirmed
+### 10.1 Content: a per-communication-object flag+size record, fully decoded and cross-app confirmed
 
-🟢 **CONFIRMED - full record layout for Object 3, one byte per communication object, offset
-computed by a real formula, decoded via a systematic bit-by-bit mapping session (2026-08-29)**:
+🟢 **CONFIRMED - full record layout for Object 3, TWO bytes per communication object (a flag byte
+and a size-code byte - see Part 17), offset computed by a real formula, decoded via a systematic
+bit-by-bit mapping session (2026-08-29) plus a later cross-device Data-Type test (Part 17)**. Bytes
+0-1 are a separate 2-byte header (total declared object count, Part 17), not part of this
+per-object sequence.
 
 ```
 byte offset within Object 3 = 2 × communication-object number
 ```
+
+The flag byte (below) sits at this offset; the immediately following byte is the object's KNX
+standard Group Object Size code (Part 17) - originally assumed to always be `0` (unused padding)
+until a real cross-device test found it varies by DPT for non-1-bit objects.
 
 ```
 bit:    7      6         5           4      3     2                       1  0
@@ -940,17 +948,12 @@ correctly computed `linked=true` for the CURRENT project state. This is not a bu
 computation - it's the project having moved on (a GA link added since) without a corresponding
 re-download to the device. Not investigated further, but the mechanism is understood precisely.
 
-🔴 **A genuine, unexplained open finding**: 4 bytes at otherwise-unused "padding" offsets (1, 7, 9,
-11 - the odd byte of each 2-byte slot, which `buildGroupObjectTable()` always leaves at `0`) hold
-real nonzero content on the device (`0x30`, `0x09`, `0x09`, `0x0c` respectively), isolated
-specifically to the app's lowest-numbered, built-in "internal clock" objects (the nonexistent
-"object 0" slot, and objects 3/4/5 - `UhrzeitGO`/`DatumGO`/`DatumUhrzeitGO`). Every other odd byte
-in the buffer (including all 23 Mapper-channel objects) is correctly `0` on both sides. Not
-resolved: whether this is firmware-internal state for these specific built-in objects (speculative
-- unconfirmed), a genuinely different record layout for this particular sub-range, or something
-else entirely. Flagged here rather than guessed at further - a real target for a future controlled
-test (a real ETS download that deliberately changes one of these low object numbers' own flags,
-watching whether these specific padding bytes move in response).
+🟢 **RESOLVED, see Part 17**: 4 bytes at what were originally assumed to be unused "padding"
+offsets (1, 7, 9, 11 - the odd byte of each 2-byte slot) hold real nonzero content on the device
+(`0x30`, `0x09`, `0x09`, `0x0c` respectively), isolated specifically to the app's lowest-numbered,
+built-in "internal clock" objects (the nonexistent "object 0" slot, and objects 3/4/5 -
+`UhrzeitGO`/`DatumGO`/`DatumUhrzeitGO`). These are the KNX standard Group Object Size code and a
+real table-count header, not padding at all - see Part 17 for the full resolution.
 
 Full methodology (dry-run script, real command output, byte-level tables): `docs/follow-ups/
 2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 15).
@@ -968,18 +971,71 @@ independent confirmation of the record layout on a third real object (previously
 5/6/7 had been directly tested). **Every other byte, including the mystery padding byte right next
 to it (offset 7, `0x09`), is byte-for-byte identical before and after.**
 
-🟡 **This rules out one specific hypothesis, without yet confirming another**: the mystery byte
-does NOT respond to a Read-On-Init change on the SAME object it sits next to - ruling out "it's
-simply another com-object flag we haven't decoded yet," at least for Read-On-Init specifically.
-Combined with Part 15's finding (real, nonzero, device-side content with no representation in the
-ETS project data at all), this is one real data point *consistent with* - but not proof of - the
-firmware-internal-state theory floated in Part 15. Not yet tested: whether OTHER flags on the same
-object move it, or whether it only ever changes via some other mechanism entirely (or never
-changes at all, in which case it may be permanently fixed per-device/per-mask state, closer to a
-manufacturing constant than anything ETS-controlled).
+🟢 **This ruled out one specific hypothesis and pointed the way to the real answer**: the mystery
+byte does NOT respond to a Read-On-Init change on the SAME object it sits next to - ruling out
+"it's simply another com-object flag we haven't decoded yet," at least for Read-On-Init
+specifically. That negative result, combined with the byte being fixed regardless of any flag
+edit across the ENTIRE session (confirmed by scanning all 28 real 1.1.9 captures - see Part 17),
+correctly pointed away from flags entirely and toward something static per-object instead - which
+Part 17 identifies precisely.
 
 Full methodology and the real byte tables: `docs/follow-ups/2026-08-29-partial-download-mode-and-
 obj3-trigger-test.md` (Part 16).
+
+## Part 17 — Mystery byte solved: it's the KNX standard Group Object Size code, plus a real table-count header (NEW 2026-08-29)
+
+User-directed: asked whether all previous captures showed any change in these companion bytes, and
+independently proposed the winning hypothesis directly: "Could it be Data Type?"
+
+🟢 **Confirmed, real cross-device test**: scanning all 28 real 1.1.9 captures from across the
+entire 2026-08-29 session (every full and partial download, every flag/GA/priority/comm edit made
+to any object) found the 4 companion bytes at offsets 1/7/9/11 are byte-for-byte identical in
+**every single one** - `0x30`/`0x09`/`0x09`/`0x0c`, always, regardless of what changed. Pulled the
+real `ObjectSize` declarations for the objects involved from both testbed apps' own XML and
+checked them against the real captured byte at that object's offset:
+
+| Device | Object | Real DPT / size | Companion byte | KNX Group Object Size code |
+|---|---|---|---|---|
+| 1.1.9 | 3 (`UhrzeitGO`) | DPST-10-1, 3 bytes | `0x09` | 9 = 3 Byte |
+| 1.1.9 | 4 (`DatumGO`) | DPST-11-1, 3 bytes (different DPT, same size) | `0x09` | 9 = 3 Byte |
+| 1.1.9 | 5 (`DatumUhrzeitGO`) | DPST-19-1, 8 bytes | `0x0c` | 12 = 8 Byte |
+| 1.1.10 | 34 | DPST-3-7, 4 bit | `0x03` | 3 = 4 Bit |
+| 1.1.10 | 35/36 | DPST-5-1, 1 byte | `0x07` | 7 = 8 Bit/1 Byte |
+
+4 for 4, on two completely different devices and manufacturers' apps (the 1.1.10 check reconstructed
+its 942-byte Object 3 from 5 chunked `MemExtWrite` frames in `2026-08-29-ets-full-download-1.1.10-
+systematic-3-tampered.pcapng`, base `0xC2000`, 228-byte chunks). These are exactly the well-known
+KNX standard **Group Object Size** 4-bit code: `0`=1 Bit, `1`=2 Bit, `2`=3 Bit, `3`=4 Bit, `4`=5
+Bit, `5`=6 Bit, `6`=7 Bit, `7`=8 Bit/1 Byte, `8`=2 Byte, `9`=3 Byte, `10`=4 Byte, `11`=6 Byte,
+`12`=8 Byte, `13`=10 Byte, `14`=14 Byte, `15`=variable length. Every ordinary object with companion
+byte `0x00` throughout this whole project has, without exception, been a real `1 Bit` DPT (code
+`0`) - a fifth, extensively-repeated confirmation. This also fully explains Part 16's negative
+result: the byte is fixed by the object's static DPT declaration, not any user-editable flag, so
+no flag change could ever have moved it.
+
+🟢 **A second, independent finding from the same scan**: bytes 0-1 - previously assumed to be a
+slot for a nonexistent "object 0" - are a real 2-byte big-endian header holding the app's total
+declared communication-object count. Read as one 16-bit value: `0x0030` = **48** for 1.1.9,
+`0x01D6` = **470** for 1.1.10 - both exactly matching `maxComObjectNumber` (Part 14), the same
+value the table's own overall SIZE is computed from (`2 × maxComObjectNumber + 2`).
+
+**Implemented in real, tested code**: `groupObjectSizeCode()` (new, `server/routes/knx-tables.ts`)
+maps ETS's real `ObjectSize` strings to the code; `GroupObjectFlags` gained `objectSize`;
+`buildGroupObjectTable()` now writes both the header and every object's companion byte, derived
+entirely from `size` and the existing `comObjects` list (no new parameters needed - the header
+count is recovered as `(size - 2) / 2`). `bus.ts`'s `buildDeviceProgramming()` passes
+`objectSize: co.object_size` through. 11 new tests, including a full 98-byte real-capture
+reproduction (`2026-08-29-ets-full-download-obj3-trigger-test-1.1.9.pcapng`, header included,
+byte-for-byte). All 1243 tests pass.
+
+🟢 **Re-verified end to end against real data**: re-ran the Part 15 dry-run comparison after this
+fix (real project → real DB → `buildDeviceProgramming()`, no synthetic fixtures) against
+`2026-08-29-ets-full-download-obj3-trigger-test-1.1.9.pcapng`: **97 of 98 bytes now match exactly**
+(up from 93/98 before this fix) - the one remaining diff is the already-fully-explained object 8
+state-drift case from Part 15, not a computation gap.
+
+Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
+(Part 17).
 
 ## Sources
 

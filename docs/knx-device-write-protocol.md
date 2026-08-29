@@ -1116,6 +1116,26 @@ no existing test exercised a sub-byte parameter before this fix).
 Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
 (Part 20).
 
+## Part 21 — Object 3's flags/priority/size shown on the device compare page (NEW 2026-08-29)
+
+UI follow-up to Part 19: the verify-device response already carried Object 3 comparison rows, but
+as a raw hex byte pair (`"4f 0c"`) - none of the underlying data was actually legible.
+
+**Implementation**: new `describeGroupObjectEntry()` (`server/routes/knx-tables.ts`) formats a
+decoded entry into a human-readable line covering every bit `computeGroupObjectByte()` writes
+(Update/Transmit/Read-On-Init/Write/Read/Comm+Linked), Priority, and the real Object Size -
+`/bus/verify-device` now uses it instead of the raw byte pair. `Comm+Linked` is shown as one
+combined value, not split into "Communication"/"Linked" separately, since bit 2 itself can't
+distinguish which (if either) is false when it's clear (§10.1). The client
+(`DeviceCompareResults.tsx`) gives Object 3 rows the same distinct-section styling GA rows already
+have (own hue, reusing the existing hue-parameterized CSS) and their own tracked match/differ
+counts, composed into the summary badges alongside params and GAs (`composeCount()` generalized
+from a fixed pair to an arbitrary list). Per explicit request, the small redundant text label that
+used to sit next to the match/differ badges was removed entirely rather than extended to also
+mention Object 3.
+
+5 new tests, all 1260 pass. Server and client both typecheck/build/lint clean.
+
 ## Sources
 
 - `docs/data/captures/2026-08-29-ets-*-obj3-map-*-1.1.9.pcapng` (12 captures: read/write/

@@ -1063,6 +1063,36 @@ mechanism, Part 6/11) without independent proof for Object 3 itself. That gap is
 Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
 (Part 18).
 
+## Part 19 — `/bus/verify-device` now checks Object 3 too, plus a third LoadImageProp bug fixed (NEW 2026-08-29)
+
+Closes a real, standing gap: Object 3's write was confirmed on real hardware (Part 18), but the
+read-back/verify route never compared it against a device - only GA/Association tables were.
+
+🟢 **A third, previously-unfixed copy of the LoadImageProp bug (Part 12) found and fixed**:
+`knx-download-plan.ts`'s `buildGaAssocMem()` (used by `planVerify()`, which `/bus/verify-device`
+calls) still counted a declared `LoadImageProp` step as "already handled" - the same latent bug
+already fixed on the write side (`knx-connection.ts`) and the route-level base-resolution gate
+(`routes/bus.ts`). This meant verify would have silently skipped comparing GA/Association content
+at all for an app shaped like 1.1.10's (declares `LoadImageProp` for objIdx 1/2/3) - never caught
+before because no dedicated unit tests existed for `planVerify()` at all. Fixed identically: only
+`WriteRelMem` counts as declared.
+
+**Implementation**: `VerifyPlan.gaAssocMem` renamed to `undeclaredTableMem` (the old name became
+misleading once it covers three tables) and gains Object 3 support, gated the same way as GA/
+Association. Object 3's own comparison, unlike GA/Association's, doesn't need the dynamic "read
+the real count field first" probe - its size is already known (`groupObjectTableSize`) rather than
+being a variable, user-editable-link-count table. New `decodeGroupObjectEntry()`
+(`knx-tables.ts`) - the inverse of `buildGroupObjectTable()`'s placement - surfaces one comparison
+row per communication object (`co-N-obj3`, section "Group Object Table"), matching the GA rows'
+existing "named comparison, not raw bytes" convention.
+
+6 new tests (4 for `planVerify()` directly - none existed before this at the unit level; 2 for
+`/bus/verify-device` via the "fake" `MockBus` device, extended to serve Object 3 reads). All 1249
+tests pass.
+
+Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
+(Part 19).
+
 ## Sources
 
 - `docs/data/captures/2026-08-29-ets-*-obj3-map-*-1.1.9.pcapng` (12 captures: read/write/

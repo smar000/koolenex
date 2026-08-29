@@ -39,6 +39,19 @@ export function ProgrammingView() {
   const [progress, setProgress] = useState<Record<string, { state: string }>>(
     {},
   );
+  // A device download isn't one write, it's several in sequence (parameter
+  // memory, then possibly GA table / Association table / Object 3 flags) -
+  // the server's own progress is computed PER SEGMENT, not cumulatively
+  // across the whole download (see server/knx-connection.ts's WriteRelMem
+  // case: `pct: (off / mem.length) * 80`, local to whichever segment is
+  // currently being written). So the raw signal genuinely climbs, resets to
+  // ~0 when the next segment starts, climbs again, etc. Found live
+  // 2026-08-29: "gets to 99%, then goes to 0 for a few seconds before
+  // changing to 100%" is exactly that reset, right before the final
+  // (small, fast) segment. Standard progress-bar practice regardless of the
+  // cause: never let the DISPLAYED value move backward mid-run - track the
+  // max seen per device, reset only when a new run starts.
+  const programPctMaxRef = useRef<Record<string, number>>({});
   const { entries: log, add: addLog, clear: clearLog } = useProgrammingLog();
   const [verifyingIds, setVerifyingIds] = useState<Set<number>>(new Set());
   const [slideOverDevice, setSlideOverDevice] = useState<any | null>(null);
@@ -105,6 +118,7 @@ export function ProgrammingView() {
 
   const programDevice = async (deviceId: any, devAddr: string) => {
     setLogOpen(true);
+    programPctMaxRef.current[deviceId] = 0;
     // `progress[deviceId]` now only tracks coarse state (running/done/error)
     // for the button/status-badge - the real percentage/message comes from
     // `programProgress[devAddr]` (context, fed by the server's own
@@ -318,11 +332,17 @@ export function ProgrammingView() {
                 // yet; 0 before the first message arrives (e.g. the very
                 // first onProgress call is msg-only, no pct - see
                 // ProgramProgress's doc comment) rather than undefined,
-                // which would render as a NaN-width bar.
+                // which would render as a NaN-width bar. Clamped to never
+                // move backward mid-run (programPctMaxRef, see its own doc
+                // comment) - the raw signal resets to ~0 at the start of
+                // each segment the download writes in sequence.
+                const rawProgramPct = liveProgramProgress?.pct ?? 0;
+                const prevMax = programPctMaxRef.current[d.id] ?? 0;
+                const clampedProgramPct = Math.max(prevMax, rawProgramPct);
+                if (prog?.state === 'running')
+                  programPctMaxRef.current[d.id] = clampedProgramPct;
                 const programPct =
-                  prog?.state === 'done'
-                    ? 100
-                    : (liveProgramProgress?.pct ?? 0);
+                  prog?.state === 'done' ? 100 : clampedProgramPct;
                 return (
                   <tr key={d.id} className="rh">
                     <TD>

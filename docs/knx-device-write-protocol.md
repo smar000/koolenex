@@ -8,10 +8,7 @@ read this document" below); treat unconfirmed items as working hypotheses, not d
 
 This document describes how a KNX configuration tool (ETS, the standard KNX Engineering Tool
 Software) writes project data onto a physical KNX device over KNXnet/IP — the sequence of
-messages sent, what each one means, and the byte layouts involved. It's written to be useful to
-anyone implementing a KNX device-write path, independent of any particular tool — it's a
-reference to how the protocol actually behaves on real hardware, not documentation of any one
-codebase.
+messages sent, what each one means, and the byte layouts involved.
 
 **Methodology**: every fact here was derived from real ETS 6.3 download sessions against
 physical devices, with the actual network traffic captured and decoded byte-by-byte — not taken

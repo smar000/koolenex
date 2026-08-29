@@ -523,6 +523,64 @@ Read-On-Init/Priority values are available in the DB per com object. `bus.ts`'s
 pass it to `downloadDevice()` - that's the next, separate step before Object 3's write can be
 exercised against real hardware for the first time.
 
+## Part 14: wiring buildDeviceProgramming() to construct and pass a real Object 3
+
+Direct continuation, user-directed ("yes pls" to continue past Part 13) - the last remaining gap
+from Part 12: no real caller built a `groupObjectTable`.
+
+**The real blocker turned out to be table SIZE, not the data itself.** GA/Association tables are
+self-describing (`buildGATable`/`buildAssocTable` compute their own size from the linked GA count),
+but Object 3 isn't - its real size (98 bytes for 1.1.9, 942 for 1.1.10, per Part 10) has no obvious
+source in the per-device data koolenex already had. Rather than guess, re-extracted the live Test
+Bed `.knxproj` a third time this session and counted real `<ComObject>` declarations directly:
+1.1.9's app declares 48 (highest `Number="48"`); 1.1.10's declares 470 (highest `Number="470"`).
+`2 × 48 + 2 = 98` and `2 × 470 + 2 = 942` - both exact matches, first try. The key realization: this
+must be the app's TOTAL static declaration count, not a given device's currently-linked/active
+com-objects (which is all `com_objects`'s existing per-device rows ever tracked) - real ETS clearly
+pre-allocates space for every com object the app could ever expose, confirmed by the byte counts
+not correlating with per-device active-object counts at all.
+
+**Implementation**: added `AppIndex.maxComObjectNumber` (`server/ets-app.ts`, computed once from
+the full `coDefs` map covering every `Static` section including modules) and threaded it into
+`ParamModel.groupObjectTableSize` (`= 2 × max + 2`) in `ets-parser.ts`, stored in the per-app
+`model.json` alongside `loadProcedures`. `bus.ts`'s `buildDeviceProgramming()` reads it back and
+builds a real `GroupObjectFlags[]` from `com_objects`, calling `buildGroupObjectTable()`.
+
+**A real correctness bug caught before it shipped, not after**: mapping `com_objects` rows to
+`GroupObjectFlags` needs the raw Read/Write/Communication/Transmit booleans, but the DB only ever
+stored the composite `flags` display string (`buildFlags()`) - and that string has a genuine lossy
+case: when ALL of comm/read/write/tx/update are false, it falls back to the literal string `'CW'`,
+which would make `flags.includes('C')`/`flags.includes('W')` wrongly report `true`. Checked whether
+this is actually reachable in practice (every real com object seen this session had
+`CommunicationFlag="Enabled"`, so probably rare) but chose not to rely on that - added dedicated
+`read`/`write`/`comm`/`tx` raw columns to `com_objects`, exactly mirroring Part 13's
+`read_on_init`/`priority` treatment. Worked out that `Update` alone is provably always safe to
+derive from `flags` (`'U'` can only ever appear in the string when Update is genuinely true, since
+the fallback text itself contains no `'U'`) - documented this reasoning inline rather than adding a
+fifth column for a flag that didn't need one.
+
+**A second bug, same class, found by pattern-matching my own earlier fix**: while working in this
+area, noticed `/bus/verify-device`'s own `declaredTableObjIdxs` check (a separate implementation
+from `downloadDevice()`'s, used only for read-side verification) had the exact same LoadImageProp
+bug Part 12 fixed on the write side. Fixed identically. Ran the full suite first to check for
+pinned-behavior tests before committing to the fix - none existed, so no test updates were needed
+this time (unlike Part 12's write-side fix, which did break two tests).
+
+**Testing**: two new tests in `tests/bus-routes.test.ts` - one seeds two communication objects
+exercising every new column at once (linked+unlinked, every flag combination, an explicit Priority
+override) and asserts the real `extra.groupObjectTable` passed to the mocked `downloadDevice()`
+matches `buildGroupObjectTable()` computed independently from the same fixture data; the other
+confirms `groupObjectTable` stays `null` for an app model with no `groupObjectTableSize`. Both
+passed on the first attempt. All 1232 tests pass (1230 existing + 2 new). Typechecked clean.
+Committed and pushed (`99d545a Wire buildDeviceProgramming() to construct and pass a real Object 3`).
+
+**What this closes and doesn't**: every gap flagged in Part 12/13 about "no real caller exists" is
+now closed - the full chain from `com_objects` through to `downloadDevice()`'s `extra.
+groupObjectTable` is real, wired, and tested at the unit level. What's still NOT done: no actual
+device has been written to via `/bus/program-device` with a real `groupObjectTable` - Object 3's
+write itself remains unproven on real hardware through this exact path, inheriting only the
+GA/Assoc precedent's proof by construction (same underlying mechanism, Part 6/11).
+
 ## Still open, after Part 6's redo
 
 - ~~1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo~~ -
@@ -551,12 +609,13 @@ exercised against real hardware for the first time.
   one device/app - it's a best-effort extrapolation of the parameter-object pattern, now proven
   correct for 1.1.9 specifically, not proven to generalize.
 - ~~Object 3's real write invocation exists in code and is tested, but has no real production
-  caller yet - blocked on Read-On-Init/Priority not being captured anywhere~~ - **the parser/schema
-  half is RESOLVED, see Part 13**: both fields are now captured and stored in `com_objects`. `bus.ts`'s
-  `buildDeviceProgramming()` still doesn't construct a real `groupObjectTable` from this data and
-  pass it to `downloadDevice()` - that's the real remaining next step before any of this can run
-  against a live device.
-- **NEW (Part 12)**: Object 3's write itself, unlike GA/Association's (Part 6, real-hardware
-  proven), has never been independently exercised against real hardware through this code path -
-  it inherits the GA/Assoc precedent by construction (same mechanism) but isn't itself confirmed.
+  caller yet~~ - **FULLY RESOLVED, see Part 13 (parser/schema) and Part 14 (the actual wiring)**:
+  `bus.ts`'s `buildDeviceProgramming()` now builds a real `GroupObjectFlags[]` from `com_objects`
+  and passes a real `groupObjectTable` through to `downloadDevice()`. What remains is purely
+  real-hardware validation - see below.
+- Object 3's write itself, unlike GA/Association's (Part 6, real-hardware proven), has never been
+  independently exercised against real hardware through this code path - it inherits the GA/Assoc
+  precedent by construction (same mechanism) but isn't itself confirmed. This is now the ONLY
+  remaining gap between here and a real device write - every wiring/data gap above it is closed
+  (Parts 12-14).
 - Everything else already listed in the reference doc's Part 5.

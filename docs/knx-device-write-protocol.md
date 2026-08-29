@@ -877,6 +877,44 @@ the data-capture gap only, not the "no real caller exists yet" gap from Part 12.
 
 Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 13).
 
+## Part 14 — buildDeviceProgramming() now constructs and passes a real Object 3 (NEW 2026-08-29)
+
+The last remaining gap from Part 12 - "no real caller builds a `groupObjectTable`" - is closed.
+`/bus/program-device`'s `buildDeviceProgramming()` (`server/routes/bus.ts`) now builds a real
+`GroupObjectFlags[]` from `com_objects` and calls `buildGroupObjectTable()`, passed through to
+`downloadDevice()`'s `extra.groupObjectTable`.
+
+🟢 **Real table size, resolved from real data**: `size = 2 × maxComObjectNumber + 2`, where
+`maxComObjectNumber` is the highest `Number` across **every** `ComObject` the app statically
+declares - confirmed exact against both real testbed apps' actual on-wire sizes (1.1.9: max
+object# 48 → 98 bytes; 1.1.10: max object# 470 → 942 bytes, both from §10's identity section).
+Deliberately the app's total static declaration range, not a given device's linked/instantiated
+subset - real ETS pre-allocates Object 3 space for every com object the app could ever expose,
+confirmed by the real byte counts not correlating with any per-device active-object count.
+
+🟢 **A real correctness fix found while implementing this**: `com_objects.flags` (the composite
+display string from `buildFlags()`) has a lossy all-false fallback (`'CW'`) - not safe to parse
+back into individual Read/Write/Communication/Transmit booleans for a real download. Added
+dedicated raw `read`/`write`/`comm`/`tx` columns (mirroring `read_on_init`/`priority` from Part
+13) rather than parsing `flags`. Update alone stays safely derived from `flags` (documented why:
+`'U'` can never appear via the fallback path, so no false positive/negative is possible for it).
+
+🟢 **A parallel copy of the LoadImageProp `declaredTableObjIdxs` bug (Part 12) found and fixed**:
+`/bus/verify-device`'s own copy of this check had the identical bug - counting a declared
+`LoadImageProp` step as "already handled". Fixed the same way (only `WriteRelMem` counts); no
+existing test pinned the old behavior, all tests pass unchanged.
+
+New tests (`tests/bus-routes.test.ts`) exercise every new column across two communication objects
+and assert a byte-for-byte match against `buildGroupObjectTable()` computed independently, plus
+confirm `groupObjectTable` stays `null` when the app model has no `groupObjectTableSize`. All 1232
+tests pass.
+
+🟡 **Still not proven on real hardware through this exact path**: only the computation and the
+wiring are tested end-to-end at the unit level; no device has actually been written to via
+`/bus/program-device` with a real `groupObjectTable` yet.
+
+Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 14).
+
 ## Sources
 
 - `docs/data/captures/2026-08-29-ets-*-obj3-map-*-1.1.9.pcapng` (12 captures: read/write/

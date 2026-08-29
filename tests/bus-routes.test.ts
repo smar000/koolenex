@@ -1615,6 +1615,19 @@ describe('POST /bus/verify-device — Object 3 (Group Object Table) fallback', (
     assert.match(co5.expectedValue, /Comm\+Linked=Yes/);
     assert.match(co5.expectedValue, /Priority=Alarm/);
     assert.match(co5.expectedValue, /Size=1 Bit/);
+    // Structured flags for the per-flag chip display (2026-08-29) - real
+    // booleans, not a string to re-parse, mirroring the same expectations.
+    assert.deepEqual(co5.obj3Expected, {
+      update: false,
+      transmit: false,
+      readOnInit: true,
+      write: false,
+      read: true,
+      commLinked: true,
+      priority: 'Alarm',
+      size: '1 Bit',
+    });
+    assert.deepEqual(co5.obj3Actual, co5.obj3Expected);
     const co7 = byKey.get('co-7-obj3') as any;
     assert.equal(co7.match, true);
     // object 7: transmit=true, write=true, read=false, comm=true,

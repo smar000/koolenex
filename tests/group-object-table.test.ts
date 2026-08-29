@@ -18,6 +18,7 @@ import {
   buildGroupObjectTable,
   groupObjectSizeCode,
   describeGroupObjectEntry,
+  decodeGroupObjectEntryFlags,
 } from '../server/routes/knx-tables.ts';
 import type { GroupObjectFlags } from '../server/routes/knx-tables.ts';
 
@@ -459,5 +460,45 @@ describe('describeGroupObjectEntry() - human-readable formatting for the device-
   it('an unrecognized size code (never confirmed against real hardware, but the sequence is well-known) still shows its own real name, not garbage', () => {
     const str = describeGroupObjectEntry({ flagByte: 0, sizeCodeByte: 15 }); // 15 = Variable length
     assert.match(str, /Size=Variable length/);
+  });
+});
+
+describe('decodeGroupObjectEntryFlags() - structured (not string) decode, for the per-flag chip display', () => {
+  it('matches describeGroupObjectEntry() bit-for-bit - same real captured value (0x6f object 5, Read-On-Init on)', () => {
+    const flags = decodeGroupObjectEntryFlags({ flagByte: 0x6f, sizeCodeByte: 0x0c });
+    assert.deepEqual(flags, {
+      update: false,
+      transmit: true,
+      readOnInit: true,
+      write: false,
+      read: true,
+      commLinked: true,
+      priority: 'Low',
+      size: '8 Bytes',
+    });
+  });
+
+  it('every bit independently toggleable - all-set byte (0xFF, priority bits included) decodes every flag true', () => {
+    const flags = decodeGroupObjectEntryFlags({ flagByte: 0xff, sizeCodeByte: 7 });
+    assert.equal(flags.update, true);
+    assert.equal(flags.transmit, true);
+    assert.equal(flags.readOnInit, true);
+    assert.equal(flags.write, true);
+    assert.equal(flags.read, true);
+    assert.equal(flags.commLinked, true);
+    assert.equal(flags.priority, 'Low'); // 0xFF's low 2 bits are 0b11 = Low
+    assert.equal(flags.size, '1 Byte');
+  });
+
+  it('all-clear byte decodes every flag false, priority System (the real bit pattern, not a Low default)', () => {
+    const flags = decodeGroupObjectEntryFlags({ flagByte: 0x00, sizeCodeByte: 0x00 });
+    assert.equal(flags.update, false);
+    assert.equal(flags.transmit, false);
+    assert.equal(flags.readOnInit, false);
+    assert.equal(flags.write, false);
+    assert.equal(flags.read, false);
+    assert.equal(flags.commLinked, false);
+    assert.equal(flags.priority, 'System');
+    assert.equal(flags.size, '1 Bit');
   });
 });

@@ -351,19 +351,57 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Object 3 rows' expected/actual values are a long, structured, multi-part
-   description (every flag + priority + size - describeGroupObjectEntry(),
-   server-side) meant to be read directly, not glanced at - unlike GA
-   addresses or short param values, forcing this behind a single truncated
-   line + hover (like .tipText below) made the actual content invisible
-   without hovering every row individually (reported live, 2026-08-29).
-   Wraps across multiple lines instead, growing the row's height rather than
-   clipping - no hover needed to read it. */
-.tipTextWrap {
-  display: block;
-  white-space: normal;
-  word-break: break-word;
-  line-height: 1.4;
+/* Object 3 rows' per-flag chip display (2026-08-29, replacing an earlier
+   wrapped-sentence attempt - see docs/knx-device-write-protocol.md Part 21
+   in the koolenex repo) - one small letter box per boolean flag, ETS's own
+   checkbox order (Communication, Read, Write, Transmit, Update, Read On
+   Init - matches real ETS's parameter UI, not the underlying bit order),
+   green when set / muted when clear, so every flag is visible at a glance
+   without hovering. Priority/Size sit alongside as plain compact text (not
+   booleans, so not chips). Deliberately plain `<span>`s, not buttons yet -
+   structured this way so a future click-to-edit pass (see
+   [[koolenex_ui_todo]] item 2) can wire an onClick straight onto each chip
+   without restructuring the display first. */
+.flagChips {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+.flagChip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+.flagChipOn {
+  background: color-mix(in srgb, var(--green) 30%, transparent);
+  color: var(--green);
+  border: 1px solid color-mix(in srgb, var(--green) 55%, transparent);
+}
+.flagChipOff {
+  background: var(--bg);
+  color: var(--dim);
+  border: 1px solid var(--border);
+}
+/* A single flag where project and device genuinely disagree - a red ring on
+   just that chip, so a one-bit difference is visible without having to
+   compare the two whole chip rows letter by letter. */
+.flagChipDiffer {
+  box-shadow: 0 0 0 1px var(--red);
+}
+.flagMeta {
+  color: var(--muted);
+  font-size: 9px;
+  margin-left: 4px;
+  white-space: nowrap;
 }
 
 .tip[data-tip]:hover::after {

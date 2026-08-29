@@ -25,6 +25,20 @@ interface BusStatusResponse {
   path?: string;
 }
 
+/** Object 3 (Group Object Table) row only - structured flags for the compact per-flag chip
+ * display (server: decodeGroupObjectEntryFlags(), knx-tables.ts). `commLinked` is bit 2 -
+ * Communication AND has-a-real-GA-link combined, not separable from the byte alone. */
+export interface GroupObjectEntryFlags {
+  update: boolean;
+  transmit: boolean;
+  readOnInit: boolean;
+  write: boolean;
+  read: boolean;
+  commLinked: boolean;
+  priority: string;
+  size: string;
+}
+
 export interface VerifyDecodedParam {
   key: string;
   label: string;
@@ -38,6 +52,9 @@ export interface VerifyDecodedParam {
   expectedValue: string;
   actualValue: string | null;
   match: boolean | null;
+  /** Object 3 rows only - undefined for every other row kind (params, GA links). */
+  obj3Expected?: GroupObjectEntryFlags;
+  obj3Actual?: GroupObjectEntryFlags | null;
 }
 
 export interface VerifyDeviceResult {

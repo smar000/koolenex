@@ -462,15 +462,51 @@ export function describeGroupObjectEntry(entry: {
   flagByte: number;
   sizeCodeByte: number;
 }): string {
-  const b = entry.flagByte;
-  const yn = (bit: number): string => (b & bit ? 'Yes' : 'No');
-  const priority = GROUP_OBJECT_PRIORITY_NAMES[b & 0b11] ?? `0b${(b & 0b11).toString(2)}`;
-  const size = GROUP_OBJECT_SIZE_NAMES[entry.sizeCodeByte] ?? `code ${entry.sizeCodeByte}`;
+  const f = decodeGroupObjectEntryFlags(entry);
   return (
-    `Update=${yn(1 << 7)} Transmit=${yn(1 << 6)} ReadOnInit=${yn(1 << 5)} ` +
-    `Write=${yn(1 << 4)} Read=${yn(1 << 3)} Comm+Linked=${yn(1 << 2)} ` +
-    `Priority=${priority} Size=${size}`
+    `Update=${f.update ? 'Yes' : 'No'} Transmit=${f.transmit ? 'Yes' : 'No'} ` +
+    `ReadOnInit=${f.readOnInit ? 'Yes' : 'No'} Write=${f.write ? 'Yes' : 'No'} ` +
+    `Read=${f.read ? 'Yes' : 'No'} Comm+Linked=${f.commLinked ? 'Yes' : 'No'} ` +
+    `Priority=${f.priority} Size=${f.size}`
   );
+}
+
+/**
+ * Structured (not string-formatted) decode of one Object 3 entry - the same six boolean bits
+ * `describeGroupObjectEntry()` formats into a sentence, plus Priority/Size, but as real booleans
+ * a client can render individually (compact letter chips, ETS-order) or later use as the basis
+ * for click-to-edit toggling (2026-08-29 - the device-compare page's flags display was redesigned
+ * from one long sentence to per-flag chips, which need real per-flag data, not a string to
+ * re-parse). `commLinked` is bit 2 - see `describeGroupObjectEntry()`'s own doc comment for why
+ * it's one combined value, not split into "Communication"/"Linked" separately.
+ */
+export interface GroupObjectEntryFlags {
+  update: boolean;
+  transmit: boolean;
+  readOnInit: boolean;
+  write: boolean;
+  read: boolean;
+  commLinked: boolean;
+  priority: string;
+  size: string;
+}
+
+export function decodeGroupObjectEntryFlags(entry: {
+  flagByte: number;
+  sizeCodeByte: number;
+}): GroupObjectEntryFlags {
+  const b = entry.flagByte;
+  const has = (bit: number): boolean => !!(b & bit);
+  return {
+    update: has(1 << 7),
+    transmit: has(1 << 6),
+    readOnInit: has(1 << 5),
+    write: has(1 << 4),
+    read: has(1 << 3),
+    commLinked: has(1 << 2),
+    priority: GROUP_OBJECT_PRIORITY_NAMES[b & 0b11] ?? `0b${(b & 0b11).toString(2)}`,
+    size: GROUP_OBJECT_SIZE_NAMES[entry.sizeCodeByte] ?? `code ${entry.sizeCodeByte}`,
+  };
 }
 
 // Test whether a numeric/string value matches an ETS when-test condition.

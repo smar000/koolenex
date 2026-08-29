@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { Btn, Badge, SearchBox, Empty } from '../primitives.tsx';
 import { DeviceTypeIcon } from '../icons.tsx';
-import type { VerifyDecodedParam } from '../api.ts';
+import type { VerifyDecodedParam, GroupObjectEntryFlags } from '../api.ts';
 import { useLiveData, useVerifyCache } from '../contexts.ts';
 import styles from './DeviceComparisonView.module.css';
 
@@ -52,6 +52,63 @@ function MatchIcon({ match }: { match: boolean | null }) {
   return (
     <span className={styles.matchIcon} style={{ color: 'var(--dim)' }} title="Not applicable">
       –
+    </span>
+  );
+}
+
+// Object 3's boolean flags, in real ETS's own parameter-UI checkbox order
+// (Communication, Read, Write, Transmit, Update, Read On Init) - NOT the
+// underlying bit order (Update/Transmit/ReadOnInit/Write/Read/Comm, per
+// computeGroupObjectByte()) - display order is chosen for familiarity to
+// anyone who's used real ETS, independent of wire layout. `commLinked` is
+// bit 2 (Communication AND has-a-real-GA-link, combined - see
+// GroupObjectEntryFlags's own doc comment) but labeled plain "C" here,
+// matching ETS's own "Communication" checkbox the byte can't fully
+// distinguish from.
+const FLAG_CHIP_ORDER: Array<{ key: keyof GroupObjectEntryFlags; letter: string; label: string }> = [
+  { key: 'commLinked', letter: 'C', label: 'Communication (+ has a real GA link)' },
+  { key: 'read', letter: 'R', label: 'Read' },
+  { key: 'write', letter: 'W', label: 'Write' },
+  { key: 'transmit', letter: 'T', label: 'Transmit' },
+  { key: 'update', letter: 'U', label: 'Update' },
+  { key: 'readOnInit', letter: 'RI', label: 'Read On Init' },
+];
+
+/** Object 3's compact per-flag display: one small letter chip per boolean flag (green = set,
+ * muted = clear), Priority/Size as plain text alongside, the full sentence
+ * (describeGroupObjectEntry(), server-side) as a hover tooltip. `other` (the opposite
+ * project/device side) is used only to ring a chip red when the two sides genuinely disagree on
+ * that one specific flag - purely visual, doesn't affect the row's own overall match icon. */
+function FlagChips({
+  flags,
+  other,
+  tooltip,
+}: {
+  flags: GroupObjectEntryFlags | null | undefined;
+  other?: GroupObjectEntryFlags | null;
+  tooltip: string;
+}) {
+  if (!flags) return <span className={styles.groupCell}>—</span>;
+  return (
+    <span className={styles.tip} data-tip={tooltip}>
+      <span className={styles.flagChips}>
+        {FLAG_CHIP_ORDER.map(({ key, letter, label }) => {
+          const on = flags[key] as boolean;
+          const differs = other != null && other[key] !== flags[key];
+          return (
+            <span
+              key={key}
+              className={`${styles.flagChip} ${on ? styles.flagChipOn : styles.flagChipOff} ${differs ? styles.flagChipDiffer : ''}`}
+              title={`${label}: ${on ? 'Yes' : 'No'}`}
+            >
+              {letter}
+            </span>
+          );
+        })}
+        <span className={styles.flagMeta}>
+          {flags.priority} · {flags.size}
+        </span>
+      </span>
     </span>
   );
 }
@@ -583,9 +640,11 @@ export function DeviceCompareResults({
                             )}
                             <td className={`${styles.td} ${styles.mono}`}>
                               {isObj3 ? (
-                                <span className={styles.tipTextWrap}>
-                                  {r.expectedValue}
-                                </span>
+                                <FlagChips
+                                  flags={r.obj3Expected}
+                                  other={r.obj3Actual}
+                                  tooltip={r.expectedValue}
+                                />
                               ) : (
                                 <span
                                   className={styles.tip}
@@ -599,9 +658,11 @@ export function DeviceCompareResults({
                             </td>
                             <td className={`${styles.td} ${styles.mono}`}>
                               {isObj3 ? (
-                                <span className={styles.tipTextWrap}>
-                                  {r.actualValue ?? '—'}
-                                </span>
+                                <FlagChips
+                                  flags={r.obj3Actual}
+                                  other={r.obj3Expected}
+                                  tooltip={r.actualValue ?? '—'}
+                                />
                               ) : (
                                 <span
                                   className={styles.tip}

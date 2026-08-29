@@ -16,12 +16,13 @@ import {
   decodeAssocTable,
   decodeGroupObjectEntry,
   describeGroupObjectEntry,
+  decodeGroupObjectEntryFlags,
   resolveParamSegment,
   buildParamMem,
   diffMemory,
   decodeParamMem,
 } from './knx-tables.ts';
-import type { GroupObjectFlags } from './knx-tables.ts';
+import type { GroupObjectFlags, GroupObjectEntryFlags } from './knx-tables.ts';
 import type {
   Setting,
   Device,
@@ -1341,6 +1342,13 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
       expectedValue: string;
       actualValue: string | null;
       match: boolean | null;
+      // Object 3 rows only - structured (not string) flag data for the
+      // compact per-flag chip display, added 2026-08-29 alongside the
+      // chip redesign. `expectedValue`/`actualValue` (the full sentence
+      // from describeGroupObjectEntry()) stay the hover-tooltip content;
+      // undefined for every other row kind (params, GA links).
+      obj3Expected?: GroupObjectEntryFlags;
+      obj3Actual?: GroupObjectEntryFlags | null;
     };
     let decoded: DecodedComparison[] | undefined;
     if (
@@ -1527,6 +1535,16 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
           expectedValue: expectedStr,
           actualValue: actualStr,
           match: expectedStr === actualStr,
+          // Structured flags for the compact per-flag chip display -
+          // expectedEntry is only null when the object falls outside the
+          // buffer, which can't happen here (coRows only ever holds real
+          // com objects, and buildGroupObjectTable() sizes the buffer to
+          // cover every one of them) - the fallback is defensive, not a
+          // real expected case.
+          obj3Expected: expectedEntry
+            ? decodeGroupObjectEntryFlags(expectedEntry)
+            : undefined,
+          obj3Actual: actualEntry ? decodeGroupObjectEntryFlags(actualEntry) : null,
         });
       }
       if (obj3Rows.length) decoded = [...(decoded ?? []), ...obj3Rows];

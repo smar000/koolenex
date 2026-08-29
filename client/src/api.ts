@@ -81,6 +81,13 @@ export interface VerifyDeviceResult {
     actualHex: string;
   }>;
   decoded?: VerifyDecodedParam[];
+  /** Object 3 (Group Object Table / "Communication Flags")'s own raw
+   * byte-level totals, present only when this app declares that region -
+   * mirrors totalBytes/totalDiffering but for that separate memory region,
+   * so a log line can quote a real "N/M bytes match" figure for flags too,
+   * not just a count of differing named rows. */
+  flagsTotalBytes?: number;
+  flagsDifferingBytes?: number;
 }
 
 export interface ImportSummary {

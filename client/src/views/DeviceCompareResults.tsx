@@ -16,6 +16,21 @@ function sectionId(name: string): string {
   return 'sec-' + name.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
 }
 
+/** User-facing rename for section names that are correct KNX terminology but
+ * meaningless to someone who isn't a KNX protocol engineer. The server's own
+ * `section` string ('Group Object Table', KNX standard object/type name -
+ * see docs/knx-device-write-protocol.md Part 10, koolenex repo) stays
+ * unchanged everywhere it's used as a comparison key (filtering, tests,
+ * server responses) - this ONLY renames what's actually painted on screen
+ * (section headers, the sections-jump popover, log lines), so nothing
+ * upstream needs to know about the friendlier name. Exported so
+ * ProgrammingView's log lines can reuse the same mapping instead of printing
+ * the raw KNX term there too. */
+export function displaySectionName(section: string): string {
+  if (section === 'Group Object Table') return 'Communication Flags';
+  return section;
+}
+
 /** Compose a "5 params / 2 GAs / 1 Object 3" style count string from any
  * number of scoped counts, omitting whichever entries are zero (e.g. a
  * device with no GA rows, or one where every GA matches while a param
@@ -75,39 +90,41 @@ const FLAG_CHIP_ORDER: Array<{ key: keyof GroupObjectEntryFlags; letter: string;
 ];
 
 /** Object 3's compact per-flag display: one small letter chip per boolean flag (green = set,
- * muted = clear), Priority/Size as plain text alongside, the full sentence
- * (describeGroupObjectEntry(), server-side) as a hover tooltip. `other` (the opposite
- * project/device side) is used only to ring a chip red when the two sides genuinely disagree on
- * that one specific flag - purely visual, doesn't affect the row's own overall match icon. */
+ * muted = clear), Priority/Size as plain text alongside. Each chip carries its OWN short tooltip
+ * (just that one flag's name, via the app's standard `.tip`/`data-tip` mechanism - the same one
+ * used everywhere else, not the native `title` attribute) rather than one composite tooltip for
+ * the whole row: an earlier version wrapped the whole chip row in a single row-wide tooltip
+ * showing the full describeGroupObjectEntry() sentence, but anchored at the row's left edge that
+ * pushed a wide (up to 380px) box off the right side of the screen for columns near the viewport
+ * edge - per-chip tooltips are short enough to never need that width, and land next to the
+ * specific letter being hovered. `other` (the opposite project/device side) is used only to ring
+ * a chip red when the two sides genuinely disagree on that one specific flag - purely visual,
+ * doesn't affect the row's own overall match icon. */
 function FlagChips({
   flags,
   other,
-  tooltip,
 }: {
   flags: GroupObjectEntryFlags | null | undefined;
   other?: GroupObjectEntryFlags | null;
-  tooltip: string;
 }) {
   if (!flags) return <span className={styles.groupCell}>—</span>;
   return (
-    <span className={styles.tip} data-tip={tooltip}>
-      <span className={styles.flagChips}>
-        {FLAG_CHIP_ORDER.map(({ key, letter, label }) => {
-          const on = flags[key] as boolean;
-          const differs = other != null && other[key] !== flags[key];
-          return (
-            <span
-              key={key}
-              className={`${styles.flagChip} ${on ? styles.flagChipOn : styles.flagChipOff} ${differs ? styles.flagChipDiffer : ''}`}
-              title={`${label}: ${on ? 'Yes' : 'No'}`}
-            >
-              {letter}
-            </span>
-          );
-        })}
-        <span className={styles.flagMeta}>
-          {flags.priority} · {flags.size}
-        </span>
+    <span className={styles.flagChips}>
+      {FLAG_CHIP_ORDER.map(({ key, letter, label }) => {
+        const on = flags[key] as boolean;
+        const differs = other != null && other[key] !== flags[key];
+        return (
+          <span
+            key={key}
+            className={`${styles.tip} ${styles.flagChip} ${on ? styles.flagChipOn : styles.flagChipOff} ${differs ? styles.flagChipDiffer : ''}`}
+            data-tip={`${label}: ${on ? 'Yes' : 'No'}`}
+          >
+            {letter}
+          </span>
+        );
+      })}
+      <span className={styles.flagMeta}>
+        {flags.priority} · {flags.size}
       </span>
     </span>
   );
@@ -248,15 +265,25 @@ export function DeviceCompareResults({
   const gaMismatchCount = gaDecoded.filter((d) => d.match === false).length;
   const obj3MatchCount = obj3Decoded.filter((d) => d.match === true).length;
   const obj3MismatchCount = obj3Decoded.filter((d) => d.match === false).length;
+  // "communication object", not "flag" - each obj3Decoded row is ONE
+  // communication object's WHOLE flag set (all of C/R/W/T/U/RI + Priority +
+  // Size, compared together as a single string - see the `match` assignment
+  // server-side, routes/bus.ts's obj3Rows), not a single flag. "N flags
+  // differ" would UNDERCOUNT whenever two or more of one object's flags
+  // differ at once (a real, common case - e.g. toggling Communication also
+  // moves bit 2 the way toggling Read moves bit 3, so a single real edit can
+  // already touch more than one flag), so the row-level word needs to name
+  // what's actually being counted (objects), not the finer-grained thing
+  // inside each row that isn't separately counted here.
   const matchCountEntries = [
     { count: matchCount, word: 'param' },
     { count: gaMatchCount, word: 'GA' },
-    { count: obj3MatchCount, word: 'Object 3 row' },
+    { count: obj3MatchCount, word: 'Comm Object' },
   ];
   const mismatchCountEntries = [
     { count: mismatchCount, word: 'param' },
     { count: gaMismatchCount, word: 'GA' },
-    { count: obj3MismatchCount, word: 'Object 3 row' },
+    { count: obj3MismatchCount, word: 'Comm Object' },
   ];
   // How many of those mismatches the current filters (search / only-named)
   // are hiding from the table below - the summary badges below count every
@@ -331,7 +358,7 @@ export function DeviceCompareResults({
                           className={styles.jumpChip}
                           style={{ '--chip-hue': hue } as React.CSSProperties}
                         >
-                          {s}
+                          {displaySectionName(s)}
                           <span className={styles.jumpChipCount}>
                             {bySection.get(s)!.length}
                           </span>
@@ -391,9 +418,13 @@ export function DeviceCompareResults({
                           : 'Show only matching rows. ') +
                         'Named, project-configurable parameters' +
                         (gaDecoded.length ? ', group-address links' : '') +
-                        (obj3Decoded.length ? ', and Object 3 (Group Object Table) entries' : '') +
-                        ' only - a smaller, more precise scope than the raw byte count ' +
-                        'to the right, which also includes unmapped/padding bytes.'
+                        (obj3Decoded.length ? ', and communication objects\' flags' : '') +
+                        ' only. Underneath, at the raw byte level, ' +
+                        `${result.totalBytes - result.totalDiffering}/${result.totalBytes} ` +
+                        `bytes of the parameter memory segment match ` +
+                        `(a separate, larger scope - includes unmapped/padding bytes ETS ` +
+                        `itself rarely writes to, so a mismatch there alone usually isn't ` +
+                        `meaningful the way a named-row mismatch above is).`
                       }
                     >
                       <Badge
@@ -420,11 +451,17 @@ export function DeviceCompareResults({
                           setOnlyNamed(false);
                       }}
                       title={
-                        rowFilter === 'differ'
-                          ? 'Showing only differing rows — click to show all'
+                        (rowFilter === 'differ'
+                          ? 'Showing only differing rows — click to show all. '
                           : hiddenMismatchCount > 0
-                            ? `Show only differing rows (including ${hiddenMismatchCount} unnamed param${hiddenMismatchCount === 1 ? '' : 's'} normally hidden by "Only named parameters")`
-                            : 'Show only differing rows'
+                            ? `Show only differing rows (including ${hiddenMismatchCount} unnamed param${hiddenMismatchCount === 1 ? '' : 's'} normally hidden by "Only named parameters"). `
+                            : 'Show only differing rows. ') +
+                        `Underneath, at the raw byte level, ` +
+                        `${result.totalBytes - result.totalDiffering}/${result.totalBytes} ` +
+                        `bytes of the parameter memory segment match (a separate, larger ` +
+                        `scope - includes unmapped/padding bytes ETS itself rarely writes ` +
+                        `to, so a mismatch there alone usually isn't meaningful the way a ` +
+                        `named-row mismatch above is).`
                       }
                     >
                       <Badge
@@ -443,41 +480,54 @@ export function DeviceCompareResults({
                       text to also account for Object 3 wasn't worth
                       keeping. The disambiguating explanation still lives in
                       each badge's own `title` tooltip above. */}
+                  {/* A third, always-present "All" chip (added 2026-08-29,
+                      explicit request) so both matched and differing rows can
+                      be viewed together without a click-to-toggle dance -
+                      previously the ONLY way back to the unfiltered view was
+                      re-clicking whichever colored badge was already active,
+                      which isn't discoverable as a "show everything" action
+                      in its own right. Deliberately doesn't touch `onlyNamed`
+                      - that's a separate filter axis (named vs. unnamed rows,
+                      not match vs. differ - see the discussion above this
+                      component) and this chip's whole point is to combine
+                      match state only, not every filter on the page. */}
+                  {decoded.length > 0 && (
+                    <button
+                      type="button"
+                      className={`${styles.filterChipBtn} ${rowFilter === 'all' ? styles.filterChipBtnActive : ''}`}
+                      style={{ '--chip-ring': 'var(--dim)' } as React.CSSProperties}
+                      onClick={() => setRowFilter('all')}
+                      title={
+                        (rowFilter === 'all'
+                          ? 'Showing every row — matched and differing together. '
+                          : 'Show every row — matched and differing together, in one view. ') +
+                        '(Doesn\'t change the "Only named parameters" filter below - ' +
+                        'that\'s a separate axis.)'
+                      }
+                    >
+                      <Badge label="All" color="var(--dim)" />
+                    </button>
+                  )}
                 </div>
               )}
-              <div className={styles.summaryGroup}>
-                {decoded ? (
-                  <button
-                    type="button"
-                    className={`${styles.filterChipBtn} ${rowFilter === 'all' ? styles.filterChipBtnActive : ''}`}
-                    style={{ '--chip-ring': 'var(--dim)' } as React.CSSProperties}
-                    onClick={() => setRowFilter('all')}
-                    title={
-                      'This count is the raw byte-level comparison across the full ' +
-                      `${result.totalBytes}-byte parameter memory segment, including ` +
-                      'padding/reserved bytes not tied to any named parameter - a ' +
-                      'different (larger) scope than the match/differ counts to the ' +
-                      'left. Muted deliberately: ETS itself never writes to most of ' +
-                      "this padding region, so a mismatch here usually isn't " +
-                      'meaningful the way a named-parameter mismatch is.'
-                    }
-                  >
-                    <Badge
-                      label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
-                      color="var(--dim)"
-                    />
-                  </button>
-                ) : (
+              {/* The standalone "X/Y bytes match" raw-memory badge that used
+                  to sit here was removed 2026-08-29 per explicit request -
+                  once decoded rows exist, it was telling the same story as
+                  the params/GA/flags badges above (just a larger, noisier
+                  scope), so it read as a second, contradictory-sounding
+                  source of truth rather than new information. Its number and
+                  explanation now live in the match/differ badges' own
+                  tooltips instead. Only shown as its own badge when there's
+                  no decoded breakdown to fold it into at all (a device/app
+                  with no named parameters, e.g. props-only). */}
+              {(!decoded || decoded.length === 0) && (
+                <div className={styles.summaryGroup}>
                   <Badge
                     label={`${result.totalBytes - result.totalDiffering}/${result.totalBytes} bytes match`}
                     color="var(--dim)"
                   />
-                )}
-                {/* No separate "raw memory" label here (unlike the named-
-                    parameters group above) - the badge's own "bytes match"
-                    wording already says what it's counting, and the full
-                    explanation is in its tooltip. */}
-              </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -585,7 +635,7 @@ export function DeviceCompareResults({
                     <div
                       className={`${styles.sectionTitle} ${isGA || isObj3 ? styles.sectionTitleGA : ''}`}
                     >
-                      {section}
+                      {displaySectionName(section)}
                       <span className={styles.sectionCount}>{rows.length}</span>
                     </div>
                     <table className={styles.table}>
@@ -643,7 +693,6 @@ export function DeviceCompareResults({
                                 <FlagChips
                                   flags={r.obj3Expected}
                                   other={r.obj3Actual}
-                                  tooltip={r.expectedValue}
                                 />
                               ) : (
                                 <span
@@ -661,7 +710,6 @@ export function DeviceCompareResults({
                                 <FlagChips
                                   flags={r.obj3Actual}
                                   other={r.obj3Expected}
-                                  tooltip={r.actualValue ?? '—'}
                                 />
                               ) : (
                                 <span

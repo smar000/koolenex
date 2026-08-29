@@ -17,7 +17,7 @@ import {
   useVerifyCache,
   useProgrammingLog,
 } from '../contexts.ts';
-import { DeviceCompareResults } from './DeviceCompareResults.tsx';
+import { DeviceCompareResults, displaySectionName } from './DeviceCompareResults.tsx';
 import styles from './ProgrammingView.module.css';
 
 export function ProgrammingView() {
@@ -139,13 +139,75 @@ export function ProgrammingView() {
       const pid = data?.project?.id;
       const r = await api.busVerifyDevice(devAddr, pid!, deviceId);
       setVerifyResult(deviceId, r);
-      const msg = r.match
-        ? `✓ ${devAddr} — matches computed image (${r.totalBytes} bytes)`
-        : `≠ ${devAddr} — ${r.totalDiffering}/${r.totalBytes} bytes differ from computed image`;
+      // r.match now accounts for decoded rows (GA table / communication
+      // flags, i.e. Object 3) as well as raw parameter-memory bytes (see
+      // docs/knx-device-write-protocol.md Part 21, koolenex repo).
+      // `totalDiffering`/`totalBytes` are DELIBERATELY scoped to just the
+      // named-parameter memory region - GA table, Association table, and
+      // Object 3 are each read from their own separate memory address (see
+      // the `undeclaredTableMem` comment in server/routes/bus.ts) - so it's
+      // entirely possible, and not a contradiction, for parameter memory to
+      // match in full while a GA or flags row still differs. Object 3
+      // additionally reports its OWN raw byte totals (`flagsTotalBytes`/
+      // `flagsDifferingBytes`, added 2026-08-29) - quote a real "N/M bytes
+      // match" figure for it too, not just a count of differing named rows.
+      const scopes = [
+        `parameter memory ${r.totalBytes - r.totalDiffering}/${r.totalBytes} bytes match`,
+      ];
+      if (r.flagsTotalBytes !== undefined) {
+        scopes.push(
+          `communication flags ${r.flagsTotalBytes - (r.flagsDifferingBytes ?? 0)}/${r.flagsTotalBytes} bytes match`,
+        );
+      }
+      // GA links (and Object 3 itself, when its byte totals above already
+      // aren't enough to make a real mismatch obvious - e.g. bytes match but
+      // a decoded row still differs) don't have their own byte-level total
+      // at all, so name them separately rather than let a mismatch there go
+      // unmentioned just because there's no number to attach to it. Counted,
+      // not just named - a bare "Communication Flags differ" (no number)
+      // was reported as unhelpfully vague, matching the same badge wording
+      // used above the row table ("Comm Object" for Object 3's rows, "GA"
+      // for Group Addresses).
+      const sectionWord = (name: string): string =>
+        name === 'Communication Flags'
+          ? 'Comm Object'
+          : name === 'Group Addresses'
+            ? 'GA'
+            : name;
+      const mismatchCountsBySection = new Map<string, number>();
+      for (const d of r.decoded ?? []) {
+        if (d.match === false) {
+          const name = displaySectionName(d.section);
+          mismatchCountsBySection.set(
+            name,
+            (mismatchCountsBySection.get(name) ?? 0) + 1,
+          );
+        }
+      }
+      const mismatchedSections = [...mismatchCountsBySection.entries()]
+        .filter(
+          ([name]) =>
+            !(
+              name === 'Communication Flags' &&
+              r.flagsTotalBytes !== undefined &&
+              r.flagsDifferingBytes === 0
+            ),
+        )
+        .map(
+          ([name, count]) =>
+            `${count} ${sectionWord(name)}${count === 1 ? '' : 's'}`,
+        );
+      const msg =
+        `${r.match ? '✓' : '≠'} ${devAddr} — ${scopes.join('; ')}` +
+        (mismatchedSections.length ? `; ${mismatchedSections.join(', ')} differ` : '');
       addLog(`[${new Date().toLocaleTimeString()}] ${msg}`);
-      // Slide over to show the full comparison as soon as the read completes.
+      // Slide over to show the full comparison as soon as the read completes,
+      // auto-closing the log panel (per explicit request) so the slide-over
+      // isn't fighting the log for the same screen space right after it's
+      // the thing the user actually wants to look at.
       const dev = devices.find((d: any) => d.id === deviceId) ?? null;
       setSlideOverDevice(dev);
+      if (dev) setLogOpen(false);
     } catch (err: any) {
       addLog(
         `[${new Date().toLocaleTimeString()}] ✗ ${devAddr} — verify failed: ${err.message}`,
@@ -162,6 +224,7 @@ export function ProgrammingView() {
   const openComparison = (deviceId: any) => {
     const dev = devices.find((d: any) => d.id === deviceId) ?? null;
     setSlideOverDevice(dev);
+    if (dev) setLogOpen(false);
   };
 
   const programmAll = () =>

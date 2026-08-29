@@ -1253,6 +1253,12 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
     const props = [];
     let totalBytes = 0;
     let totalDiffering = 0;
+    // Object 3's own raw byte-level totals, set only when this app declares
+    // a Group Object Table region to verify - see the assignment further
+    // down for why this is tracked as a separate pair rather than folded
+    // into totalBytes/totalDiffering above.
+    let flagsTotalBytes: number | undefined;
+    let flagsDifferingBytes: number | undefined;
 
     // Read every region/property for this device inside ONE management session
     // (one Connect/Disconnect for the whole verify), instead of churning a
@@ -1499,6 +1505,19 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
         { address: object3Region.addr, length: object3Region.expected.length },
       ]);
       const actual = actualObject3 ?? Buffer.alloc(0);
+      // Object 3's own raw byte-level diff count, mirroring `totalBytes`/
+      // `totalDiffering` for the named-parameter segment - surfaced
+      // separately (`flagsTotalBytes`/`flagsDifferingBytes`) so the log line
+      // can quote a real "N/M bytes match" figure for this region too,
+      // rather than only ever reporting it as a count of differing named
+      // rows. Genuinely a different number from the per-communication-object
+      // row mismatch count below: one flag bit differing inside one row's
+      // byte still counts as the whole byte differing here.
+      flagsTotalBytes = object3Region.expected.length;
+      flagsDifferingBytes = 0;
+      for (let i = 0; i < object3Region.expected.length; i++) {
+        if (object3Region.expected[i] !== actual[i]) flagsDifferingBytes++;
+      }
       const coRows = db.all<ComObject>(
         'SELECT * FROM com_objects WHERE device_id=? ORDER BY object_number',
         [dev.id],
@@ -1572,6 +1591,9 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
       segments,
       props,
       ...(decoded ? { decoded } : {}),
+      ...(flagsTotalBytes !== undefined
+        ? { flagsTotalBytes, flagsDifferingBytes }
+        : {}),
     });
   } catch (e) {
     res

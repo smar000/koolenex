@@ -127,6 +127,22 @@ export interface DownloadExtra {
   // 07B0) - the AbsoluteSegment (MDT-style) branch above is untouched by
   // this and still only ever does a full replay.
   mode?: 'full' | 'partial';
+  // Object 3 (Group Object Table) content, computed by buildGroupObjectTable()
+  // (server/routes/knx-tables.ts). Written via the same universal "undeclared
+  // table" mechanism as gaTable/assocTable (writeUndeclaredTable, below) -
+  // unconditional write on 'full' mode, peek-and-skip-if-unchanged on
+  // 'partial' mode, matching the trigger policy already established and
+  // real-hardware-proven for GA/Association tables (docs/knx-device-write-
+  // protocol.md Part 6). This is a deliberate choice, not yet independently
+  // proven for Object 3 specifically: real ETS's own Full-Download trigger
+  // for Object 3 is only understood for one device/app (1.1.10, gated on an
+  // anomalous property-27 checksum - Part 8/§10.3); 1.1.9 writes it
+  // unconditionally on every Full Download tested, with no known mechanism
+  // to predict when it wouldn't. Always writing on 'full' mode matches the
+  // *safer* of the two observed real behaviors (never skips when uncertain)
+  // rather than trying to replicate the checksum-based skip - a deliberately
+  // conservative choice pending real-hardware validation of this exact path.
+  groupObjectTable?: Buffer | null;
 }
 
 // ── Device info type ───────────────────────────────────────────────────────────
@@ -1153,10 +1169,21 @@ export class KnxConnection extends EventEmitter {
       // `true`) is used unconditionally here since every real example of an
       // actual GA/Association table write observed is a Full Download; not
       // proven for what a real Partial variant would look like.
+      //
+      // FIXED 2026-08-29 (later same day): `LoadImageProp` used to count as
+      // "the model already handles this object" here, alongside genuine
+      // `WriteRelMem` declarations - but the LoadImageProp case above
+      // confirms it's read-only for EVERY objIdx real ETS has ever declared
+      // it for, never a real write. 1.1.10's app declares LoadImageProp for
+      // objIdx 1/2/3 (GA/Assoc/Group Object Table) as well as 4 - under the
+      // old logic this incorrectly suppressed the real undeclared-table
+      // write for all three, a latent bug never caught because that path
+      // was only ever validated against real ETS's own captures, never
+      // exercised end-to-end through koolenex's own write path for 1.1.10.
+      // Only a genuine `WriteRelMem` declaration (a real content write)
+      // should count as "already handled".
       const declaredTableObjIdxs = new Set(
-        steps
-          .filter((s) => s.type === 'WriteRelMem' || s.type === 'LoadImageProp')
-          .map((s) => s.objIdx),
+        steps.filter((s) => s.type === 'WriteRelMem').map((s) => s.objIdx),
       );
       const writeUndeclaredTable = async (
         objIdx: number,
@@ -1245,6 +1272,19 @@ export class KnxConnection extends EventEmitter {
       }
       if (assocTable && assocTable.length && !declaredTableObjIdxs.has(2)) {
         await writeUndeclaredTable(2, assocTable, 'Association table');
+      }
+      // Object 3 (Group Object Table) - same universal, undeclared-table
+      // mechanism as GA/Association above. See DownloadExtra.groupObjectTable's
+      // own doc comment for the write-trigger policy and its caveats (not yet
+      // independently proven on real hardware for this specific object -
+      // the GA/Assoc precedent this borrows from IS real-hardware-proven,
+      // Object 3 itself is not, as of this writing).
+      if (
+        extra?.groupObjectTable &&
+        extra.groupObjectTable.length &&
+        !declaredTableObjIdxs.has(3)
+      ) {
+        await writeUndeclaredTable(3, extra.groupObjectTable, 'Group Object Table');
       }
 
       // Real ETS ends a RelSegment-driven download with a device Restart

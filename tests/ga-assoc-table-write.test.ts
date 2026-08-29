@@ -164,7 +164,18 @@ describe('GA table / Association table write fallback for apps that don\'t decla
     }
   });
 
-  it('does not duplicate the write when the model already declares LoadImageProp for objIdx 1/2 (1.1.10\'s real shape)', async () => {
+  it('still runs the real write when the model only declares (read-only) LoadImageProp for objIdx 1/2 (1.1.10\'s real shape) - corrected 2026-08-29', async () => {
+    // Was previously asserted the other way (fallback suppressed) under the
+    // wrong assumption that a declared LoadImageProp step meant "this object
+    // already handled". Confirmed 2026-08-29 against 3 independent real
+    // downloads of 1.1.10 that LoadImageProp is read-only for every objIdx -
+    // it never performs the real content write. Suppressing the fallback for
+    // a LoadImageProp-only declaration was therefore a latent bug: it meant
+    // koolenex never actually wrote the GA/Association table content for an
+    // app shaped like 1.1.10's either (silently, like the 1.1.9 case this
+    // whole fallback exists to fix). Only a genuine WriteRelMem declaration
+    // (a real content write) should count as "already handled" - see
+    // knx-connection.ts's declaredTableObjIdxs.
     const backing = Buffer.alloc(0x10000);
     const dev = new TableFakeDevice('1.1.10', backing, { 1: 0x4000, 2: 0x470a });
     const steps: DownloadStep[] = [
@@ -174,10 +185,20 @@ describe('GA table / Association table write fallback for apps that don\'t decla
 
     await dev.downloadDevice('1.1.10', steps, gaTable, assocTable, null, undefined, {});
 
-    // The fallback must not also run a RelSegment-style load for these -
-    // no Unload/StartLoad/LoadData events at all for objIdx 1/2, since
-    // LoadImageProp already handled them via a plain PropertyValue_Write.
-    assert.equal(dev.lsmEvents.filter((e) => e.objIdx === 1 || e.objIdx === 2).length, 0);
+    assert.deepEqual(
+      [...dev.memory.subarray(0x4000, 0x4000 + gaTable.length)],
+      [...gaTable],
+      'GA table should land at its resolved base despite the declared LoadImageProp step',
+    );
+    assert.deepEqual(
+      [...dev.memory.subarray(0x470a, 0x470a + assocTable.length)],
+      [...assocTable],
+      'Association table should land at its resolved base despite the declared LoadImageProp step',
+    );
+    for (const objIdx of [1, 2]) {
+      const events = dev.lsmEvents.filter((e) => e.objIdx === objIdx).map((e) => e.event);
+      assert.deepEqual(events, [0x04, 0x01, 0x03, 0x02], `objIdx ${objIdx} should Unload/StartLoad/LoadData/LoadCompleted`);
+    }
   });
 
   it('skips a table gracefully when its PID_TABLE_REFERENCE is unallocated (0x00000000)', async () => {

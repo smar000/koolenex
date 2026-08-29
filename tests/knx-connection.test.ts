@@ -507,10 +507,21 @@ describe('KnxConnection.downloadDevice', () => {
       );
     }
 
-    // Separately: prove a supplied gaTable is genuinely NOT what gets sent
-    // for objIdx1 - the actual old (buggy) behavior this replaces. Declared
-    // alone (not alongside objIdx2), so the GA-table-synthesis fallback
-    // above doesn't apply (objIdx1 IS declared, just via LoadImageProp).
+    // Separately: prove LoadImageProp itself never fabricates a property-27
+    // content write for a supplied gaTable - it stays genuinely read-only.
+    // (Corrected 2026-08-29: a declared LoadImageProp step no longer
+    // suppresses the separate undeclared-table fallback - see
+    // declaredTableObjIdxs in knx-connection.ts and
+    // ga-assoc-table-write.test.ts - so with a real gaTable supplied here,
+    // that fallback now correctly fires and writes it via its own
+    // Unload/StartLoading/LoadData/Memory_Write/LoadCompleted cycle, which
+    // includes PID_LOAD_STATE_CONTROL (property 5) PropertyValue_Write
+    // frames. Those are a different mechanism from what this test is
+    // checking, so the matcher below is narrowed to property 27
+    // specifically - the only signature a LoadImageProp-driven content
+    // write could plausibly use.)
+    const hasProp27Write = (cemi: Buffer): boolean =>
+      hasPropWrite(cemi) && parseCEMI(cemi)!.apdu[3] === 27;
     const conn2 = new TestKnxConnection();
     conn2.connected = true;
     conn2.localAddr = '1.0.1';
@@ -523,7 +534,11 @@ describe('KnxConnection.downloadDevice', () => {
       null,
       () => {},
     );
-    assert.equal(conn2.sent.filter(hasPropWrite).length, 0, 'must not write the supplied gaTable');
+    assert.equal(
+      conn2.sent.filter(hasProp27Write).length,
+      0,
+      'LoadImageProp must not itself write the supplied gaTable via a property-27 PropertyValue_Write',
+    );
   });
 
   it('WriteProp trims propId=27 data to its real 8-byte element size', async () => {

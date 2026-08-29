@@ -1012,6 +1012,13 @@ function buildDeviceProgramming(dev: Device): DeviceProgramming {
   };
 }
 
+// Test-only export alias (matches the existing convention elsewhere in this
+// project, e.g. knx-cemi.ts's `_apduPropertyValueWrite`) - lets a script
+// compute a device's real download artifacts (including Object 3) directly
+// against a real imported project, without needing a live bus connection or
+// going through the write-triggering /bus/program-device route at all.
+export const _buildDeviceProgramming = buildDeviceProgramming;
+
 // Full (or, since 2026-08-29, partial) application download for a device.
 // mode defaults to 'full' - the original, only-ever-tested behavior, kept
 // as the default so existing callers/tests see zero change. mode='partial'

@@ -24,8 +24,10 @@ const upload = multer({
   limits: { fileSize: MAX_UPLOAD_BYTES },
 });
 
-// Shared insert logic used by both import and reimport
-function insertParsedData(
+// Shared insert logic used by both import and reimport. Exported (test-only
+// convention, matching e.g. knx-cemi.ts's `_apduPropertyValueWrite`) so a
+// script can drive a real parse+insert without going through Express/multer.
+export function insertParsedData(
   run: (sql: string, params?: unknown[]) => RunResult,
   pid: number,
   parsed: ParsedProject,

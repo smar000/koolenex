@@ -259,6 +259,50 @@ Priority's `System` value (inferred by pattern, no object available to test it d
 the structure holds on a non-System-B mask family (untested, as with everything else in this
 project).
 
+## Part 8: closing out the byte - bit 2 (GA-link correlation) and a blind multi-change test
+
+Immediately after Part 7's cross-app confirmation, user asked the practical follow-on question:
+"what is left with Object 3 that prevents us writing it?" Answer at the time included two real
+unmapped bits (2 and 5 - though 5 was already Read-On-Init from day one, just not re-verified
+with the newer blind-prediction rigor) and the untested question of whether disabling
+Communication on an object shifts other objects' offsets.
+
+**A useful accident**: sanity-checking the offset formula against object 5 (a real, already-
+linked communication object, picked by the user specifically to test a different DPT/size - 8
+bytes, `DPST-19-1`) before running any new capture turned up a live discrepancy: the predicted
+manufacturer-default byte (`0x4B`) didn't match the real captured value (`0x4F`) - a difference of
+exactly bit 2, one of the two bits previously marked unmapped. Checking the live project data
+showed object 5 has a real GA link, while every other object tested until then (6, 7, 96) did not
+- a real, testable hypothesis that bit 2 tracks link presence, not a coincidence.
+
+**Test 1** (user requested, blind): toggled Read-On-Init on object 5, asked me to determine what
+changed from the capture alone. Offset 10 (`2×5`) went `0x4F`→`0x6F`, XOR `0x20` = bit 5 - Read-
+On-Init, independently reconfirmed on a third object with a different DPT/size, exactly as
+predicted before being told the answer.
+
+**Test 2** (user requested, blind, explicitly to test whether the methodology handles multiple
+simultaneous changes): user reverted object 5's Read-On-Init AND removed communication object 8's
+only GA link, in the same download, without saying so in advance. Correctly decoded both from the
+capture alone: offset 10 reverted to `0x4F` (Read-On-Init back off); offset 16 (`2×8`) went
+`0x4F`→`0x4B` (bit 2 cleared) - and, decisively, the GA table shrank from 6 to 4 bytes and the
+Association table from 10 to 6 bytes, both losing exactly the entry for object 8's link, in the
+same download. Two unrelated changes on two different objects, both correctly isolated with zero
+cross-contamination.
+
+**Scope, per explicit user instruction**: bit 2 is documented as a real, reproduced *correlation*
+with GA-link presence - confirmed both directions (present→absent via a real removal, and
+consistently present/absent across three other objects) - but explicitly NOT asserted to be
+*only* that. Every test so far varied exactly one thing (link existing or not); a distinguishing
+factor that happens to ride along with link presence in every case tested (link count, which
+specific GA, object direction/DPT, or an ETS-internal derived value) has not been ruled out. See
+reference doc §10.1 for the exact wording used there, worth keeping consistent if this is cited
+elsewhere.
+
+**Result**: every bit in the byte now has an observed role - `7=Update, 6=Transmit,
+5=Read-On-Init, 4=Write, 3=Read, 2=GA-link (correlational), 1:0=Priority`. Combined with the
+Communication-flag negative result (Part 7), this is now a complete, evidenced picture of the
+byte, with one item (bit 2's exact mechanism) explicitly flagged as narrower than it might look.
+
 ## Still open, after Part 6's redo
 
 - ~~1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo~~ -
@@ -270,10 +314,12 @@ project).
   directly apply. Real next step: an out-of-band tamper test on 1.1.9 checking for a different
   anomalous-read signal, and hunting for any genuinely untampered 1.1.9 session that skips
   Object 3 (none found yet, in 5 real captures).
-- ~~The general Object 3 record layout~~ - **RESOLVED, see Part 7 above**: a complete, computable
-  formula (`offset = 2 × com-object number`) and bit map for four of six flags, cross-confirmed
-  on two objects and two devices/apps. Still open within this: bits 2/5 (always `0`, unconfirmed
-  reserved), and Priority's `System` value (inferred by pattern only).
+- ~~The general Object 3 record layout~~ - **RESOLVED, see Parts 7-8 above**: a complete,
+  computable formula (`offset = 2 × com-object number`) and a full bit map, cross-confirmed on
+  three objects and two devices/apps. Still open within this: bit 2's exact mechanism (confirmed
+  correlation with GA-link presence, not proven to be *only* that - Part 8); Priority's `System`
+  value (inferred by pattern only); whether disabling Communication on one object shifts other
+  objects' offsets (untested - every test so far only checked the changed object's own bytes).
 - Whether the checksum-trigger mechanism (Part 6, reference doc Part 8) generalizes beyond
   1.1.10's app.
 - Whether the partial-download GA/Association-table skip logic (Part 11) generalizes beyond this

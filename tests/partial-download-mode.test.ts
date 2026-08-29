@@ -26,15 +26,27 @@ import type { DownloadStep } from '../server/knx-connection.ts';
  * Answers DeviceDescriptor_Read (System B, 0x07B0 - matches 1.1.9/1.1.10,
  * the only real devices this project has tested), Authorize_Request,
  * PropertyValue_Write (LSM/load-state transitions - always accepted, no
- * real state machine simulated), Memory_Read/MemoryExtended_Read (answers
- * from its own backing buffer - this is what makes the partial-mode
- * skip-if-unchanged check exercisable), and Memory_Write/MemoryExtended_Write
- * (applies to its own backing buffer, so the buffer's state after a
- * downloadDevice() call reflects exactly what was actually written).
+ * real state machine simulated), PropertyValue_Read (from a configurable
+ * per-objIdx/propId property store - added 2026-08-29 alongside Object 3's
+ * computeGroupObjectByte()/buildGroupObjectTable() so a future test can
+ * simulate a real PID_TABLE_REFERENCE/property-27 round trip for objIdx 3
+ * without needing this plumbing built from scratch; no downloadDevice()
+ * code writes objIdx 3 yet, so nothing exercises this today - see
+ * docs/knx-device-write-protocol.md §10.1), Memory_Read/MemoryExtended_Read
+ * (answers from its own backing buffer - this is what makes the
+ * partial-mode skip-if-unchanged check exercisable), and Memory_Write/
+ * MemoryExtended_Write (applies to its own backing buffer, so the buffer's
+ * state after a downloadDevice() call reflects exactly what was actually
+ * written).
  */
 class FakeRWMemoryDevice extends KnxConnection {
   sent: Buffer[] = [];
   memory: Buffer;
+  /** objIdx:propId -> response data. Unconfigured reads get NO response at
+   * all (matches real device behavior for e.g. an unallocated
+   * PID_TABLE_REFERENCE, per writeUndeclaredTable()'s own "unallocated -
+   * skipping write" handling) rather than an empty/zero value. */
+  properties = new Map<string, Buffer>();
   private readonly deviceAddr: string;
   constructor(deviceAddr: string, memory: Buffer) {
     super();
@@ -42,6 +54,11 @@ class FakeRWMemoryDevice extends KnxConnection {
     this.memory = memory;
     this.connected = true;
     this.localAddr = '1.0.1';
+  }
+
+  /** Configure this fake device to answer a PropertyValue_Read for (objIdx, propId) with `data`. */
+  setProperty(objIdx: number, propId: number, data: Buffer): void {
+    this.properties.set(`${objIdx}:${propId}`, data);
   }
 
   private reply(respApdu: Buffer): void {
@@ -74,6 +91,28 @@ class FakeRWMemoryDevice extends KnxConnection {
       // downloadDevice() only awaits *a* response, doesn't decode this one.
       const word = (TPCI.DATA_CONNECTED << 10) | 0x3d5;
       this.reply(Buffer.from([(word >> 8) & 0xff, word & 0xff, 0, 0, 0]));
+      return Promise.resolve();
+    }
+    // PropertyValue_Read (0x3D5) - answered from `this.properties`, set via
+    // setProperty(). No response at all if unconfigured (see the field's
+    // own comment) - propRead() in knx-connection.ts treats that as "no
+    // response received" and returns null, same as real hardware would for
+    // an unallocated/unanswered property.
+    if (fullApci === 0x3d5) {
+      const objIdx = frame.apduData[0]!;
+      const propId = frame.apduData[1]!;
+      const meta = frame.apduData.subarray(2, 4);
+      const data = this.properties.get(`${objIdx}:${propId}`);
+      if (data) {
+        const word = ((TPCI.DATA_CONNECTED << 10) | APCI_EXT.PropertyValue_Response) & 0xffff;
+        this.reply(
+          Buffer.concat([
+            Buffer.from([(word >> 8) & 0xff, word & 0xff, objIdx, propId]),
+            meta,
+            data,
+          ]),
+        );
+      }
       return Promise.resolve();
     }
 
@@ -247,5 +286,56 @@ describe("downloadDevice() mode='partial' (2026-08-29)", () => {
 
     assert.ok(dev.writeCount() > 0, 'full mode must always write, even if the device already matches');
     assert.deepEqual(dev.loadDataModeBytes(), [0x01], 'a combined (full+par) RelSegment declaration must still produce mode=Full (0x01) unchanged in full mode');
+  });
+});
+
+describe('FakeRWMemoryDevice.setProperty() - PropertyValue_Read support (2026-08-29)', () => {
+  // Exercises writeUndeclaredTable()'s real PID_TABLE_REFERENCE (property 7)
+  // resolution for objIdx 1 (the GA table) - a code path no test in this
+  // project could reach before, since no prior fake device answered
+  // PropertyValue_Read at all. Added alongside Object 3's
+  // computeGroupObjectByte()/buildGroupObjectTable() so this plumbing exists
+  // when a future test needs to simulate objIdx 3's own PID 7/property-27
+  // round trip - not exercised by that new code yet, since no
+  // downloadDevice() path writes objIdx 3.
+  const GA_TABLE_BASE = 0x4000;
+
+  it('resolves the real base via a configured property and writes the GA table there (full mode)', async () => {
+    const gaTable = Buffer.from('000249014905', 'hex'); // [count=2][9/1/1][9/1/5]
+    const backing = Buffer.alloc(0x10000);
+    const dev = new FakeRWMemoryDevice('1.1.9', backing);
+    dev.setProperty(1, 7, Buffer.from([0x00, 0x00, 0x40, 0x00])); // PID_TABLE_REFERENCE -> 0x4000
+
+    await dev.downloadDevice('1.1.9', [], gaTable, null, null, undefined, {});
+
+    assert.deepEqual(
+      [...dev.memory.subarray(GA_TABLE_BASE, GA_TABLE_BASE + gaTable.length)],
+      [...gaTable],
+      'the GA table should land at the address resolved from the configured PID 7 property',
+    );
+  });
+
+  it('an unconfigured property (no PropertyValue_Response at all) is treated as unallocated - no write attempted', async () => {
+    const gaTable = Buffer.from('000249014905', 'hex');
+    const backing = Buffer.alloc(0x10000);
+    const dev = new FakeRWMemoryDevice('1.1.9', backing);
+    // No setProperty() call - PID 7 goes unanswered, matching a real
+    // device reporting an unallocated segment.
+
+    await dev.downloadDevice('1.1.9', [], gaTable, null, null, undefined, {});
+
+    assert.equal(dev.writeCount(), 0, 'no write should be attempted when the base can\'t be resolved');
+  });
+
+  it('partial mode: skips the GA table write entirely when the device already matches at the resolved base', async () => {
+    const gaTable = Buffer.from('000249014905', 'hex');
+    const backing = Buffer.alloc(0x10000);
+    gaTable.copy(backing, GA_TABLE_BASE); // device already holds the target content
+    const dev = new FakeRWMemoryDevice('1.1.9', backing);
+    dev.setProperty(1, 7, Buffer.from([0x00, 0x00, 0x40, 0x00]));
+
+    await dev.downloadDevice('1.1.9', [], gaTable, null, null, undefined, { mode: 'partial' });
+
+    assert.equal(dev.writeCount(), 0, 'partial mode should skip the whole cycle when content already matches');
   });
 });

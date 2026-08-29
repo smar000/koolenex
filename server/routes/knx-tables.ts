@@ -272,6 +272,84 @@ export function decodeAssocTable(
   return out;
 }
 
+// Object 3 (KNX standard type 9, "Group Object Table") per-communication-object flag byte.
+// Full record layout decoded via a systematic real-hardware bit-mapping session (2026-08-29,
+// System B mask family only) - see docs/knx-device-write-protocol.md §10.1 for the full evidence
+// trail (every bit independently confirmed, reproduced, and cross-checked on a second object, a
+// third object with a different DPT/size, and a second device/app entirely, blind).
+//
+//   byte offset within the table = 2 × communication-object number (confirmed not to reindex
+//   when objects are disabled/unlinked elsewhere in the app - §10.1)
+//
+//   bit 7 = Update flag
+//   bit 6 = Transmit flag
+//   bit 5 = Read-On-Init flag
+//   bit 4 = Write flag
+//   bit 3 = Read flag
+//   bit 2 = Communication flag AND has at least one real GA link - BOTH required (§10.1; a real
+//           correction during this investigation - Communication alone, on an unlinked object,
+//           produces no visible effect, which is what looked like "zero representation" until
+//           retested on a linked object). Confirmed link-count-independent (1 vs 2 links, same
+//           result) and direction-independent (which link is the Send GA lives in the
+//           Association table's own entry order instead - see buildAssocTable above - not here).
+//   bits 1:0 = Priority: Low=`11`, Alarm=`10`, High=`01`, System=`00` (System not empirically
+//           confirmed - not settable from ETS at all per KNX's own documentation, so unreachable
+//           for any real project; the pattern-inferred bits are the correct value regardless)
+//
+// Untested: mask families other than System B (only System B hardware available to this
+// project throughout).
+export interface GroupObjectFlags {
+  object_number: number;
+  update?: boolean;
+  transmit?: boolean;
+  readOnInit?: boolean;
+  write?: boolean;
+  read?: boolean;
+  communication?: boolean;
+  /** Whether this communication object has at least one real GA link (see bit 2 above). */
+  linked?: boolean;
+  priority?: 'low' | 'alarm' | 'high' | 'system';
+}
+
+const GROUP_OBJECT_PRIORITY_BITS: Record<string, number> = {
+  low: 0b11,
+  alarm: 0b10,
+  high: 0b01,
+  system: 0b00,
+};
+
+/** Computes one communication object's Object-3 flag byte. See the format comment above. */
+export function computeGroupObjectByte(co: GroupObjectFlags): number {
+  let b = GROUP_OBJECT_PRIORITY_BITS[co.priority ?? 'low']!;
+  if (co.update) b |= 1 << 7;
+  if (co.transmit) b |= 1 << 6;
+  if (co.readOnInit) b |= 1 << 5;
+  if (co.write) b |= 1 << 4;
+  if (co.read) b |= 1 << 3;
+  if (co.communication && co.linked) b |= 1 << 2;
+  return b;
+}
+
+/**
+ * Builds Object 3 (Group Object Table) content: a zero-filled buffer of the device's real,
+ * per-app table size (98 bytes for 1.1.9, 942 for 1.1.10 - resolved via PID_TABLE_REFERENCE, not
+ * computed here) with each communication object's flag byte placed at `2 × object_number`.
+ * Communication objects not present in `comObjects` are left at the buffer's zero fill, matching
+ * every real device default observed (§10.1 - Object 3's content is almost entirely zero-filled).
+ */
+export function buildGroupObjectTable(
+  size: number,
+  comObjects: GroupObjectFlags[],
+): Buffer {
+  const buf = Buffer.alloc(size);
+  for (const co of comObjects) {
+    const offset = co.object_number * 2;
+    if (offset < 0 || offset >= size) continue; // out of range for this device's real table
+    buf[offset] = computeGroupObjectByte(co);
+  }
+  return buf;
+}
+
 // Test whether a numeric/string value matches an ETS when-test condition.
 export function etsTestMatch(
   val: string | number,

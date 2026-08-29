@@ -679,13 +679,11 @@ for, kept separate from "let's actually try a real write" as its own future step
   `bus.ts`'s `buildDeviceProgramming()` now builds a real `GroupObjectFlags[]` from `com_objects`
   and passes a real `groupObjectTable` through to `downloadDevice()`. What remains is purely
   real-hardware validation - see below.
-- Object 3's write itself, unlike GA/Association's (Part 6, real-hardware proven), has never been
-  independently exercised against real hardware through this code path - it inherits the GA/Assoc
-  precedent by construction (same mechanism) but isn't itself confirmed. This is now the ONLY
-  remaining gap between here and a real device write - every wiring/data gap above it is closed
-  (Parts 12-14, 17). A real dry-run comparison (Part 15, re-verified Part 17) found the
-  computation matches real captured data at 97/98 bytes (99%) after Part 17's fix, with the one
-  real diff fully explained by state drift.
+- ~~Object 3's write itself, unlike GA/Association's, has never been independently exercised
+  against real hardware through this code path~~ - **FULLY RESOLVED, see Part 18**: a surgical
+  Object-3-only real write to 1.1.9 succeeded, first attempt, verified by read-back at exact
+  byte-for-byte match (all 98 bytes). The entire Object 3 investigation - decode, wiring, data
+  availability, the mystery byte, and now real-hardware write confirmation - is complete.
 - ~~4 bytes at otherwise-unused "padding" offsets (1/7/9/11) hold real nonzero content on the
   device, specific to the app's built-in "internal clock" objects (0/3/4/5) - not reproduced by
   `buildGroupObjectTable()`, not yet explained~~ - **FULLY RESOLVED, see Part 17**: these are the
@@ -818,3 +816,71 @@ reproduces essentially the entire real buffer from real project data alone. The 
 explicitly-flagged gap for the whole Object 3 investigation remains what it always was: only
 System B mask family has ever been tested, on two devices, one testbed - not resolvable without
 different hardware.
+
+## Part 18: Object 3's write CONFIRMED on real hardware, first attempt
+
+Direct continuation, user-directed ("Let's proceed") after the mystery byte was solved. Last
+standing gap: Object 3's write, unlike GA/Association's, had never been independently exercised
+against real hardware through koolenex's own code path.
+
+**A scope decision made before touching real hardware**: the obvious first move was calling
+`/bus/program-device` directly, but `buildDeviceProgramming()` always builds GA table, Association
+table, AND Object 3 together for a real device - and Part 15 already identified that the live
+project currently declares a GA link for object 8 that the device doesn't have. A full
+`program-device` write would therefore silently push that GA-link change to the device too, as a
+side effect of testing Object 3 specifically - not wrong exactly (it's just applying what's
+already saved in the project), but not a clean, isolated first test. Offered the user a choice
+(`AskUserQuestion`) between the full write and a surgical Object-3-only alternative; picked the
+surgical one.
+
+**Implementation**: `downloadDevice()`'s Object 3 invocation (Part 12) only depends on
+`extra.groupObjectTable` and `declaredTableObjIdxs` (computed from `steps`) - completely
+independent of `gaTable`/`assocTable`/`paramMem`/`steps` otherwise. Confirmed by re-reading the
+function from the top: `DeviceDescriptor_Read` and `Authorize` are unconditional; the per-step
+loop simply does nothing with `steps=[]`; the GA/Assoc/Object 3 undeclared-table checks are each
+individually gated on their own buffer being non-null; `Restart` fires whenever
+`writeUndeclaredTable()` set `anyRelSegmentLoaded = true`, which it always does. So
+`downloadDevice('1.1.9', [], null, null, null, onProgress, { groupObjectTable, mode: 'full' })`
+writes ONLY Object 3, verified by reading the source before running anything real, not assumed.
+
+**A real, first-time script, closely mirroring the Part 15/17 dry-run scripts but this time doing
+a real write**: parsed the live Test Bed `.knxproj` through the real pipeline exactly as before,
+computed `groupObjectTable` via the real `_buildDeviceProgramming()`, then - new this time -
+connected a real `KnxBusManager` to the real bus (`172.16.3.150:3671`) and called the real
+`downloadDevice()`. Captured with tshark throughout, matching this whole session's standing
+practice for every real-hardware action.
+
+**Result: clean write, first attempt.** Real protocol sequence completed exactly as expected:
+`DeviceDescriptor_Read` (mask `0x07b0`, SystemB) → `Authorize` (level 0) → `Unload`/`StartLoading`/
+`LoadData`/`LoadCompleted` for objIdx 3 → `Restart` → `Download complete`. On the wire, koolenex
+chunked the 98 bytes into 10-byte `MemExtWrite` frames at base `0x00570C` (its own convention -
+real ETS itself doesn't always chunk the same way, per §1.1', both are valid).
+
+**A transient hiccup on the first read-back attempt, correctly not treated as a failure**: the
+verification step (immediately after `Restart`, same connection) failed with `Tunneling ACK
+timeout`. Recognized this as an expected, benign transient - the device is briefly unresponsive to
+new requests right after a Restart while it reloads, a real behavior this project has seen
+before (the "Restart race" finding, `docs/follow-ups/2026-08-28-write-path-missing-load-sequence.md`).
+Wrote a separate, minimal read-back-only script (deliberately NOT repeating the write - no reason
+to write twice for a transient read-side issue) and reconnected fresh a few seconds later.
+
+**Verification result: exact match, all 98 bytes.** Read `PID_TABLE_REFERENCE` (objIdx 3) fresh -
+resolved to `0x570c`, matching every prior session's finding for this device - then read the full
+98-byte region. Byte-for-byte identical to what was computed and written:
+```
+0030000000004b094b094f0c530053004f005b005b005b005b005b005b005b005b005b005b005b005b005b005b005b
+005b005b005b005b005b0000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000
+```
+(the exact same value the Part 17 dry run's `groupObjectTable` computed, and 97/98 bytes of which
+already matched the earlier real capture from Part 15/17 - this confirms the remaining computation
+is correct too, and now confirms the WRITE mechanism itself, not just the computation, works.)
+
+Capture: `docs/data/captures/2026-08-29-koolenex-first-real-object3-write-1.1.9.pcapng`.
+
+**What this closes**: the entire Object 3 investigation - decode (Part 10), write-trigger wiring
+(Part 12), data availability (Parts 13-14), the mystery byte (Parts 15-17), and now real-hardware
+write confirmation (this part) - is complete. koolenex can now compute AND write a real device's
+Object 3 content correctly, proven end to end on real hardware. The one standing, unavoidable gap
+remains what it always was: only System B mask family (both real testbed devices) has ever been
+tested - not resolvable without different hardware.

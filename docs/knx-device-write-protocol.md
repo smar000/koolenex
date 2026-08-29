@@ -119,6 +119,43 @@ field, is not confirmed; the user separately observed the physical device's own 
 "waiting up to 9 seconds" during a real restart, which is close to but not exactly the `8` in
 this response — plausible link, not confirmed identical encoding).
 
+### 1.1' Complete annotated timeline — 1.1.10 Full Download, every read and every write, one real clean session
+
+Source: `docs/data/captures/2026-08-29-ets-full-download-1.1.10-systematic-1-clean.pcapng`
+(knx-ets-manager repo) — a genuinely clean session (no project changes at all), chosen because
+1.1.10's app is the richest available: it's the only one that exercises the property-27 checksum
+mechanism (§Part 8), so this single timeline shows everything 1.1.9's sequence has *and* the
+checksum read/write cycle 1.1.9's app never touches at all (§Part 8, §10.3). 🟢 throughout, every
+row a real captured frame - request frames only shown (each has a matching response, omitted for
+readability unless its content matters).
+
+| Stage | Frame(s) | What happens |
+|---|---|---|
+| Connection churn | `Connect`→`SysNwkParamRead`→`DevDescrRead`→`Disconnect`, `IndAddrSerNumRead` (broadcast), `Connect`→`DevDescrRead`→`Disconnect`, `Connect`→`DevDescrRead` | Several short-lived connections and device-identity checks before the real session starts, including a `DevDescrRead` seen twice in immediate succession, and (only in this specific capture) a defensive `RestartReq` mid-churn — see §1.1 Stage 0 for the same pattern on 1.1.9 |
+| Identity reads | `PropValueRead OX=0 P=56`, `FuncPropExtRead OT=17 OI=1 P=51` (×2), `PropValueRead OX=0 P=11` | Static identity/status fields - none of these are content-dependent, none could reveal an out-of-band tamper |
+| `AuthReq`/`AuthResp` | `AuthReq $FFFFFFFF` → `AuthResp L=0` | §2.2 |
+| Capability probe | `PropDescrRead OX=2 P=23` → `N=1600 R=3 W=3` | Association-table capability descriptor - same single frame in every 1.1.9/1.1.10 session, Full or Partial |
+| More identity reads | `PropValueRead OX=0 P=11`, `OX=4 P=5` (state check), `OX=4 P=13` (`PID_PROGRAM_VERSION`, read here, written back verbatim later), `OX=5 P=5`, `OX=0 P=12/25/78/15` | Same shape as §1.1 Stage 1 for 1.1.9 |
+| **Checksum read** | `PropValueRead OX=3 P=27` → `$000003AE0033C327`; `PropValueRead OX=4 P=27 N=2` → `$000028C0003365E4000000010133DCBD` | **The trigger signal (§Part 8)** - both come back valid/normal in this clean session. Fires here, well before any Unload/write decision. **1.1.9's app never sends this read at all**, at any stage, in any capture (§Part 8/§10.3) |
+| Unload | `PropValueWrite OX=4/2/1 P=5 $04...` (reverse order) | Object 3 stays untouched in this session entirely - not unloaded, not reloaded, because the checksum read above came back clean |
+| StartLoading + LoadData + write: OX=4 (parameters) | `P=5 $01...` → Loading; `P=5 $030B000028C100000000` (LoadData); `PropValueRead OX=4 P=7` → base `0x0C3000`; `MemExtWrite X=$0C58C0 $01` (**1 byte**) | Only one real byte differs from what's already on the device - even on a "Full" Download, ETS only writes what's actually different (§Part 7's established finding, reconfirmed here) |
+| Property-27 recompute write (OX=4 only) | `PropValueWrite OX=4 P=27 $000028C000330000`; `PropValueWrite OX=4 P=27 X=2 $0000000101330000` | The two-step `WriteProp` sequence from §Part 7 - re-primes the checksum after the (tiny) real content write above |
+| StartLoading + LoadData + write: OX=1 (GA table) | `P=5 $01...` → Loading; `P=5 $030B0000000600000000`; `PropValueRead OX=1 P=7` → base `0x0F0000`; `MemExtWrite N=6 X=$0F0000 $00020A010A02` | GA table rewritten unconditionally, as always on Full Download (§Part 6), even though no GA link changed in this clean session |
+| StartLoading + LoadData + write: OX=2 (Association table) | `P=5 $01...` → Loading; `P=5 $030B0000000A00000000`; `PropValueRead OX=2 P=7` → base `0x0C0000`; `MemExtWrite N=10 X=$0C0000 $00020001001F00020020` | Same unconditional pattern as GA table |
+| `PID_PROGRAM_VERSION` write-back | `PropValueWrite OX=4 P=13 $0004303023` | §2.4 - identical value read back in Stage 1, written verbatim |
+| LoadCompleted | `PropValueWrite OX=4/2/1 P=5 $02...` → responses `$01` (Loaded) | Object 3 excluded - never touched this session |
+| Post-load checksum reads (`LoadImageProp`, read-only) | `PropValueRead OX=1 P=27`, `OX=2 P=27`, `OX=3 P=27` (same `$...C327` as the pre-load read - unloaded, unchanged), `OX=4 P=27 N=2` (same value as the pre-load read - confirms the tiny real write didn't change the checksum's own tracked content) | §Part 7's read-only `LoadImageProp` fact, shown for every object including the untouched Object 3 |
+| Restart | `RestartReq $0100` → `RestartResp $000000` | §1.1 Stage 6 |
+
+**What this timeline demonstrates end-to-end that no single earlier capture showed on its own**:
+the property-27 checksum read happens once, early, before any Unload decision - not interleaved
+with the write phase, not re-checked mid-session except via the read-only `LoadImageProp` calls
+at the very end (which confirm the writes didn't disturb it, not re-decide anything). Object 3 is
+completely absent from Unload/StartLoading/LoadData/write/LoadCompleted in this clean session -
+its checksum is read once at the very start and once at the very end, both times identical,
+consistent with §10.3's finding that it's excluded from the write plan entirely when the checksum
+looks clean.
+
 ### 1.2 Partial Download, decoded frame-by-frame — and the differences from Full
 
 Source: `2026-08-28-ets-2-partial-download-ntp-off-1.1.9.pcapng` and
@@ -649,15 +686,25 @@ data (which showed Object 3 written on every Full Download, tampered or not, wit
 redo isolating the variable) and the historical unreproduced 1.1.10 session from 2026-08-28 - both
 are now explained by this same mechanism.
 
-**Still open**: 1.1.9 still writes Object 3 on every Full Download tested (never yet shown *not*
-written) - not yet reconciled with 1.1.10's conditional behavior. This is a real, unexplained gap
-in the checksum theory as it stands: **1.1.9's app doesn't declare property 27 at all** (Part 7),
-so the exact same `OX=4 P=27` mechanism can't straightforwardly apply to it - either 1.1.9 uses a
-different signal ETS checks, or something about its Object 3 write path is genuinely
-unconditional rather than checksum-gated. Not investigated - the natural next test is checking
-whether 1.1.9 also gets an anomalous read of *something* after out-of-band tampering, and whether
-a genuinely untampered 1.1.9 session can ever be found that skips Object 3. Whether the
-checksum-trigger mechanism generalizes beyond 1.1.10's app is also open.
+**1.1.9 still writes Object 3 on every Full Download tested (5 for 5, never once skipped)** - not
+yet reconciled with 1.1.10's conditional behavior, but now with a specific, well-supported
+explanation rather than an open mystery: **1.1.9's app never sends the `OX=4 P=27` read, or any
+property-27 request of any kind, at any stage** - confirmed by checking every read-type frame
+(`PropValueRead`, `PropDescrRead`) across all 9 real 1.1.9 captures this project has (5 Full, 4
+Partial). The complete list of what 1.1.9's app *does* read, every session: identity/status
+fields (`OX=0 P=11/12/15/25/56/78`), an Association-table capability probe (`OX=2 P=23`),
+`PID_PROGRAM_VERSION` (`OX=4 P=13`, read back and written verbatim - not compared for anomalies),
+quick load-state checks (`OX=4/5 P=5`, Partial only), and each object's base address
+(`OX=1/2/3/4 P=7`) - none of these are content-dependent, device-computed values the way the
+checksum is; none could reveal an out-of-band write. 🟡 **INFERRED, well-supported but not a
+controlled causal test**: since ETS's own `LoadProcedures` action plan is built statically from
+the app's declared steps (Part 7's established fact - not decided dynamically at download time),
+and 1.1.9's plan simply never includes a property-27 step, ETS has no verification signal
+available for this app at all. Given that, "always write Object 3" is the sensible safe default
+when no cheap trust-verification mechanism exists - a real, coherent explanation, not a guess, but
+not proven by an experiment that isolates causation (e.g. no app has ever been found or
+constructed with property 27 declared for some objects and not others). Whether the
+checksum-trigger mechanism generalizes to other apps that *do* declare property 27 is also open.
 
 ## Part 11 — koolenex has a real Partial-Download write mode, confirmed round-trip on real hardware (NEW 2026-08-29)
 

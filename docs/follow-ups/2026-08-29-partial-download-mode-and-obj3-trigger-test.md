@@ -341,6 +341,38 @@ user's insistence on hedging language ("correlation, not proven to be only that"
 accepting the first clean-looking result is what kept this catchable and cheap to fix, rather than
 a wrong fact quietly propagating through later work.
 
+## Part 10: multi-link test, Priority=System resolved via external documentation, and a documentation cleanup request
+
+User asked to move forward with item 1's last real gap (bit 2 under multiple links) while noting
+item 2 (Priority=System) needed no further testing - they'd found KNX's own documentation
+(support.knx.org, "Group Object") confirming System priority isn't settable from ETS at all, so
+no real project can ever exercise it.
+
+**Multi-link test**: added a second GA link to communication object 5 (already linked once), with
+Communication explicitly re-enabled first (object 5's Communication had been left disabled from
+the prior correction test - re-enabling it first was necessary, otherwise bit 2 would stay pinned
+at 0 regardless of link count, telling us nothing). Result: Association table correctly showed
+both links pointing to object 5; Object 3's bit 2 was `1`, byte-for-byte identical to the
+single-link case. Confirms bit 2 is a plain boolean ("has at least one link"), not something that
+varies with link count.
+
+**Documentation cleanup, explicit user request**: after the Communication-flag correction was
+documented (with the retracted old claim kept visible in the reference doc as a "CORRECTED"
+note), user asked for the reference doc specifically to stay "clean/factual" - no need to keep
+the incorrect assertion visible there. Removed the correction-narrative paragraphs from the
+reference doc entirely (net -20 lines), keeping the full retraction narrative only in this
+follow-up doc (Part 9) where it belongs. A good instance of the same principle the reference
+doc's own intro already states - protocol facts in the reference doc, implementation/discovery
+narrative in follow-ups - now applied to a correction, not just new findings.
+
+**Property 27 cross-reference**: user pointed out Part 10's heading gave no context for "Object
+3" and asked for it to be linked back to Property 27. Clarified for the user directly (a genuine
+question, not just a docs request): property 27 is one property ID, read on four different
+interface objects (1/2/3/4) - Object 3 (objIdx 3) is one of the four, with its own checksum value
+(`PropValueRead OX=3 P=27`, visible in the §1.1' 1.1.10 timeline), same mechanism Part 8 used on
+objIdx 4 for the Full-Download trigger finding. Part 10's heading and intro now state this
+explicitly.
+
 ## Still open, after Part 6's redo
 
 - ~~1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo~~ -
@@ -352,12 +384,14 @@ a wrong fact quietly propagating through later work.
   directly apply. Real next step: an out-of-band tamper test on 1.1.9 checking for a different
   anomalous-read signal, and hunting for any genuinely untampered 1.1.9 session that skips
   Object 3 (none found yet, in 5 real captures).
-- ~~The general Object 3 record layout~~ - **RESOLVED, see Parts 7-9 above**: a complete,
+- ~~The general Object 3 record layout~~ - **RESOLVED, see Parts 7-10 above**: a complete,
   computable formula (`offset = 2 × com-object number`, confirmed not to reindex when objects are
-  disabled - Part 9) and a full bit map, cross-confirmed on three objects and two devices/apps.
-  Bit 2 = `Communication flag AND has a real GA link`, corrected in Part 9 after an earlier wrong
-  "zero representation" claim. Still open: Priority's `System` value (inferred by pattern only);
-  bit 2's behavior under more complex link configurations (multiple links, mixed directions).
+  disabled - Part 9) and a full bit map, cross-confirmed on three objects, two devices/apps, and
+  multiple GA links on the same object (Part 10). Bit 2 = `Communication flag AND has a real GA
+  link`, corrected in Part 9 after an earlier wrong "zero representation" claim, confirmed
+  link-count-independent in Part 10. ~~Priority's `System` value~~ - **resolved, non-issue**: per
+  KNX's own documentation, System priority isn't settable from ETS at all (Part 10). Still open:
+  bit 2's behavior under mixed-direction links (one send, one receive on the same object).
 - Whether the checksum-trigger mechanism (Part 6, reference doc Part 8) generalizes beyond
   1.1.10's app.
 - Whether the partial-download GA/Association-table skip logic (Part 11) generalizes beyond this

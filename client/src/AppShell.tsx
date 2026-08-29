@@ -21,6 +21,7 @@ import { Spinner, Toast, Btn } from './primitives.tsx';
 import primStyles from './primitives.module.css';
 import { buildSpaceMap, spacePath as spacePathFn } from './hooks/spaces.ts';
 import { GlobalSearch } from './search.tsx';
+import { BusConnectionPanel } from './BusConnectionPanel.tsx';
 
 import { ProjectsView } from './views/ProjectsView.tsx';
 import { TopologyView } from './views/TopologyView.tsx';
@@ -151,6 +152,25 @@ export function AppShell(props: AppShellProps) {
   const reimportRef = useRef<HTMLInputElement | null>(null);
   const [reimportPassword, setReimportPassword] = useState('');
   const lastHandledReimportRef = useRef<string | null>(null);
+
+  // Quick-connect popover on the top-bar bus status badge (2026-08-29, per
+  // explicit request) - clicking the badge (which now also actually reflects
+  // disconnection, see the busStatus render below and the WS onOpen re-sync
+  // in App.tsx) opens the same real connect UI ProjectInfoView already had,
+  // extracted into BusConnectionPanel so both places share one
+  // implementation instead of a second, thinner one.
+  const [connectPopoverOpen, setConnectPopoverOpen] = useState(false);
+  const connectPopoverRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!connectPopoverOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!connectPopoverRef.current?.contains(e.target as Node)) {
+        setConnectPopoverOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [connectPopoverOpen]);
 
   const reimportInFlight =
     state.import.mode === 'reimport' &&
@@ -386,17 +406,33 @@ export function AppShell(props: AppShellProps) {
           <GlobalSearch projectData={state.projectData} onPin={handlePin} />
         )}
         <div className={appStyles.rightArea}>
-          <div
-            className={`${appStyles.busStatus} ${state.busStatus.connected ? appStyles.busConnected : appStyles.busDisconnected}`}
-          >
-            <span
-              className={`${appStyles.busDot} ${state.busStatus.connected ? `pulse ${appStyles.busDotConnected}` : appStyles.busDotDisconnected}`}
-            />
-            {state.busStatus.connected
-              ? state.busStatus.type === 'usb'
-                ? 'USB'
-                : `${state.busStatus.host}`
-              : 'No bus'}
+          <div className={appStyles.busStatusWrap} ref={connectPopoverRef}>
+            <button
+              type="button"
+              onClick={() => setConnectPopoverOpen((o) => !o)}
+              className={`${appStyles.busStatus} ${state.busStatus.connected ? appStyles.busConnected : appStyles.busDisconnected}`}
+              title={
+                state.busStatus.connected
+                  ? 'Click to manage the bus connection'
+                  : 'Not connected — click to connect'
+              }
+            >
+              <span
+                className={`${appStyles.busDot} ${state.busStatus.connected ? `pulse ${appStyles.busDotConnected}` : appStyles.busDotDisconnected}`}
+              />
+              {state.busStatus.connected
+                ? state.busStatus.type === 'usb'
+                  ? 'USB'
+                  : `${state.busStatus.host}`
+                : 'Disconnected'}
+            </button>
+            {connectPopoverOpen && (
+              <div className={appStyles.busStatusPopover}>
+                <BusConnectionPanel
+                  onConnected={() => setConnectPopoverOpen(false)}
+                />
+              </div>
+            )}
           </div>
           <button
             onClick={() => navigate('/settings')}

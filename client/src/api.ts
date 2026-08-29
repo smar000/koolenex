@@ -418,7 +418,10 @@ export const api = {
 };
 
 // WebSocket for real-time bus updates
-export function createWS(onMessage: (data: Record<string, unknown>) => void): {
+export function createWS(
+  onMessage: (data: Record<string, unknown>) => void,
+  onOpen?: () => void,
+): {
   close: () => void;
 } {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -435,6 +438,14 @@ export function createWS(onMessage: (data: Record<string, unknown>) => void): {
 
   function connect() {
     ws = new WebSocket(`${proto}//${host}`);
+    // Real bug, fixed 2026-08-29: this had no onopen handler at all, so a
+    // reconnect (e.g. after the koolenex server restarts) never re-synced
+    // real bus status - if the physical KNX bus connection dropped or
+    // changed while the WebSocket itself was down, the client kept showing
+    // whatever `busStatus` it last had, indefinitely (the top-bar badge
+    // stuck on "connected" even while genuinely disconnected). `onOpen` lets
+    // the caller re-fetch real state on every connect, not just the first.
+    ws.onopen = () => onOpen?.();
     ws.onmessage = (e) => {
       try {
         onMessage(JSON.parse(e.data));

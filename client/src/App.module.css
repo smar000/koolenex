@@ -168,11 +168,23 @@
   gap: 8px;
   align-items: center;
 }
+/* Wraps the status badge + its quick-connect popover (2026-08-29) - the
+   badge itself is now a <button>, clickable to open BusConnectionPanel
+   without navigating away from wherever the user currently is. */
+.busStatusWrap {
+  position: relative;
+}
 .busStatus {
   display: flex;
   align-items: center;
   gap: 5px;
   font-size: 10px;
+  /* Reset <button> defaults - this used to be a plain <div>. */
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 4px 10px;
+  border-radius: 999px;
 }
 .busDot {
   width: 6px;
@@ -182,14 +194,47 @@
 .busDotConnected {
   background: var(--green);
 }
+/* A real disconnected icon (⚠, not just a dim dot) - the dot alone read as
+   "quiet/idle" rather than "something's wrong", which is exactly why a
+   stale-connected state went unnoticed before this fix. */
 .busDotDisconnected {
-  background: var(--dim);
+  background: transparent;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+}
+.busDotDisconnected::before {
+  content: '⚠';
+  font-size: 9px;
+  line-height: 1;
+  color: var(--red);
 }
 .busConnected {
   color: var(--green);
+  background: color-mix(in srgb, var(--green) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 19%, transparent);
 }
+/* Genuinely red, not the old --dim (muted gray) - a disconnected bus is a
+   real, attention-worthy state, not a quiet/idle one. Found live 2026-08-29:
+   this state also used to get stuck showing "connected" (green) after the
+   WebSocket reconnected without re-syncing real bus status - see the
+   ws.onopen re-fetch in App.tsx (createWS's onOpen callback). */
 .busDisconnected {
-  color: var(--dim);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 19%, transparent);
+}
+.busStatusPopover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  width: 280px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 4px;
 }
 .toolbarBtn {
   background: var(--surface);

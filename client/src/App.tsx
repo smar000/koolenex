@@ -177,10 +177,17 @@ export default function App() {
         dispatch({ type: 'SET_PROJECTS', projects });
       } catch {}
     })();
-    api
-      .busStatus()
-      .then((s) => dispatch({ type: 'SET_BUS', status: s }))
-      .catch(() => {});
+    // Shared by the initial boot fetch AND every WebSocket (re)connect (see
+    // createWS's onOpen below) - a reconnect used to never re-check real bus
+    // status at all, so a connection change that happened while the socket
+    // was down (e.g. the server restarting) left the UI showing stale state
+    // indefinitely. Real fix, 2026-08-29 - see [[koolenex_ui_todo]].
+    const syncBusStatus = () =>
+      api
+        .busStatus()
+        .then((s) => dispatch({ type: 'SET_BUS', status: s }))
+        .catch(() => {});
+    syncBusStatus();
 
     // WebSocket for live telegrams + bus events
     const ws = createWS((msg: Record<string, unknown>) => {
@@ -273,7 +280,7 @@ export default function App() {
           code: msg.code as string | undefined,
         });
       }
-    });
+    }, syncBusStatus);
     wsRef.current = ws;
 
     // Re-attach to an in-flight import if the user refreshed mid-parse.

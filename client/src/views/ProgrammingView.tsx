@@ -120,6 +120,14 @@ export function ProgrammingView() {
         `[${new Date().toLocaleTimeString()}] ✓ ${devAddr} — programmed`,
       );
       onDeviceStatus(deviceId, 'programmed');
+      // A successful write just changed the device's real content - the
+      // cached verify result (if any) now describes the PRE-write state and
+      // would otherwise keep showing until the user manually hits "clear
+      // cache" or re-verifies successfully. Found live: a real Program
+      // finished, but the compare page kept showing the old differences as
+      // if nothing had happened. Drop it so the page reverts to "not yet
+      // verified" rather than silently-stale data.
+      clearVerifyResult(deviceId);
     } catch (err: any) {
       clearInterval(iv);
       setProgress((p) => ({ ...p, [deviceId]: { state: 'error', pct: 0 } }));
@@ -139,6 +147,17 @@ export function ProgrammingView() {
       const pid = data?.project?.id;
       const r = await api.busVerifyDevice(devAddr, pid!, deviceId);
       setVerifyResult(deviceId, r);
+      // Real gap found live 2026-08-29: `status` (Programmed/Modified/
+      // Unassigned - the top summary badges and this button's own color)
+      // was ONLY ever set by a successful Program action, never by Verify -
+      // so a real Verify showing genuine differences left the device still
+      // reading "Programmed" (or whatever it was before), and the Modified
+      // count never populated through normal use at all. Verify now updates
+      // the same persistent status Program does, so it reflects live
+      // read-back state, not just "was this ever successfully programmed
+      // once." Deliberately does NOT touch 'unassigned' - only match/no
+      // match, not "never verified".
+      onDeviceStatus(deviceId, r.match ? 'programmed' : 'modified');
       // r.match now accounts for decoded rows (GA table / communication
       // flags, i.e. Object 3) as well as raw parameter-memory bytes (see
       // docs/knx-device-write-protocol.md Part 21, koolenex repo).
@@ -244,7 +263,11 @@ export function ProgrammingView() {
           ]}
         />
         <div className={styles.content}>
-          <div className={styles.statGrid}>
+          {/* Shrunk from a giant stat-card grid (huge numbers + label below)
+              to the app's standard small Badge pills, per explicit request
+              2026-08-29 - this row was disproportionately large next to
+              everything else on the page. */}
+          <div className={styles.statBadgeRow}>
             {[
               [
                 'Programmed',
@@ -262,15 +285,11 @@ export function ProgrammingView() {
                 STATUS_COLOR.unassigned,
               ],
             ].map(([label, count, col]) => (
-              <div key={label as string} className={styles.statCard}>
-                <div
-                  className={styles.statNumber}
-                  style={{ color: col as string }}
-                >
-                  {count}
-                </div>
-                <div className={styles.statLabel}>{label}</div>
-              </div>
+              <Badge
+                key={label as string}
+                label={`${count} ${label}`}
+                color={col as string}
+              />
             ))}
           </div>
           <table className={styles.table}>
@@ -443,13 +462,30 @@ export function ProgrammingView() {
                             programDevice(d.id, d.individual_address)
                           }
                           disabled={prog?.state === 'running'}
+                          // Light green once this device is confirmed
+                          // programmed - keyed off the PERSISTENT status
+                          // (d.status, stored server-side), not the
+                          // transient in-memory `prog` state, so it still
+                          // reads as "already programmed" after a page
+                          // reload/navigation, not just immediately after
+                          // the click that did it.
+                          color={
+                            d.status === 'programmed' && prog?.state !== 'error'
+                              ? 'var(--green)'
+                              : undefined
+                          }
+                          bg={
+                            d.status === 'programmed' && prog?.state !== 'error'
+                              ? 'color-mix(in srgb, var(--green) 12%, transparent)'
+                              : undefined
+                          }
                         >
                           {prog?.state === 'running' ? (
                             <Spinner />
-                          ) : prog?.state === 'done' ? (
-                            'Re-program'
                           ) : prog?.state === 'error' ? (
                             'Retry'
+                          ) : d.status === 'programmed' ? (
+                            '✓ Re-program'
                           ) : (
                             'Program'
                           )}

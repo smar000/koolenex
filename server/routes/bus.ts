@@ -1132,6 +1132,26 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
 // Read-only verification: compute the parameter-memory image for a device and
 // compare it against what the device actually has, reading over the bus. Writes
 // nothing — safe to run against a live installation.
+// A device is genuinely, transiently unresponsive for a few seconds right
+// after a real hardware Restart - confirmed on real hardware (Part 18/§5,
+// docs/knx-device-write-protocol.md): a Tunneling ACK timeout right after a
+// Program action, followed by a clean reconnect ~10s later with no other
+// intervention. Found live (2026-08-29): clicking Verify right after a
+// Program finished hit exactly this window and surfaced as a raw, unhelpful
+// "Tunneling ACK timeout" 500 - the route's error handling below already
+// returns a clean 502 for genuine failures, but a real transient timeout
+// deserves a retry, not an immediate failure. Scoped to this one, specific,
+// well-evidenced error message - NOT a general "retry on any bus error"
+// policy (a real ACK *error* response, e.g. `Tunneling ACK error 0x..`, is a
+// genuine protocol-level negative acknowledgement, not a timeout, and isn't
+// retried here).
+const VERIFY_TRANSIENT_RETRY_DELAY_MS = 4000;
+const VERIFY_TRANSIENT_MAX_ATTEMPTS = 3;
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+const isTransientBusTimeout = (e: unknown): boolean =>
+  e instanceof Error && e.message === 'Tunneling ACK timeout';
+
 router.post('/bus/verify-device', async (req: Request, res: Response) => {
   const b = requireBus(res);
   if (!b) return;
@@ -1154,8 +1174,48 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
       );
   if (!dev) return res.status(404).json({ error: 'Device not found' });
 
+  for (
+    let attempt = 1;
+    attempt <= VERIFY_TRANSIENT_MAX_ATTEMPTS;
+    attempt++
+  ) {
+    try {
+      await runVerifyDevice(b, dev, deviceAddress, res);
+      return;
+    } catch (e) {
+      if (
+        isTransientBusTimeout(e) &&
+        attempt < VERIFY_TRANSIENT_MAX_ATTEMPTS
+      ) {
+        logger.warn('bus', 'verify-device: transient timeout, retrying', {
+          deviceAddress,
+          attempt,
+        });
+        await sleep(VERIFY_TRANSIENT_RETRY_DELAY_MS);
+        continue;
+      }
+      res.status(502).json({ error: safeError('bus', 'Device verify failed', e) });
+      return;
+    }
+  }
+});
+
+/** The real body of `/bus/verify-device` - extracted so the route above can
+ * retry it whole on a transient timeout (§ above) without duplicating this
+ * logic. Sends the response itself (success or an "expected" 4xx) and
+ * returns normally; throws for anything the caller's retry loop should
+ * catch (a real bus-communication failure). */
+async function runVerifyDevice(
+  b: KnxBusManager,
+  dev: Device,
+  deviceAddress: string,
+  res: Response,
+): Promise<void> {
   const built = buildDeviceProgramming(dev);
-  if (!built.ok) return res.status(built.status).json(built.body);
+  if (!built.ok) {
+    res.status(built.status).json(built.body);
+    return;
+  }
   const {
     steps,
     gaTable,
@@ -1230,10 +1290,11 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
     extraObjIdxs,
   );
   if (unallocated.length) {
-    return res.status(409).json({
+    res.status(409).json({
       error: 'segment_unallocated',
       message: `Interface object(s) ${unallocated.join(', ')} report an unallocated segment (PID 7 = 0); device is not in a verifiable state.`,
     });
+    return;
   }
 
   const plan = planVerify(
@@ -1248,12 +1309,14 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
     groupObjectTable,
   );
 
-  if (plan.family === 'none' || (!plan.mem.length && !plan.props.length))
-    return res.status(400).json({
+  if (plan.family === 'none' || (!plan.mem.length && !plan.props.length)) {
+    res.status(400).json({
       error: 'nothing_to_verify',
       message:
         'Device exposes no downloadable memory image or comparable properties to verify.',
     });
+    return;
+  }
 
   try {
     const segments = [];
@@ -1603,11 +1666,14 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
         : {}),
     });
   } catch (e) {
-    res
-      .status(502)
-      .json({ error: safeError('bus', 'Device verify failed', e) });
+    // Deliberately re-thrown, not handled here - the route above owns error
+    // handling now (§ comment there), so it can retry a transient timeout
+    // instead of failing immediately. Kept as a try/catch (rather than
+    // reformatting this whole block's indentation) purely to keep this
+    // diff small; functionally equivalent to no try/catch here at all.
+    throw e;
   }
-});
+}
 
 export function setBus(b: KnxBusManager): void {
   bus = b;

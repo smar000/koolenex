@@ -119,7 +119,9 @@ export async function init(
       direction     TEXT DEFAULT 'both',
       ga_address    TEXT DEFAULT '',
       ga_send       TEXT DEFAULT '',
-      ga_receive    TEXT DEFAULT ''
+      ga_receive    TEXT DEFAULT '',
+      read_on_init  INTEGER DEFAULT 0,
+      priority      TEXT DEFAULT 'low'
     )
   `);
   // Migrations for existing databases
@@ -201,6 +203,13 @@ export async function init(
   migrate('group_addresses', 'middle_group_name', "TEXT DEFAULT ''");
   migrate('com_objects', 'channel', "TEXT DEFAULT ''");
   migrate('com_objects', 'object_size', "TEXT DEFAULT ''");
+  // Read-On-Init and Priority - added 2026-08-29 for Object 3 (Group Object
+  // Table) support (docs/knx-device-write-protocol.md §10.1, knx-tables.ts's
+  // GroupObjectFlags). read_on_init mirrors the other flag columns' boolean-
+  // as-INTEGER convention; priority mirrors bus_telegrams.priority's
+  // lowercase-string convention ('low'/'alarm'/'high'/'system').
+  migrate('com_objects', 'read_on_init', 'INTEGER DEFAULT 0');
+  migrate('com_objects', 'priority', "TEXT DEFAULT 'low'");
   migrate('devices', 'space_id', 'INTEGER');
   migrate('devices', 'parameters', "TEXT DEFAULT '[]'");
   migrate('devices', 'app_ref', "TEXT DEFAULT ''");

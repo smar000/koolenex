@@ -140,8 +140,8 @@ function insertParsedData(
     if (!devId) continue;
     run(
       `INSERT INTO com_objects
-      (project_id,device_id,object_number,channel,name,function_text,dpt,object_size,flags,direction,ga_address,ga_send,ga_receive)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (project_id,device_id,object_number,channel,name,function_text,dpt,object_size,flags,direction,ga_address,ga_send,ga_receive,read_on_init,priority)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         pid,
         devId,
@@ -156,6 +156,8 @@ function insertParsedData(
         co.ga_address || '',
         co.ga_send || '',
         co.ga_receive || '',
+        co.read_on_init ? 1 : 0,
+        co.priority || 'low',
       ],
     );
   }

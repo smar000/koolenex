@@ -25,6 +25,11 @@ import {
 } from './ets-parser.ts';
 
 // ─── Internal lookup map value types ─────────────────────────────────────────
+// Matches knx-tables.ts's GroupObjectFlags['priority'] (kept as a separate,
+// local type rather than an import to avoid coupling this parser module to
+// the Object 3 write-path code - same 4-value vocabulary, deliberately).
+type ComObjectPriority = 'low' | 'alarm' | 'high' | 'system';
+
 interface CoDef {
   num: number;
   text: string;
@@ -35,6 +40,16 @@ interface CoDef {
   write: string;
   comm: string;
   tx: string;
+  // Read-On-Init and Priority - added 2026-08-29 (koolenex knx-tables.ts's
+  // Object 3 Group Object Table needs both; neither was captured before).
+  // Real attribute names confirmed against the project's own real app XML
+  // (M-0004_A-0025-10-1BA6-O00A6.xml / M-0004_A-3030-23-F0EA-O000A.xml):
+  // ReadOnInitFlag="Enabled"/"Disabled" (same Enabled/Disabled vocabulary as
+  // the other flags), Priority="Low"/"Alarm"/"High"/"System" (System is
+  // confirmed unreachable from ETS's own UI - see docs/knx-device-write-
+  // protocol.md Part 10.1 - so real projects only ever show Low/Alarm/High).
+  readOnInit: string;
+  priority: string;
 }
 
 interface CorDef {
@@ -47,6 +62,8 @@ interface CorDef {
   write: string | null;
   comm: string | null;
   tx: string | null;
+  readOnInit: string | null;
+  priority: string | null;
 }
 
 interface ParamType {
@@ -317,6 +334,8 @@ export interface AppIndex {
     write: boolean;
     comm: boolean;
     tx: boolean;
+    readOnInit: boolean;
+    priority: ComObjectPriority;
   } | null;
   resolveParamRef: (
     refId: string,
@@ -337,6 +356,8 @@ export interface AppIndex {
     write: boolean;
     comm: boolean;
     tx: boolean;
+    readOnInit: boolean;
+    priority: ComObjectPriority;
     channel: string;
   } | null;
   buildParamModel: () => ParamModel;
@@ -346,6 +367,25 @@ export interface AppIndex {
   getDefault: (prKey: string) => string | null;
   getModArgs: (mk: string) => Record<string, string | number> | null;
   loadProcedures: LoadProcedureStep[];
+}
+
+// Normalizes a real ComObject/ComObjectRef `Priority` attribute value
+// ("Low"/"Alarm"/"High"/"System", or absent) to the lowercase vocabulary
+// used by koolenex's own Object 3 code (knx-tables.ts's GroupObjectFlags).
+// Absent/unrecognized defaults to 'low' - the real default seen throughout
+// this project's own app XML (docs/knx-device-write-protocol.md Part 10.1).
+function normalizePriority(raw: string | undefined | null): ComObjectPriority {
+  switch (raw) {
+    case 'Alarm':
+      return 'alarm';
+    case 'High':
+      return 'high';
+    case 'System':
+      return 'system';
+    case 'Low':
+    default:
+      return 'low';
+  }
 }
 
 // ─── Build per-application-program index ─────────────────────────────────────
@@ -514,6 +554,8 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
         write: attr(co, 'WriteFlag'),
         comm: attr(co, 'CommunicationFlag'),
         tx: attr(co, 'TransmitFlag'),
+        readOnInit: attr(co, 'ReadOnInitFlag'),
+        priority: attr(co, 'Priority'),
       };
     }
   }
@@ -534,6 +576,8 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
         write: attr(cor, 'WriteFlag') || null,
         comm: attr(cor, 'CommunicationFlag') || null,
         tx: attr(cor, 'TransmitFlag') || null,
+        readOnInit: attr(cor, 'ReadOnInitFlag') || null,
+        priority: attr(cor, 'Priority') || null,
       };
     }
   }
@@ -616,6 +660,8 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
       write: (cor.write ?? co.write) === 'Enabled',
       comm: (cor.comm ?? co.comm) === 'Enabled',
       tx: (cor.tx ?? co.tx) === 'Enabled',
+      readOnInit: (cor.readOnInit ?? co.readOnInit) === 'Enabled',
+      priority: normalizePriority(cor.priority ?? co.priority),
     });
 
     // Case 1: module-based "MD-{x}_M-{y}_MI-{z}_O-{a}-{b}_R-{c}"
@@ -1389,6 +1435,8 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
       write: (cor.write ?? co.write) === 'Enabled',
       comm: (cor.comm ?? co.comm) === 'Enabled',
       tx: (cor.tx ?? co.tx) === 'Enabled',
+      readOnInit: (cor.readOnInit ?? co.readOnInit) === 'Enabled',
+      priority: normalizePriority(cor.priority ?? co.priority),
       channel: '',
     };
   }

@@ -275,6 +275,10 @@ interface ParsedComObject {
   ga_address: string;
   ga_send?: string;
   ga_receive?: string;
+  // Added 2026-08-29 for Object 3 (Group Object Table) support - see
+  // ets-app.ts's CoDef/CorDef and docs/knx-device-write-protocol.md §10.1.
+  read_on_init?: boolean;
+  priority?: string;
 }
 
 interface ParsedSpace {
@@ -910,7 +914,9 @@ export function parseKnxproj(
             let read = false,
               write = false,
               comm = false,
-              tx = false;
+              tx = false,
+              readOnInit = false,
+              priority = 'low';
             // Fallback: extract base object number from O-{n} pattern in refId
             let objNum = parseInt(
               (refId.match(/(?:^|_)O-(\d+)/) || [])[1] ?? '0',
@@ -929,6 +935,8 @@ export function parseKnxproj(
                 write = resolved.write;
                 comm = resolved.comm;
                 tx = resolved.tx;
+                readOnInit = resolved.readOnInit;
+                priority = resolved.priority;
                 objNum = resolved.objectNumber ?? objNum;
               }
               // Also merge overrides from the active Dynamic tree variants
@@ -964,6 +972,8 @@ export function parseKnxproj(
               ga_address: '',
               ga_send: '',
               ga_receive: '',
+              read_on_init: readOnInit,
+              priority,
             };
 
             const coGAs: string[] = [],
@@ -1049,6 +1059,8 @@ export function parseKnxproj(
                   write: boolean;
                   comm: boolean;
                   tx: boolean;
+                  readOnInit: boolean;
+                  priority: string;
                   channel: string;
                 } | null = null;
                 let mergedChannel = '';
@@ -1084,6 +1096,8 @@ export function parseKnxproj(
                         ? 'input'
                         : 'both',
                   ga_address: '',
+                  read_on_init: merged.readOnInit,
+                  priority: merged.priority,
                 });
               } catch (e: unknown) {
                 logger.error('ets', 'CO merge error', {

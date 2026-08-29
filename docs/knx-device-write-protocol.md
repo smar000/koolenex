@@ -830,6 +830,33 @@ untouched by this and still only ever performs a full replay - no partial mode e
 Full implementation narrative, commit hash, and test coverage:
 `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`.
 
+## Part 12 — Object 3 wired into the real write path; a latent LoadImageProp bug fixed along the way (NEW 2026-08-29)
+
+`buildGroupObjectTable()` (Part 10, `server/routes/knx-tables.ts`) is now invoked from
+`downloadDevice()` itself, via the same undeclared-table mechanism GA/Association tables use
+(Part 6): `DownloadExtra.groupObjectTable` triggers a full Unload/StartLoading/LoadData/write/
+LoadCompleted cycle for objIdx 3 when the app model doesn't declare its own write step for it,
+following the same full/partial mode policy as GA/Association. 🟡 **Not yet independently proven
+on real hardware for Object 3 itself** — the GA/Assoc precedent this borrows from is
+real-hardware-proven (Part 6, Part 11); this is a best-effort extrapolation, not a controlled
+test. No caller constructs a real `groupObjectTable` yet (`bus.ts`'s `buildDeviceProgramming()`
+doesn't build one) — that's blocked separately on Read-On-Init and Priority not being captured by
+the ETS-XML parser/DB schema at all (found while investigating this wiring, not yet fixed).
+
+🟢 **A real, previously-undetected bug found and fixed in the process**: the "already declared,
+don't duplicate" check that gates the undeclared-table fallback was counting a declared
+`LoadImageProp` step as "this object already handled" — but Part 7 established `LoadImageProp` is
+read-only for every objIdx, confirmed against 3 independent real 1.1.10 downloads. For 1.1.10's
+app specifically, which declares `LoadImageProp` for objIdx 1/2/3, this silently suppressed the
+real GA/Association table write for exactly the app the whole undeclared-table mechanism (Part 6)
+was built to fix — never caught before because that mechanism had only ever been validated
+against real ETS's own captures, never exercised end-to-end through koolenex's own write path for
+1.1.10. Fixed: only a genuine `WriteRelMem` step (an actual content-write declaration) now counts
+as "already handled". All 1225 tests pass, including two existing tests whose expectations were
+built on the old wrong assumption and updated accordingly.
+
+Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 12).
+
 ## Sources
 
 - `docs/data/captures/2026-08-29-ets-*-obj3-map-*-1.1.9.pcapng` (12 captures: read/write/

@@ -400,6 +400,80 @@ but will do in due course... keep this flagged and on our ultimate to-check list
 as a standing gap in the reference doc, CLAUDE.md, and memory, not silently dropped now that
 everything else is closed.
 
+## Part 12: wiring Object 3 into the real write path, and a latent LoadImageProp bug found along the way
+
+Next step after Part 11 closed out Object 3's decode: actually invoke `buildGroupObjectTable()`
+(Part 4/7's decode, already real code with golden-image tests) from `downloadDevice()` itself,
+using the same undeclared-table mechanism Part 6/reference-doc-Part-6 built for GA/Association
+tables.
+
+**Investigation first**: checked how GA/Association data is currently sourced for a real download
+(`bus.ts`'s `buildDeviceProgramming()`, `ets-parser.ts`'s `buildFlags()`) before writing any code.
+Found a real, separate gap: the parser only captures Communication/Read/Write/Transmit/Update
+(`C`/`R`/`W`/`T`/`U`) - Read-On-Init and Priority, both needed for Object 3's byte, aren't
+extracted anywhere in the current parser or `com_objects` DB schema. This blocks actually building
+a real `groupObjectTable` from DB data for now - noted, not fixed this session (out of the
+explicit "write trigger" framing this step was scoped to). Also found, independently useful:
+`ga_send`/`ga_receive` columns in the existing schema already correctly implement "first link
+sends" - the exact rule Part 11 discovered empirically, already right in the parser without
+anyone having verified it against real hardware before today.
+
+**Implementation**: added `DownloadExtra.groupObjectTable?: Buffer | null`, and a new invocation
+right after the existing GA/Association ones:
+
+```ts
+if (
+  extra?.groupObjectTable &&
+  extra.groupObjectTable.length &&
+  !declaredTableObjIdxs.has(3)
+) {
+  await writeUndeclaredTable(3, extra.groupObjectTable, 'Group Object Table');
+}
+```
+
+**The real bug, found while doing this, not looked for**: while re-reading `declaredTableObjIdxs`
+to decide what should count as "already handled" for Object 3, noticed it was built from *both*
+`WriteRelMem` and `LoadImageProp` step types. That's wrong per Part 7's own finding - `LoadImageProp`
+is read-only for every objIdx, confirmed against 3 independent real 1.1.10 downloads, so a step
+declaring it can't possibly be "already handling" a content write. For 1.1.10's app specifically -
+which declares `LoadImageProp` for objIdx 1/2/3 - this meant the GA/Association undeclared-table
+fallback (Part 6, the whole reason this mechanism exists) was silently suppressed for 1.1.10, the
+exact same silent-no-write failure mode Part 6 fixed for 1.1.9. Never caught before because that
+fallback had only ever been validated against real ETS's own captures (comparing bytes), never
+exercised end-to-end through koolenex's own `downloadDevice()` call for 1.1.10's declared-step
+shape specifically. Fixed by filtering to only `WriteRelMem` steps:
+
+```ts
+const declaredTableObjIdxs = new Set(
+  steps.filter((s) => s.type === 'WriteRelMem').map((s) => s.objIdx),
+);
+```
+
+**Test fallout, both expected and correct**: two existing tests broke, both because they'd been
+written to assert the old (wrong) behavior directly:
+- `ga-assoc-table-write.test.ts`'s 1.1.10-shape test previously asserted the fallback was
+  suppressed when `LoadImageProp` was declared for objIdx 1/2 - updated to assert the opposite:
+  the fallback now correctly runs and lands both tables at their resolved bases.
+- `knx-connection.test.ts`'s LoadImageProp read-only test had a final check asserting *no*
+  property write happens at all when a gaTable is supplied alongside a `LoadImageProp` step for
+  objIdx 1. With the fix, the fallback now correctly fires and writes real Load State Machine
+  control writes (property 5, part of its own legitimate Unload/StartLoading/LoadData cycle) -
+  which the old broad "any property write" matcher couldn't distinguish from a hypothetical
+  LoadImageProp-driven content write. Narrowed the matcher to specifically check for a property-27
+  write (the only signature a `LoadImageProp`-driven content write could plausibly use) - the
+  actual invariant being tested (LoadImageProp itself stays read-only) is still true and still
+  covered.
+
+**Result**: typechecked clean, all 1225 tests pass (1223 unchanged + 2 updated in place).
+Committed to `test/relmem-real-device-fixtures` and pushed
+(`9eaed85 Wire Object 3 into the real write path; fix a latent LoadImageProp bug`).
+
+**Still explicitly not done**: no caller constructs a real `groupObjectTable` buffer yet (blocked
+on the Read-On-Init/Priority parser gap above) - this invocation is real, tested code with no real
+production trigger behind it yet. And Object 3's write itself, unlike GA/Association's, has never
+been exercised against real hardware through this code path - it inherits the GA/Assoc precedent's
+real-hardware proof by construction (same mechanism) but isn't itself independently confirmed.
+
 ## Still open, after Part 6's redo
 
 - ~~1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo~~ -
@@ -427,4 +501,12 @@ everything else is closed.
 - Whether the partial-download GA/Association-table skip logic (Part 11) generalizes beyond this
   one device/app - it's a best-effort extrapolation of the parameter-object pattern, now proven
   correct for 1.1.9 specifically, not proven to generalize.
+- **NEW (Part 12)**: Object 3's real write invocation exists in code and is tested, but has no
+  real production caller yet - `bus.ts`'s `buildDeviceProgramming()` doesn't construct a real
+  `groupObjectTable`, blocked on Read-On-Init and Priority not being captured anywhere in the
+  ETS-XML parser or `com_objects` DB schema. Fixing that parser/schema gap is the real next step
+  before any of this can run against a live device.
+- **NEW (Part 12)**: Object 3's write itself, unlike GA/Association's (Part 6, real-hardware
+  proven), has never been independently exercised against real hardware through this code path -
+  it inherits the GA/Assoc precedent by construction (same mechanism) but isn't itself confirmed.
 - Everything else already listed in the reference doc's Part 5.

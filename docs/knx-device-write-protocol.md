@@ -1116,25 +1116,38 @@ no existing test exercised a sub-byte parameter before this fix).
 Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
 (Part 20).
 
-## Part 21 — Object 3's flags/priority/size shown on the device compare page (NEW 2026-08-29)
+## Part 21 — Object 3's flags/priority/size shown on the device compare page, as per-flag chips (NEW/UPDATED 2026-08-29)
 
 UI follow-up to Part 19: the verify-device response already carried Object 3 comparison rows, but
-as a raw hex byte pair (`"4f 0c"`) - none of the underlying data was actually legible.
+as a raw hex byte pair (`"4f 0c"`) - none of the underlying data was actually legible. Went through
+two more iterations after real, live user feedback before settling on the current design - kept
+here as the current, correct state; the intermediate attempts (a single wrapped sentence) are in
+the follow-up doc's narrative, not repeated here.
 
-**Implementation**: new `describeGroupObjectEntry()` (`server/routes/knx-tables.ts`) formats a
-decoded entry into a human-readable line covering every bit `computeGroupObjectByte()` writes
-(Update/Transmit/Read-On-Init/Write/Read/Comm+Linked), Priority, and the real Object Size -
-`/bus/verify-device` now uses it instead of the raw byte pair. `Comm+Linked` is shown as one
-combined value, not split into "Communication"/"Linked" separately, since bit 2 itself can't
-distinguish which (if either) is false when it's clear (§10.1). The client
-(`DeviceCompareResults.tsx`) gives Object 3 rows the same distinct-section styling GA rows already
-have (own hue, reusing the existing hue-parameterized CSS) and their own tracked match/differ
-counts, composed into the summary badges alongside params and GAs (`composeCount()` generalized
-from a fixed pair to an arbitrary list). Per explicit request, the small redundant text label that
-used to sit next to the match/differ badges was removed entirely rather than extended to also
-mention Object 3.
+**Current design**: Object 3 rows show one small letter chip per boolean flag (green = set, muted
+= clear) in real ETS's own checkbox order - Communication, Read, Write, Transmit, Update, Read On
+Init (`C R W T U RI`) - not the underlying bit order. Priority/Size sit alongside as plain compact
+text. A chip gets a red ring when the project and device sides genuinely disagree on that one
+specific flag, so a single-bit difference is visible without comparing both rows letter by letter.
+The full sentence (`describeGroupObjectEntry()`, unchanged) is still available as a hover tooltip.
+Server-side, `decodeGroupObjectEntryFlags()` (`knx-tables.ts`) provides the same six bits plus
+Priority/Size as real structured booleans, not a string to re-parse - `describeGroupObjectEntry()`
+now builds its sentence from this same decode. Object 3 rows get the same distinct-section styling
+GA rows already have, and their own tracked match/differ counts composed into the summary badges
+(`composeCount()` generalized from a fixed pair to an arbitrary list). Chips are deliberately plain
+`<span>`s, not buttons yet - structured so a future click-to-edit pass can wire an `onClick`
+directly onto each chip without restructuring the display again (see the koolenex-ui-todo memory).
 
-5 new tests, all 1260 pass. Server and client both typecheck/build/lint clean.
+**A real consistency bug found live while testing this**: the top-level `match` flag (and the
+log line/UI states derived from it) was computed purely from `totalDiffering === 0` - raw
+parameter memory bytes only, since GA/Association/Object 3 are deliberately kept OUT of that scope
+(`undeclaredTableMem`'s own doc comment). A genuine Object 3 mismatch therefore left the overall
+status saying "matches computed image" while the per-row table correctly showed a real
+disagreement - a real, visible inconsistency, not a display bug. Fixed: `match` now also requires
+every decoded row (GA + Object 3) to match, not just the raw byte total.
+
+8 new tests across the whole sequence, all 1263 pass. Server and client both typecheck/build/lint
+clean throughout.
 
 ## Sources
 

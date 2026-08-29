@@ -884,3 +884,50 @@ write confirmation (this part) - is complete. koolenex can now compute AND write
 Object 3 content correctly, proven end to end on real hardware. The one standing, unavoidable gap
 remains what it always was: only System B mask family (both real testbed devices) has ever been
 tested - not resolvable without different hardware.
+
+## Part 19: `/bus/verify-device` extended to Object 3, and a third LoadImageProp bug found
+
+Direct continuation, user-directed - working through the write-path capability-status memory's
+open items in order, skipping the three hardware-generalization items (non-System-B, single
+manufacturer, AbsSegment branch, all not investigable without new hardware). This part: "the write
+is proven, but `/bus/verify-device` doesn't check Object 3 yet."
+
+**A third copy of a bug already fixed twice before**: while reading `knx-download-plan.ts`'s
+`buildGaAssocMem()` (the function `planVerify()` calls, which `/bus/verify-device` uses) to figure
+out where to add Object 3, found it still had the exact LoadImageProp bug from Part 12 - counting
+a declared `LoadImageProp` step as "already handled" when `LoadImageProp` is confirmed read-only.
+Checked why this hadn't been caught by either of the two earlier fixes: no dedicated unit tests
+existed for `planVerify()` at all before this session (only indirect HTTP-level coverage via
+`tests/bus-routes.test.ts`, and none of those tests happened to use a LoadImageProp-declaring
+app). Fixed identically to the other two copies.
+
+**Design decision on how Object 3 fits the existing GA/Association mechanism**: `gaAssocMem` (the
+`VerifyPlan` field carrying undeclared-table regions) needed a new name once it covers a third
+table - renamed to `undeclaredTableMem`, matching the write-side's own `writeUndeclaredTable()`
+terminology. Object 3's own comparison logic diverges slightly from GA/Association's: those two
+need a dynamic "read the real 2-byte count field first, then compute the real length" probe
+because their real size varies with how many GA links exist and can differ from the project's
+current assumption (Part 15's whole state-drift finding). Object 3's size doesn't have that
+problem - it's `groupObjectTableSize`, a static per-app value, already known before any read
+happens - so it gets a simpler, direct fixed-length read instead of the probe.
+
+**Decode approach**: rather than a raw byte-diff, added `decodeGroupObjectEntry()` (the inverse of
+`buildGroupObjectTable()`'s own per-object placement) so Object 3 gets the same "one named
+comparison row per communication object" treatment the GA rows already have (`co-N-obj3`, section
+"Group Object Table") - consistent UX, and immediately shows WHICH object differs rather than an
+opaque whole-buffer byte diff.
+
+**Testing, including the explicit "update the fake test devices too" reminder**: added a dedicated
+`planVerify()` test suite in `tests/knx-download-plan.test.ts` (none existed before) covering the
+new Object 3 inclusion, the LoadImageProp fix directly, a genuine `WriteRelMem` declaration
+correctly suppressing the undeclared entry, and `groupObjectTable=null` cleanly omitting Object 3
+without affecting GA/Association. Extended `tests/bus-routes.test.ts`'s `MockBus` fake device
+(already used for the earlier program-device Object 3 write test) to serve Object 3 reads via its
+existing `memImage`/`propImage` mechanism, with a clean-match test and a real mismatch test. All
+1249 tests pass (1243 + 6 new). Typechecked clean. Committed and pushed (koolenex `f2ad425`
+implementation, `b5d1657` reference doc).
+
+**What this closes**: the write-path capability status memory's "verify-device doesn't check
+Object 3" gap is resolved. Combined with Part 18's real-hardware write confirmation, Object 3 now
+has both a proven write path AND a proven (if only unit/route-tested, not yet exercised against
+real hardware) verify path.

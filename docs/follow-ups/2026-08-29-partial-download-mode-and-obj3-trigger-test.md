@@ -690,4 +690,39 @@ for, kept separate from "let's actually try a real write" as its own future step
   reproduced by `buildGroupObjectTable()`, not yet explained. A real, genuine open question - see
   Part 15's full writeup for the evidence and a possible (unconfirmed) firmware-internal-state
   theory.
+- **NEW (Part 16)**: the Part 15 mystery padding bytes do NOT respond to a Read-On-Init change on
+  the same object (confirmed by a real controlled test, 1 byte diff out of 98) - rules out "another
+  undecoded flag" for that specific flag, doesn't rule it out for others, doesn't confirm the
+  firmware-internal-state theory either. Genuinely still open.
 - Everything else already listed in the reference doc's Part 5.
+
+## Part 16: real controlled test on the mystery padding byte - one clean negative result
+
+Direct continuation, user-directed: "Let's do the ETS download. Please suggest exactly what to
+change first." Picked communication object 3 (`UhrzeitGO`, "Time – output") specifically because
+it's one of the four objects showing Part 15's unexplained padding byte, and its current real
+baseline (`0x4B` at offset 6, unlinked) was already known precisely from the Part 15 capture -
+letting the predicted outcome be stated exactly before running the test (Read-On-Init sets bit 5,
+so `0x4B | 0x20 = 0x6B`).
+
+**A process gap caught before it mattered**: initially just described the instructions to the user
+without actually starting a capture - the established pattern all session has been Claude starts
+tshark, not the user. Caught immediately when no new capture file appeared after the user said
+"done"; asked whether the download had already happened without a capture running (it had). Since
+1.1.9 writes Object 3 unconditionally on every Full Download (Part 8/CLAUDE.md's established
+finding) regardless of whether anything actually changed, no revert-and-redo was needed - just one
+more real Full Download captured, showing the already-changed state directly.
+
+**Result**: `2026-08-29-ets-full-download-obj3-mystery-byte-test-readoninit-obj3-1.1.9.pcapng`,
+`MemExtWrite N=98 X=$00570C` (same base as Part 15's capture). Diffed the full 98-byte payload
+against Part 15's capture byte-for-byte: **exactly 1 byte differs**, offset 6 (`0x4B`→`0x6B`,
+exactly the predicted Read-On-Init bit) - a clean third confirmation of the record layout (objects
+5/6/7 were the only ones directly tested before this). The mystery byte at offset 7 (`0x09`)
+stayed **byte-for-byte identical**, along with every other byte in the buffer.
+
+**What this establishes and doesn't**: rules out "the mystery byte is just another com-object flag
+we haven't mapped yet" - at least for Read-On-Init, on this object. Does NOT confirm the
+firmware-internal-state theory (Part 15) - that would need either (a) testing other flags on the
+same object to rule those out too, or (b) some other line of evidence entirely (e.g. checking
+whether the byte differs across power cycles/resets, which would be strong evidence either way).
+Kept explicitly open - one clean negative result, not a resolved question.

@@ -955,6 +955,32 @@ watching whether these specific padding bytes move in response).
 Full methodology (dry-run script, real command output, byte-level tables): `docs/follow-ups/
 2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 15).
 
+## Part 16 — Mystery padding-byte test: a real controlled experiment, one clean negative result (NEW 2026-08-29)
+
+Direct follow-up to Part 15's open question. A real, controlled single-variable test: toggled
+**Read-On-Init** (Disabled→Enabled) on communication object 3 (`UhrzeitGO`, "Time – output" - one
+of the four objects with an unexplained nonzero padding byte) and did a real Full Download to
+1.1.9, capturing before and after.
+
+🟢 **Result: exactly 1 byte differs between the two full 98-byte captures** - offset 6 (object 3's
+own flag byte) changed `0x4B` → `0x6B`, precisely the predicted `+0x20` (bit 5, Read-On-Init) -
+independent confirmation of the record layout on a third real object (previously only objects
+5/6/7 had been directly tested). **Every other byte, including the mystery padding byte right next
+to it (offset 7, `0x09`), is byte-for-byte identical before and after.**
+
+🟡 **This rules out one specific hypothesis, without yet confirming another**: the mystery byte
+does NOT respond to a Read-On-Init change on the SAME object it sits next to - ruling out "it's
+simply another com-object flag we haven't decoded yet," at least for Read-On-Init specifically.
+Combined with Part 15's finding (real, nonzero, device-side content with no representation in the
+ETS project data at all), this is one real data point *consistent with* - but not proof of - the
+firmware-internal-state theory floated in Part 15. Not yet tested: whether OTHER flags on the same
+object move it, or whether it only ever changes via some other mechanism entirely (or never
+changes at all, in which case it may be permanently fixed per-device/per-mask state, closer to a
+manufacturing constant than anything ETS-controlled).
+
+Full methodology and the real byte tables: `docs/follow-ups/2026-08-29-partial-download-mode-and-
+obj3-trigger-test.md` (Part 16).
+
 ## Sources
 
 - `docs/data/captures/2026-08-29-ets-*-obj3-map-*-1.1.9.pcapng` (12 captures: read/write/

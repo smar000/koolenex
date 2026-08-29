@@ -419,6 +419,23 @@ export function buildGroupObjectTable(
   return buf;
 }
 
+/**
+ * Reads one communication object's raw 2-byte entry back out of a real (or expected) Object 3
+ * buffer - the inverse lookup `buildGroupObjectTable()` performs, for verify/compare purposes.
+ * Returns `null` when the object's offset falls outside the buffer (never declared/allocated).
+ * Deliberately returns the raw bytes, not a re-decoded `GroupObjectFlags` - verify-device only
+ * needs to show "does this object's real bytes match what we computed", not re-derive semantic
+ * flags from them (that direction, buffer -> flags, hasn't been needed anywhere in this project).
+ */
+export function decodeGroupObjectEntry(
+  buf: Buffer,
+  objectNumber: number,
+): { flagByte: number; sizeCodeByte: number } | null {
+  const offset = objectNumber * 2;
+  if (offset < 0 || offset + 1 >= buf.length) return null;
+  return { flagByte: buf[offset]!, sizeCodeByte: buf[offset + 1]! };
+}
+
 // Test whether a numeric/string value matches an ETS when-test condition.
 export function etsTestMatch(
   val: string | number,

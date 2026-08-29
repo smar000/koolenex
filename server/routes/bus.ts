@@ -14,6 +14,7 @@ import {
   buildGroupObjectTable,
   decodeGATable,
   decodeAssocTable,
+  decodeGroupObjectEntry,
   resolveParamSegment,
   buildParamMem,
   diffMemory,
@@ -1150,6 +1151,7 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
     steps,
     gaTable,
     assocTable,
+    groupObjectTable,
     paramMem,
     paramBase,
     absSegData,
@@ -1169,18 +1171,20 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
   // an unallocated segment (a zero base would read the wrong low-memory region
   // and report a bogus all-zeros mismatch).
   //
-  // Also resolve the GA table (objIdx 1) / Association table (objIdx 2)
-  // base whenever the app's own model doesn't already declare a step for
-  // them but a table exists to compare - real ETS verifies/writes these via
-  // the same RelSegment mechanism even without an explicit declaration (see
-  // knx-download-plan.ts's `buildGaAssocMem` and knx-connection.ts's
-  // WriteRelMem case for the write-side twin of this same gap).
+  // Also resolve the GA table (objIdx 1) / Association table (objIdx 2) /
+  // Group Object Table (objIdx 3, added 2026-08-29) base whenever the app's
+  // own model doesn't already declare a step for it but a table exists to
+  // compare - real ETS verifies/writes these via the same RelSegment
+  // mechanism even without an explicit declaration (see knx-download-plan.ts's
+  // `buildUndeclaredTableMem` and knx-connection.ts's writeUndeclaredTable()
+  // for the write-side twin of this same gap).
   // Only for genuinely RelSegment-family apps (at least one real WriteRelMem
-  // step somewhere) - real ETS's GA/Association-via-RelSegment behavior has
-  // only ever been confirmed on this family (System B masks). AbsSegment
-  // (MDT-style) and prop-only devices have no such mechanism confirmed at
-  // all, and forcing a PID 7 resolve for objIdx 1/2 on those would 409 the
-  // whole verify on a genuinely unrelated/unallocated interface object.
+  // step somewhere) - real ETS's GA/Association/Object-3-via-RelSegment
+  // behavior has only ever been confirmed on this family (System B masks).
+  // AbsSegment (MDT-style) and prop-only devices have no such mechanism
+  // confirmed at all, and forcing a PID 7 resolve for objIdx 1/2/3 on those
+  // would 409 the whole verify on a genuinely unrelated/unallocated
+  // interface object.
   const isRelSegmentApp = (
     steps as Array<{ type: string; objIdx?: number }>
   ).some((s) => s.type === 'WriteRelMem');
@@ -1203,6 +1207,13 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
     extraObjIdxs.push(1);
   if (isRelSegmentApp && assocTable && assocTable.length && !declaredTableObjIdxs.has(2))
     extraObjIdxs.push(2);
+  if (
+    isRelSegmentApp &&
+    groupObjectTable &&
+    groupObjectTable.length &&
+    !declaredTableObjIdxs.has(3)
+  )
+    extraObjIdxs.push(3);
   const { bases, unallocated } = await resolveRelmemBases(
     b,
     deviceAddress,
@@ -1225,6 +1236,7 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
     absSegData,
     appId,
     bases,
+    groupObjectTable,
   );
 
   if (plan.family === 'none' || (!plan.mem.length && !plan.props.length))
@@ -1355,15 +1367,22 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
     }
 
     // Verify the GA table / Association table too, when the model didn't
-    // already declare (and get read/decoded as) an ordinary WriteRelMem/
-    // LoadImageProp step - see the `gaAssocMem` field comment in
+    // already declare (and get read/decoded as) an ordinary WriteRelMem
+    // step - see the `undeclaredTableMem` field comment in
     // knx-download-plan.ts. Surfaced as one comparison row per
     // communication object (its expected vs. actual linked GA), not raw
     // bytes - deliberately kept out of `segments`/`totalBytes` so the
     // existing "raw memory bytes match" scope (named-parameter segment
     // only) is unaffected; folded into `decoded` instead, so it shows up
     // in the same named-comparison table the frontend already renders.
-    if (plan.gaAssocMem.length) {
+    // Scoped to just gatable@/assoctable@ here - Object 3 (object3@) is
+    // handled separately below, since its real size is already known
+    // (groupObjectTableSize) rather than needing GA/Assoc's own dynamic
+    // "read the real count field first" probe.
+    const gaAssocMem = plan.undeclaredTableMem.filter(
+      (r) => r.label.startsWith('gatable@') || r.label.startsWith('assoctable@'),
+    );
+    if (gaAssocMem.length) {
       // The device's own real table can be a DIFFERENT size than the
       // project's currently-computed `expected` buffer (e.g. a GA link was
       // just removed/added in the project but never re-downloaded, or the
@@ -1377,9 +1396,9 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
       // corrupt/garbage count field driving an unbounded read.
       const countActuals = await b.readMemoryMany(
         deviceAddress,
-        plan.gaAssocMem.map((r) => ({ address: r.addr, length: 2 })),
+        gaAssocMem.map((r) => ({ address: r.addr, length: 2 })),
       );
-      const realLengths = plan.gaAssocMem.map((r, i) => {
+      const realLengths = gaAssocMem.map((r, i) => {
         const countBuf = countActuals[i];
         const realCount =
           countBuf && countBuf.length >= 2 ? countBuf.readUInt16BE(0) : 0;
@@ -1389,16 +1408,16 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
       });
       const gaAssocActuals = await b.readMemoryMany(
         deviceAddress,
-        plan.gaAssocMem.map((r, i) => ({ address: r.addr, length: realLengths[i]! })),
+        gaAssocMem.map((r, i) => ({ address: r.addr, length: realLengths[i]! })),
       );
       const coRows = db.all<ComObject>(
         'SELECT * FROM com_objects WHERE device_id=? ORDER BY object_number',
         [dev.id],
       );
-      const gaRegion = plan.gaAssocMem.find((r) => r.label.startsWith('gatable@'));
-      const assocRegion = plan.gaAssocMem.find((r) => r.label.startsWith('assoctable@'));
-      const gaIdx = gaRegion ? plan.gaAssocMem.indexOf(gaRegion) : -1;
-      const assocIdx = assocRegion ? plan.gaAssocMem.indexOf(assocRegion) : -1;
+      const gaRegion = gaAssocMem.find((r) => r.label.startsWith('gatable@'));
+      const assocRegion = gaAssocMem.find((r) => r.label.startsWith('assoctable@'));
+      const gaIdx = gaRegion ? gaAssocMem.indexOf(gaRegion) : -1;
+      const assocIdx = assocRegion ? gaAssocMem.indexOf(assocRegion) : -1;
 
       const expectedGAs = gaRegion ? decodeGATable(gaRegion.expected) : [];
       const actualGAs =
@@ -1451,6 +1470,62 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
         });
       }
       if (gaRows.length) decoded = [...(decoded ?? []), ...gaRows];
+    }
+
+    // Verify Object 3 (Group Object Table) too, when the model didn't
+    // already declare it - added 2026-08-29 alongside the real-hardware
+    // write confirmation (docs/knx-device-write-protocol.md Part 18).
+    // Unlike GA/Association, Object 3's real size is already known
+    // (`groupObjectTable.length`, computed from `maxComObjectNumber` -
+    // ets-app.ts) rather than needing a dynamic count-probe read first -
+    // it isn't a variable-length, user-editable-link-count table the way
+    // GA/Association are. One comparison row per communication object
+    // (its expected vs. actual raw flag+size-code byte pair), matching the
+    // GA rows' "named comparison, not raw bytes" convention.
+    const object3Region = plan.undeclaredTableMem.find((r) =>
+      r.label.startsWith('object3@'),
+    );
+    if (object3Region) {
+      const [actualObject3] = await b.readMemoryMany(deviceAddress, [
+        { address: object3Region.addr, length: object3Region.expected.length },
+      ]);
+      const actual = actualObject3 ?? Buffer.alloc(0);
+      const coRows = db.all<ComObject>(
+        'SELECT * FROM com_objects WHERE device_id=? ORDER BY object_number',
+        [dev.id],
+      );
+      const obj3Rows: DecodedComparison[] = [];
+      const fmtEntry = (e: { flagByte: number; sizeCodeByte: number } | null): string =>
+        e
+          ? `${e.flagByte.toString(16).padStart(2, '0')} ${e.sizeCodeByte.toString(16).padStart(2, '0')}`
+          : '(out of range)';
+      for (const co of coRows) {
+        const expectedEntry = decodeGroupObjectEntry(
+          object3Region.expected,
+          co.object_number,
+        );
+        const actualEntry = decodeGroupObjectEntry(actual, co.object_number);
+        // Nothing to show for an object with no real entry on either side
+        // (matches the GA rows' "nothing to compare = not shown" convention).
+        if (!expectedEntry && !actualEntry) continue;
+        const expectedStr = fmtEntry(expectedEntry);
+        const actualStr = fmtEntry(actualEntry);
+        obj3Rows.push({
+          key: `co-${co.object_number}-obj3`,
+          label: co.name || `CO ${co.object_number}`,
+          section: 'Group Object Table',
+          group: co.channel || '',
+          unit: '',
+          offset: co.object_number * 2,
+          bitOffset: 0,
+          bitSize: 0,
+          rawValue: '',
+          expectedValue: expectedStr,
+          actualValue: actualStr,
+          match: expectedStr === actualStr,
+        });
+      }
+      if (obj3Rows.length) decoded = [...(decoded ?? []), ...obj3Rows];
     }
 
     res.json({

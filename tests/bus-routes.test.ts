@@ -1497,3 +1497,139 @@ describe('POST /bus/program-device — builds and passes a real Object 3 (Group 
     assert.equal(extra.groupObjectTable, null);
   });
 });
+
+// ── verify-device: Object 3 (Group Object Table) fallback, added 2026-08-29
+// alongside the real-hardware write confirmation (docs/knx-device-write-
+// protocol.md Part 18) and the buildUndeclaredTableMem() LoadImageProp bug
+// fix (knx-download-plan.ts). Reuses OBJ3_APP/OBJ3_MODEL from the
+// program-device Object 3 tests above - same "fake" MockBus device, this
+// time serving reads (propImage/memImage) instead of recording a write. ──
+describe('POST /bus/verify-device — Object 3 (Group Object Table) fallback', () => {
+  let projectId: number;
+  const deviceAddr = '1.1.36';
+  const GA_BASE = 0x7400;
+  const ASSOC_BASE = 0x7500;
+  const OBJ3_BASE = 0x7600;
+  const PARAM_BASE = 0x7700;
+
+  const expectedFlags: GroupObjectFlags[] = [
+    {
+      object_number: 5,
+      update: false,
+      transmit: false,
+      readOnInit: true,
+      write: false,
+      read: true,
+      communication: true,
+      linked: true,
+      priority: 'alarm',
+    },
+    {
+      object_number: 7,
+      update: false,
+      transmit: true,
+      readOnInit: false,
+      write: true,
+      read: false,
+      communication: true,
+      linked: false,
+      priority: 'low',
+    },
+  ];
+  const expectedObj3 = buildGroupObjectTable(OBJ3_MODEL.groupObjectTableSize, expectedFlags);
+  // 4-byte param segment (OBJ3_MODEL declares size:4 via its RelSegment step).
+  const paramMem = Buffer.from([0x00, 0x00, 0x00, 0x00]);
+  const gaTable = buildGATable([{ address: '2/1/2', main_g: 2, middle_g: 1, sub_g: 2 }]);
+  const assocTable = buildAssocTable(
+    [{ object_number: 5, ga_address: '2/1/2' }],
+    [{ address: '2/1/2', main_g: 2, middle_g: 1, sub_g: 2 }],
+  );
+
+  before(() => {
+    // OBJ3_APP/OBJ3_MODEL already written by the program-device describe
+    // block above (writeModel/APPS_DIR is shared, keyed by appId).
+    ts.db.run(`INSERT INTO projects (name) VALUES ('verify-obj3')`);
+    projectId = ts.db.get<{ id: number }>(`SELECT id FROM projects WHERE name='verify-obj3'`)!.id;
+    ts.db.run(
+      `INSERT INTO devices (project_id, individual_address, name, app_ref, param_values) VALUES (?,?,?,?,?)`,
+      [projectId, deviceAddr, `dev-${deviceAddr}`, OBJ3_APP, '{}'],
+    );
+    const dev = ts.db.get<{ id: number }>(
+      'SELECT id FROM devices WHERE project_id=? AND individual_address=?',
+      [projectId, deviceAddr],
+    )!;
+    ts.db.run(
+      `INSERT OR IGNORE INTO group_addresses (project_id, address, name, main_g, middle_g, sub_g) VALUES (?,?,?,?,?,?)`,
+      [projectId, '2/1/2', '2/1/2', 2, 1, 2],
+    );
+    ts.db.run(
+      `INSERT INTO com_objects (project_id, device_id, object_number, ga_address, read_on_init, priority, read, write, comm, tx, flags) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      [projectId, dev.id, 5, '2/1/2', 1, 'alarm', 1, 0, 1, 0, 'CR'],
+    );
+    ts.db.run(
+      `INSERT INTO com_objects (project_id, device_id, object_number, ga_address, read, write, comm, tx, flags) VALUES (?,?,?,?,?,?,?,?,?)`,
+      [projectId, dev.id, 7, '', 0, 1, 1, 1, 'CWT'],
+    );
+  });
+
+  function seedReads(actualObj3: Buffer): void {
+    mockBus.propImage = new Map([
+      ['4/7', Buffer.from([0, 0, PARAM_BASE >> 8, PARAM_BASE & 0xff])],
+      ['1/7', Buffer.from([0, 0, GA_BASE >> 8, GA_BASE & 0xff])],
+      ['2/7', Buffer.from([0, 0, ASSOC_BASE >> 8, ASSOC_BASE & 0xff])],
+      ['3/7', Buffer.from([0, 0, OBJ3_BASE >> 8, OBJ3_BASE & 0xff])],
+    ]);
+    const map = new Map<number, number>();
+    for (let i = 0; i < paramMem.length; i++) map.set(PARAM_BASE + i, paramMem[i]!);
+    for (let i = 0; i < gaTable.length; i++) map.set(GA_BASE + i, gaTable[i]!);
+    for (let i = 0; i < assocTable.length; i++) map.set(ASSOC_BASE + i, assocTable[i]!);
+    for (let i = 0; i < actualObj3.length; i++) map.set(OBJ3_BASE + i, actualObj3[i]!);
+    mockBus.memImage = map;
+  }
+
+  it('adds one Object 3 comparison row per communication object when the device holds the correct table', async () => {
+    mockBus.connected = true;
+    seedReads(expectedObj3);
+    const r = await req(ts.baseUrl, 'POST', '/bus/verify-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    mockBus.propImage = null;
+    mockBus.memImage = null;
+    assert.equal(r.status, 200);
+    const body = r.data as any;
+    const obj3Rows = (body.decoded ?? []).filter(
+      (d: any) => d.section === 'Group Object Table',
+    );
+    assert.equal(obj3Rows.length, 2);
+    const byKey = new Map(obj3Rows.map((r: any) => [r.key, r]));
+    const co5 = byKey.get('co-5-obj3') as any;
+    assert.equal(co5.match, true);
+    assert.equal(co5.expectedValue, co5.actualValue);
+    const co7 = byKey.get('co-7-obj3') as any;
+    assert.equal(co7.match, true);
+    // Object 3 rows stay out of the raw-byte scope (matches GA rows' own convention).
+    assert.equal(body.totalBytes, paramMem.length);
+  });
+
+  it('flags a mismatch when the device\'s actual Object 3 content differs from the project', async () => {
+    mockBus.connected = true;
+    const corrupted = Buffer.from(expectedObj3);
+    corrupted[14] ^= 0xff; // object 7's flag byte (offset 2*7)
+    seedReads(corrupted);
+    const r = await req(ts.baseUrl, 'POST', '/bus/verify-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    mockBus.propImage = null;
+    mockBus.memImage = null;
+    assert.equal(r.status, 200);
+    const body = r.data as any;
+    const obj3Rows = (body.decoded ?? []).filter(
+      (d: any) => d.section === 'Group Object Table',
+    );
+    const byKey = new Map(obj3Rows.map((r: any) => [r.key, r]));
+    assert.equal((byKey.get('co-5-obj3') as any).match, true);
+    assert.equal((byKey.get('co-7-obj3') as any).match, false);
+  });
+});

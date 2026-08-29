@@ -462,21 +462,28 @@ export function ProgrammingView() {
                             programDevice(d.id, d.individual_address)
                           }
                           disabled={prog?.state === 'running'}
-                          // Light green once this device is confirmed
-                          // programmed - keyed off the PERSISTENT status
+                          // Colored/labeled off the PERSISTENT status
                           // (d.status, stored server-side), not the
                           // transient in-memory `prog` state, so it still
-                          // reads as "already programmed" after a page
-                          // reload/navigation, not just immediately after
-                          // the click that did it.
+                          // reads correctly after a page reload/navigation,
+                          // not just immediately after a click. Reuses
+                          // STATUS_COLOR (the same map the summary badges
+                          // use) rather than a green-only check - found
+                          // live: 'modified' devices (a real, populated
+                          // status as of the same day this button's color
+                          // was added) fell through to the exact same
+                          // plain, uncolored "Program" as a device that's
+                          // never been touched (unassigned) at all, no
+                          // visual distinction despite being materially
+                          // different states.
                           color={
-                            d.status === 'programmed' && prog?.state !== 'error'
-                              ? 'var(--green)'
+                            prog?.state !== 'error' && d.status !== 'unassigned'
+                              ? STATUS_COLOR[d.status]
                               : undefined
                           }
                           bg={
-                            d.status === 'programmed' && prog?.state !== 'error'
-                              ? 'color-mix(in srgb, var(--green) 12%, transparent)'
+                            prog?.state !== 'error' && d.status !== 'unassigned'
+                              ? `color-mix(in srgb, ${STATUS_COLOR[d.status]} 12%, transparent)`
                               : undefined
                           }
                         >
@@ -486,6 +493,8 @@ export function ProgrammingView() {
                             'Retry'
                           ) : d.status === 'programmed' ? (
                             '✓ Re-program'
+                          ) : d.status === 'modified' ? (
+                            'Re-program'
                           ) : (
                             'Program'
                           )}

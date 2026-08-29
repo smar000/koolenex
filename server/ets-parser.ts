@@ -885,7 +885,10 @@ export function parseKnxproj(
             line_name: lineName,
             medium,
             device_type: inferType(devName, prodRef, hw.model || '', hw),
-            status: attr(dev, 'LastDownload') ? 'programmed' : 'unassigned',
+            status: deriveDeviceStatus(
+              attr(dev, 'LastModified'),
+              attr(dev, 'LastDownload'),
+            ),
             last_modified: attr(dev, 'LastModified'),
             last_download: attr(dev, 'LastDownload'),
             apdu_length: attr(dev, 'LastUsedAPDULength') || '',
@@ -1236,6 +1239,40 @@ export function parseKnxproj(
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+/**
+ * A device's initial status, straight from the ETS project file itself -
+ * real evidence, 2026-08-29 (Test Bed.knxproj, live project): a
+ * `<DeviceInstance>` carries both `LastModified` and `LastDownload`
+ * timestamps, and a real device was found where `LastModified` is AFTER
+ * `LastDownload` - i.e. genuinely edited in ETS since its last download,
+ * exactly the state real ETS itself flags as needing a re-download. The
+ * previous logic (`status: LastDownload ? 'programmed' : 'unassigned'`)
+ * only checked whether a download had EVER happened, never comparing the
+ * two timestamps, so this real device was silently misclassified as
+ * 'programmed'. Both raw fields were already parsed/stored
+ * (`last_modified`/`last_download`) - just never compared until now.
+ *
+ * No LastDownload at all -> never downloaded -> 'unassigned'.
+ * LastDownload present, LastModified after it (or unparsable) -> 'modified'.
+ * LastDownload present and same or after LastModified -> 'programmed'.
+ *
+ * This is the INITIAL status only - a later Verify (see koolenex's
+ * ProgrammingView.tsx) overwrites it with live read-back state (does the
+ * device's actual content match what's expected right now), which is a
+ * different, more current signal than what the project file alone can say.
+ */
+export function deriveDeviceStatus(
+  lastModified: string,
+  lastDownload: string,
+): 'programmed' | 'modified' | 'unassigned' {
+  if (!lastDownload) return 'unassigned';
+  if (!lastModified) return 'programmed';
+  const modifiedMs = Date.parse(lastModified);
+  const downloadMs = Date.parse(lastDownload);
+  if (Number.isNaN(modifiedMs) || Number.isNaN(downloadMs)) return 'programmed';
+  return modifiedMs > downloadMs ? 'modified' : 'programmed';
+}
+
 export function inferType(
   name: string,
   productRef: string,

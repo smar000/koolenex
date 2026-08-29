@@ -318,6 +318,11 @@ in this document, cited here for completeness:
 - **Association table** (object 2): `[gaIndex:2][coNumber:2]` per entry, 1-based,
   position-referencing (not value-referencing). 🟢, same sample-size caveat. Confirmed directly
   in this session too — see the OX=2 decode in §1.1's Stage 3 table.
+- **Entry order within the Association table encodes which link is the Send GA** (2026-08-29) -
+  🟢 confirmed directly: for a communication object with multiple links, the first entry (in
+  table order, not necessarily lowest `gaIndex`) is the send link; swapping which GA sends swaps
+  the two entries' order with no other change anywhere (Object 3, the GA table itself unaffected).
+  Not a separate flag anywhere - order is the encoding.
 - Full decode logic and fixtures: `tests/relmem-real-device-fixtures.test.ts`, and
   `decodeGaTable()`/`decodeAssocTable()` in the codebase.
 
@@ -414,9 +419,11 @@ Consolidated from throughout this document, for visibility:
    Group Object Table; content fully decoded as `offset = 2 × com-object number` (confirmed not
    to reindex when objects are disabled/unlinked), with a per-object flag byte (Update=bit7,
    Transmit=bit6, Read-On-Init=bit5, Write=bit4, Read=bit3, bit2=Communication flag AND has a
-   real GA link - both required, Priority=bits1:0), cross-confirmed on a second object, a third
-   object with a different DPT/size, and a second device/app entirely (§10.1). Write trigger
-   resolved for both Partial
+   real GA link - both required, indifferent to link count or send/receive direction,
+   Priority=bits1:0), cross-confirmed on a second object, a third object with a different
+   DPT/size, a second device/app entirely, multiple links, and mixed send/receive links (§10.1;
+   link direction itself is encoded as Association-table entry order, §2.6, not in Object 3 at
+   all). Write trigger resolved for both Partial
    (§10.2, conditional on any communication-object-level change, not just GA links) and Full
    Downloads (§10.3, conditional on an anomalous `OX=4 P=27` checksum read - itself tied to
    Part 8's comprehensive-rewrite trigger). **Still open**: bit 2's exact semantics beyond the
@@ -704,8 +711,16 @@ shows bit 2 = `1`, byte-for-byte identical to the single-link case - a plain boo
 ("has at least one link"), not something that varies with link count.
 
 **Scope**: the AND-relationship (flag enabled AND link present) correctly predicts every result
-observed across all tests on three objects, one and two links. Not yet tested: mixed-direction
-links (e.g. one send, one receive on the same object), or other DPT/direction combinations.
+observed across all tests on three objects, one and two links, and mixed send/receive links (see
+below).
+
+**Link direction (Send vs receive-only) is not represented in Object 3 at all - it lives in the
+Association table's entry order instead.** 🟢 Confirmed directly: with the same two GA links on
+object 5, swapping which one is the "Send" link (ETS's own rule: the first-added link sends, the
+rest are receive-only) left Object 3 and the GA table byte-for-byte unchanged, but flipped the
+order of the two entries in the Association table (`[gaIndex 2, gaIndex 1]` → `[gaIndex 1,
+gaIndex 2]`, same two entries, same target com-object, order swapped). Object 3's bit 2 tracks
+only "has at least one link," indifferent to direction.
 
 **Complete bit accounting**: `7=Update, 6=Transmit, 5=Read-On-Init, 4=Write, 3=Read,
 2=Communication-AND-linked, 1:0=Priority`. Every bit has an observed, evidenced role.
@@ -717,8 +732,8 @@ formula `offset = 2 × communication-object number` can be used unconditionally,
 which objects are linked or Communication-enabled elsewhere in the app.
 
 **Still open**: whether the formula/layout holds for a genuinely different mask family (only
-System B tested throughout this project); whether bit 2's AND-relationship holds under
-mixed-direction links (e.g. one send, one receive on the same object).
+System B tested throughout this project - flagged as a standing gap, not investigable until
+non-System-B hardware becomes available).
 
 ### 10.2 Partial Download write-trigger: conditional on any communication-object-level change
 
@@ -840,6 +855,10 @@ Full implementation narrative, commit hash, and test coverage:
   (knx-ets-manager repo) — a second GA link added to a communication object already linked once;
   bit 2 stays a plain boolean, unaffected by link count. Primary source for §10.1's multi-link
   finding.
+- `docs/data/captures/2026-08-29-ets-partial-download-obj3-swap-send-direction-1.1.9.pcapng`
+  (knx-ets-manager repo) — swapped which of two existing GA links is the Send link; Object 3 and
+  the GA table stayed byte-for-byte unchanged, the Association table's two entries swapped order.
+  Primary source for §2.6/§10.1's link-direction finding.
 - `docs/data/captures/2026-08-28-ets-full-download-history-and-blob-params-1.1.10.pcapng`,
   cross-checked against every other saved capture (`grep -c "OX=3 P=5"` across
   `docs/data/captures/*.pcapng`), a live `PID_OBJECT_TYPE`/`PID_TABLE_REFERENCE` read via

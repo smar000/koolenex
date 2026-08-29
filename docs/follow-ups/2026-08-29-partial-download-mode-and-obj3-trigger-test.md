@@ -683,17 +683,19 @@ for, kept separate from "let's actually try a real write" as its own future step
   independently exercised against real hardware through this code path - it inherits the GA/Assoc
   precedent by construction (same mechanism) but isn't itself confirmed. This is now the ONLY
   remaining gap between here and a real device write - every wiring/data gap above it is closed
-  (Parts 12-14). A real dry-run comparison (Part 15) found the computation itself matches real
-  captured data at 93/98 bytes (95%), with the one real diff fully explained by state drift.
-- **NEW (Part 15)**: 4 bytes at otherwise-unused "padding" offsets (1/7/9/11) hold real nonzero
-  content on the device, specific to the app's built-in "internal clock" objects (0/3/4/5) - not
-  reproduced by `buildGroupObjectTable()`, not yet explained. A real, genuine open question - see
-  Part 15's full writeup for the evidence and a possible (unconfirmed) firmware-internal-state
-  theory.
-- **NEW (Part 16)**: the Part 15 mystery padding bytes do NOT respond to a Read-On-Init change on
-  the same object (confirmed by a real controlled test, 1 byte diff out of 98) - rules out "another
-  undecoded flag" for that specific flag, doesn't rule it out for others, doesn't confirm the
-  firmware-internal-state theory either. Genuinely still open.
+  (Parts 12-14, 17). A real dry-run comparison (Part 15, re-verified Part 17) found the
+  computation matches real captured data at 97/98 bytes (99%) after Part 17's fix, with the one
+  real diff fully explained by state drift.
+- ~~4 bytes at otherwise-unused "padding" offsets (1/7/9/11) hold real nonzero content on the
+  device, specific to the app's built-in "internal clock" objects (0/3/4/5) - not reproduced by
+  `buildGroupObjectTable()`, not yet explained~~ - **FULLY RESOLVED, see Part 17**: these are the
+  real KNX standard Group Object Size code (per-object) and a real table-count header (bytes 0-1),
+  confirmed by an independent cross-device test (4 for 4 DPT/size matches) and now implemented in
+  `buildGroupObjectTable()`, closing this out completely.
+- ~~The Part 16 negative result (mystery byte doesn't respond to a Read-On-Init change) left the
+  firmware-internal-state theory unconfirmed either way~~ - **RESOLVED, see Part 17**: the real
+  answer (KNX standard size code) fully explains why - it's fixed by the object's static DPT, not
+  any user-editable flag, so no flag test could ever have moved it.
 - Everything else already listed in the reference doc's Part 5.
 
 ## Part 16: real controlled test on the mystery padding byte - one clean negative result
@@ -725,4 +727,94 @@ we haven't mapped yet" - at least for Read-On-Init, on this object. Does NOT con
 firmware-internal-state theory (Part 15) - that would need either (a) testing other flags on the
 same object to rule those out too, or (b) some other line of evidence entirely (e.g. checking
 whether the byte differs across power cycles/resets, which would be strong evidence either way).
-Kept explicitly open - one clean negative result, not a resolved question.
+Kept explicitly open - one clean negative result, not a resolved question. **Solved two turns
+later - see Part 17.**
+
+## Part 17: mystery byte solved - it's the KNX standard Group Object Size code, plus a real header
+
+User asked two things in sequence, and got there directly: first, "Can you go through all the
+previous captures and see if any have changes in one of these companion bytes" - then, before the
+scan even finished, "Could it be Data Type?"
+
+**The full-history scan came first, and settled the "does it ever move, at all, under anything"
+question completely.** Extracted every full 98-byte Object 3 payload from all 28 real 1.1.9
+captures spanning the whole 2026-08-27 to 2026-08-29 investigation (every Full and Partial
+Download, every flag/GA/priority/comm edit made to any object throughout) via `tshark`'s
+`cemi.data` field, filtered to exactly 196 hex chars. Result: the 4 companion bytes at offsets
+1/7/9/11 are **byte-for-byte identical in every single one** - `0x30`/`0x09`/`0x09`/`0x0c`, no
+exceptions, across three days of real testing. (Object 8's own flag byte, by contrast, correctly
+varied across several of these captures as its GA link was added/removed during earlier tests -
+confirming the scan methodology itself was sound, not just quietly finding nothing everywhere.)
+
+**Testing the Data Type hypothesis required real ground-truth DPT data, so pulled it from the app
+XML directly rather than reasoning about it in the abstract.** 1.1.9's 3 candidates (objects 3/4/5)
+were already known from Part 15. For a genuinely independent cross-device check, needed a second
+device with a full real Object 3 capture - 1.1.10's `2026-08-29-ets-full-download-1.1.10-
+systematic-3-tampered.pcapng` (the one real comprehensive rewrite from the Part 6/8 investigation)
+was the only capture with a full 942-byte write. Reconstructed it from 5 chunked `MemExtWrite`
+frames (`tshark -Y "cemi.ax==0x1fb" -V`, grepped for `Memory Address: 0xc2` frames, found via a
+`grep -B300 ... | grep "^Frame"` frame-number lookup since Wireshark's `-V` truncates long `Data:`
+lines but the raw `cemi.data` field doesn't) - base `0xC2000`, 228-byte chunks, concatenated to the
+full 942 bytes. Scanning that reconstructed buffer for nonzero odd offsets found a real repeating
+pattern (identical 6-byte group `93 03 93 07 CB 07` at 4 evenly-spaced positions, objects
+34-36/54-56/74-76/94-96 - a multi-channel dimmer app's repeating per-channel objects). Pulled the
+real `ComObjectRef` definitions for objects 34/35/36 from the app's own XML:
+
+- Object 34: `DatapointType="DPST-3-7"` (4-bit dimming control) - companion byte `0x03`
+- Object 35: `DatapointType="DPST-5-1"` (1-byte scaling) - companion byte `0x07`
+- Object 36: `DatapointType="DPST-5-1"` (same DPT as 35) - companion byte `0x07` (same as 35)
+
+Combined with 1.1.9's own two data points (DPST-10-1/DPST-11-1, different DPTs, same 3-byte size,
+same companion byte `0x09`; DPST-19-1, 8 bytes, different companion `0x0c`), the pattern was
+unmistakable: **objects sharing the same real ETS `ObjectSize` share the same companion byte,
+regardless of DPT identity** - a size class, not a DPT-specific value. Checked the resulting
+numbers (3, 7, 9, 12) against the well-known KNX standard "Group Object Size" 4-bit code table
+(0=1 Bit ... 7=8 Bit/1 Byte, 8=2 Byte, 9=3 Byte, 10=4 Byte, 11=6 Byte, 12=8 Byte, 13=10 Byte,
+14=14 Byte, 15=variable) - 4 for 4, exact matches, no fudging needed. (Looked for this table in
+koolenex's own bundled real KNX Master Data XML first, per this project's standing practice of
+checking real sources before trusting memory - not present there, since it's a base cEMI/interface-
+object standard concept rather than manufacturer/DPT master data, but the direct real-hardware
+match across two independent devices stands on its own regardless.)
+
+**The header finding fell out of the same investigation almost for free.** Bytes 0-1 (previously
+read as "object 0's slot", always `0x00 0x30` on 1.1.9) don't fit the size-code table at all -
+`0x30` on its own is out of the 0-15 range. Read as one big-endian 16-bit value instead: `0x0030` =
+**48**. 1.1.10's own bytes 0-1 (`0x01 0xD6`) as one 16-bit value: **470**. Both exactly match
+`maxComObjectNumber` (Part 14) - the same number the table's own overall SIZE is derived from. Not
+a per-object slot at all; a genuine 2-byte header giving the app's total declared object count.
+
+**Implementation**: `groupObjectSizeCode()` (new, `server/routes/knx-tables.ts`) maps ETS's real
+`ObjectSize` strings (confirmed exact wording against real project XML: `"1 Bit"`, `"4 Bit"`,
+`"1 Byte"`, `"3 Bytes"`, `"8 Bytes"`, etc.) to the 4-bit code, defaulting unrecognized/missing
+input to `0` rather than throwing. `GroupObjectFlags` gained `objectSize`. `buildGroupObjectTable()`
+now writes the real header (`(size - 2) / 2`, derived from the existing `size` parameter - no new
+parameter needed since the header count and the table size were always the same underlying number)
+and each object's companion byte alongside its flag byte. `bus.ts`'s `buildDeviceProgramming()`
+passes `objectSize: co.object_size` through from `com_objects` (already captured by the Part 13
+parser work - `object_size` was there all along, just never wired into Object 3's computation).
+
+**Testing**: 11 new cases in `tests/group-object-table.test.ts` - a dedicated `groupObjectSizeCode()`
+suite (the 4 confirmed real values, an unrecognized-input default case, and the remaining 11 codes
+following the same well-known sequence, explicitly marked as not individually hardware-confirmed);
+header tests for both real device sizes; companion-byte assertions woven into the existing
+golden-image cases; and a new full-98-byte real-capture reproduction test - the ENTIRE real Object
+3 buffer for 1.1.9 (`2026-08-29-ets-full-download-obj3-trigger-test-1.1.9.pcapng`), header included,
+byte-for-byte, built from a realistic full `GroupObjectFlags[]` (objects 3/4/5/6/7/8 plus all 20
+real "Mapper object" channels 9-28). All 1243 tests pass (1232 existing + 11 new). Typechecked
+clean. Committed and pushed (koolenex `a4a9864` the implementation, `feb1132` the reference doc).
+
+**Final end-to-end re-verification against real data**: re-ran the exact Part 15 dry-run script
+(real project → real DB → `buildDeviceProgramming()`, zero synthetic fixtures) after this fix,
+against the same real capture used for the mystery-byte discovery in the first place
+(`2026-08-29-ets-full-download-obj3-trigger-test-1.1.9.pcapng`). **97 of 98 bytes now match
+exactly** (up from 93/98 in Part 15) - the one remaining diff is object 8's already-fully-explained
+state-drift case from Part 15 (a project GA link added after the device's last real download),
+not a new gap.
+
+**What this closes**: every open question about Object 3's byte-level content format from Parts
+10/15/16 is now resolved. The record is 2 bytes per communication object (flag byte + KNX standard
+size-code byte) plus a 2-byte leading header (total object count), and koolenex's computation now
+reproduces essentially the entire real buffer from real project data alone. The one standing,
+explicitly-flagged gap for the whole Object 3 investigation remains what it always was: only
+System B mask family has ever been tested, on two devices, one testbed - not resolvable without
+different hardware.

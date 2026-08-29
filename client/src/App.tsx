@@ -28,7 +28,12 @@ import {
   ProgrammingLogCtx,
   PROGRAMMING_LOG_CAP,
 } from './contexts.ts';
-import type { VerifyCache, VerifyProgress, ProgrammingLog } from './contexts.ts';
+import type {
+  VerifyCache,
+  VerifyProgress,
+  ProgramProgress,
+  ProgrammingLog,
+} from './contexts.ts';
 import {
   setI18nT,
   setI18nLang as setI18nLangGlobal,
@@ -91,6 +96,11 @@ export default function App() {
   // updates that unrelated views would also re-render for.
   const [verifyProgress, setVerifyProgress] = useState<
     Record<string, VerifyProgress>
+  >({});
+  // Live Program (write) progress, keyed by device address - see
+  // ProgramProgress's doc comment (contexts.ts) for why this exists.
+  const [programProgress, setProgramProgress] = useState<
+    Record<string, ProgramProgress>
   >({});
   // Programming page's operation log - lifted up here (rather than local
   // state in ProgrammingView) so it survives navigating away and back. See
@@ -221,6 +231,17 @@ export default function App() {
             bytesRead: msg.bytesRead as number,
             totalBytes: msg.totalBytes as number,
             pct: msg.pct as number,
+          },
+        }));
+      } else if (msg.type === 'program:progress') {
+        const deviceAddress = msg.deviceAddress as string;
+        setProgramProgress((p) => ({
+          ...p,
+          [deviceAddress]: {
+            msg: msg.msg as string,
+            pct: msg.pct as number | undefined,
+            done: msg.done as boolean | undefined,
+            error: msg.error as boolean | undefined,
           },
         }));
       } else if (msg.type === 'scan:progress') {
@@ -406,8 +427,9 @@ export default function App() {
       clearResult: (deviceId) =>
         dispatch({ type: 'CLEAR_VERIFY_RESULT', deviceId }),
       progress: verifyProgress,
+      programProgress,
     }),
-    [state.verifyCache, verifyProgress],
+    [state.verifyCache, verifyProgress, programProgress],
   );
 
   const programmingLog: ProgrammingLog = useMemo(

@@ -28,6 +28,7 @@ export function ProgrammingView() {
     setResult: setVerifyResult,
     clearResult: clearVerifyResult,
     progress: verifyProgress,
+    programProgress,
   } = useVerifyCache();
   const COLMAP: Record<string, string> = {
     actuator: 'var(--actuator)',
@@ -35,9 +36,9 @@ export function ProgrammingView() {
     router: 'var(--router)',
     generic: 'var(--muted)',
   };
-  const [progress, setProgress] = useState<
-    Record<string, { state: string; pct: number }>
-  >({});
+  const [progress, setProgress] = useState<Record<string, { state: string }>>(
+    {},
+  );
   const { entries: log, add: addLog, clear: clearLog } = useProgrammingLog();
   const [verifyingIds, setVerifyingIds] = useState<Set<number>>(new Set());
   const [slideOverDevice, setSlideOverDevice] = useState<any | null>(null);
@@ -104,18 +105,24 @@ export function ProgrammingView() {
 
   const programDevice = async (deviceId: any, devAddr: string) => {
     setLogOpen(true);
-    setProgress((p) => ({ ...p, [deviceId]: { state: 'running', pct: 5 } }));
+    // `progress[deviceId]` now only tracks coarse state (running/done/error)
+    // for the button/status-badge - the real percentage/message comes from
+    // `programProgress[devAddr]` (context, fed by the server's own
+    // program:progress WebSocket broadcasts) instead of a fake climb. Real
+    // bug, found live 2026-08-29: the old code faked progress with a
+    // setInterval capped at a hardcoded 90%, completely disconnected from
+    // the real write - "shows 90% then sits there for a few minutes" was
+    // exactly that fake cap, while the real (much slower) write continued
+    // underneath it, unreported. Real progress was already being broadcast
+    // by the server the whole time (server/routes/bus.ts's onProgress,
+    // wired through knx-connection.ts's downloadDevice() calls) - the
+    // client just never listened for it.
+    setProgress((p) => ({ ...p, [deviceId]: { state: 'running' } }));
     addLog(`[${new Date().toLocaleTimeString()}] Downloading → ${devAddr}`);
-    let pct = 5;
-    const iv = setInterval(() => {
-      pct = Math.min(pct + (Math.random() * 6 + 2), 90);
-      setProgress((p) => ({ ...p, [deviceId]: { state: 'running', pct } }));
-    }, 300);
     try {
       const pid = data?.project?.id;
       await api.busProgramDevice(devAddr, pid!, deviceId);
-      clearInterval(iv);
-      setProgress((p) => ({ ...p, [deviceId]: { state: 'done', pct: 100 } }));
+      setProgress((p) => ({ ...p, [deviceId]: { state: 'done' } }));
       addLog(
         `[${new Date().toLocaleTimeString()}] ✓ ${devAddr} — programmed`,
       );
@@ -129,8 +136,7 @@ export function ProgrammingView() {
       // verified" rather than silently-stale data.
       clearVerifyResult(deviceId);
     } catch (err: any) {
-      clearInterval(iv);
-      setProgress((p) => ({ ...p, [deviceId]: { state: 'error', pct: 0 } }));
+      setProgress((p) => ({ ...p, [deviceId]: { state: 'error' } }));
       addLog(
         `[${new Date().toLocaleTimeString()}] ✗ ${devAddr} — ${err.message}`,
       );
@@ -306,6 +312,17 @@ export function ProgrammingView() {
                 const prog = progress[d.id];
                 const verifying = verifyingIds.has(d.id);
                 const liveVerifyProgress = verifyProgress[d.individual_address];
+                const liveProgramProgress =
+                  programProgress[d.individual_address];
+                // Real pct when the server has reported one for this device
+                // yet; 0 before the first message arrives (e.g. the very
+                // first onProgress call is msg-only, no pct - see
+                // ProgramProgress's doc comment) rather than undefined,
+                // which would render as a NaN-width bar.
+                const programPct =
+                  prog?.state === 'done'
+                    ? 100
+                    : (liveProgramProgress?.pct ?? 0);
                 return (
                   <tr key={d.id} className="rh">
                     <TD>
@@ -346,12 +363,15 @@ export function ProgrammingView() {
                     </TD>
                     <TD>
                       {prog ? (
-                        <div className={styles.progressWrap}>
+                        <div
+                          className={styles.progressWrap}
+                          title={liveProgramProgress?.msg}
+                        >
                           <div className={styles.progressTrack}>
                             <div
                               className={styles.progressBar}
                               style={{
-                                width: `${prog.pct}%`,
+                                width: `${programPct}%`,
                                 background:
                                   prog.state === 'done'
                                     ? 'var(--green)'
@@ -363,7 +383,7 @@ export function ProgrammingView() {
                           </div>
                           {prog.state !== 'error' && (
                             <span className={styles.progressPct}>
-                              {Math.round(prog.pct)}%
+                              {Math.round(programPct)}%
                             </span>
                           )}
                           {prog.state === 'error' && (

@@ -191,6 +191,24 @@ export interface VerifyProgress {
   pct: number;
 }
 
+// Real, granular progress for an in-flight Program (write) action - the
+// server has broadcast this over WebSocket (program:progress) all along
+// (see server/routes/bus.ts's onProgress / knx-connection.ts's
+// DownloadProgress), but the client never listened for it, faking its own
+// progress instead (a setInterval climbing to a hardcoded 90% cap,
+// completely disconnected from the real write - found live 2026-08-29:
+// "shows 90% and then sits there for a few minutes" is exactly that fake
+// climb hitting its cap while the real, much slower write continues
+// underneath it). `pct` here is real: 0-80% tracks actual bytes written
+// during the memory-write loop, the remaining steps (LoadCompleted,
+// PID_PROGRAM_VERSION write-back, Restart) take it to 100.
+export interface ProgramProgress {
+  msg: string;
+  pct?: number;
+  done?: boolean;
+  error?: boolean;
+}
+
 export interface VerifyCache {
   cache: Record<number, VerifyCacheEntry>;
   setResult: (deviceId: number, result: VerifyDeviceResult) => void;
@@ -204,6 +222,9 @@ export interface VerifyCache {
   // persisted like `cache`, just transient UI state updated from the
   // verify:progress WebSocket messages a verify-device call now broadcasts.
   progress: Record<string, VerifyProgress>;
+  // Same idea, for an in-flight Program (write) action - see
+  // ProgramProgress's own doc comment above for why this exists now.
+  programProgress: Record<string, ProgramProgress>;
 }
 
 export const VerifyCacheCtx = createContext<VerifyCache | null>(null);

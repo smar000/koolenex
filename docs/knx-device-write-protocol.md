@@ -411,12 +411,15 @@ Consolidated from throughout this document, for visibility:
 1. Why does the NTP-parameter write differ in byte count (5 bytes for "off" vs 1 byte for "on")
    between the two otherwise-identical Partial Download captures? (§1.2)
 2. ~~Object 3's identity, content, and write-trigger~~ - **RESOLVED, see Part 10**: the standard
-   Group Object Table; content fully decoded as `offset = 2 × com-object number`, with a per-
-   object flag byte (Update=bit7, Transmit=bit6, Read-On-Init=bit5, Write=bit4, Read=bit3,
-   bit2=correlates with GA-link presence but not proven to be *only* that, Priority=bits1:0),
-   cross-confirmed on a second object, a third object with a different DPT/size, and a second
-   device/app entirely (§10.1); Communication flag confirmed to have no memory representation at
-   all (a real, deliberate distinction from bit 2). Write trigger resolved for both Partial
+   Group Object Table; content fully decoded as `offset = 2 × com-object number` (confirmed not
+   to reindex when objects are disabled/unlinked), with a per-object flag byte (Update=bit7,
+   Transmit=bit6, Read-On-Init=bit5, Write=bit4, Read=bit3, bit2=Communication flag AND has a
+   real GA link - both required, Priority=bits1:0), cross-confirmed on a second object, a third
+   object with a different DPT/size, and a second device/app entirely (§10.1). **Corrects an
+   earlier wrong claim in this same document** ("Communication flag has zero memory
+   representation") - that was an artifact of every prior test happening to use an unlinked
+   object, where bit 2 is pinned at 0 regardless of the flag; retested on a linked object and the
+   flag does have a real, demonstrated effect. Write trigger resolved for both Partial
    (§10.2, conditional on any communication-object-level change, not just GA links) and Full
    Downloads (§10.3, conditional on an anomalous `OX=4 P=27` checksum read - itself tied to
    Part 8's comprehensive-rewrite trigger). **Still open**: bit 2's exact semantics beyond the
@@ -647,8 +650,8 @@ byte offset within Object 3 = 2 × communication-object number
 ```
 
 ```
-bit:    7      6         5           4      3     2         1  0
-        Update Transmit  Read-On-Init Write  Read  see below   Priority
+bit:    7      6         5           4      3     2                       1  0
+        Update Transmit  Read-On-Init Write  Read  Comm-flag AND has-link  Priority
 ```
 
 Priority (bits 1:0), values confirmed by direct empirical mapping in decreasing order:
@@ -660,12 +663,17 @@ Priority (bits 1:0), values confirmed by direct empirical mapping in decreasing 
 | High | `01` |
 | System | `00` 🟡 inferred by pattern only - no object with a "System" option was available to test directly |
 
-**Communication flag has NO representation anywhere in device memory** - confirmed rigorously,
-twice: toggling it off produced a byte-for-byte identical Object 3 payload, GA table, and
-Association table (checked against every one of the 98/942 bytes, not just the record itself),
-and a full whole-capture diff (every frame, both directions) showed zero content difference
-anywhere in the entire session, reproduced on a fresh retry. Whatever ETS does with this flag, it
-is not written to the device via any mechanism this project has observed.
+**CORRECTED 2026-08-29, later same day - the original "Communication flag has zero
+representation" claim below was wrong, caught by explicit user caution before it went
+unchallenged.** Every test of the Communication flag up to that point happened to be on an
+*unlinked* object (6, 7) - toggling the flag there genuinely produced zero change, but that's
+because bit 2 (below) requires a real GA link to ever read `1` in the first place; on an unlinked
+object it's pinned at `0` regardless of the flag, which masked the flag's real effect entirely.
+Retested directly on a **linked** object (5, GA still present and unchanged in both the GA and
+Association tables - checked explicitly) with Communication toggled off: bit 2 dropped from `1`
+to `0`. **The Communication flag is written to the device after all** - via bit 2, gated by
+GA-link presence. See the corrected bit-2 entry below; the two-test methodology that produced the
+original wrong conclusion is kept in the follow-up doc as a documented mistake, not deleted.
 
 **Methodology**: toggled one flag at a time on communication object 7 (1.1.9), always confirming
 the resulting single-bit change against the previous known state, then reverted everything to
@@ -685,35 +693,40 @@ reconfirmed a second time, blind, on a third object (object 5, an 8-byte `DPST-1
 object - a different DPT/size than every other object tested, confirming the record format is
 independent of the object's own payload size).
 
-**Bit 2 correlates with GA-link presence - a real, direct, but still narrow finding.**
-🟢 Confirmed directly: object 5 (linked to a real GA) showed bit 2 = `1` in every capture,
-consistently; objects 6 and 7 (never linked to any GA in this project) showed bit 2 = `0` in
-every capture; and, decisively, removing communication object 8's only GA link mid-session
-flipped its bit 2 from `1` to `0` in the same download that shrank the GA and Association tables
-to remove that link - independently corroborated by two other memory regions changing in lockstep
-with Object 3, not just Object 3 alone.
+**Bit 2 = effective communication state: `Communication flag AND has a real GA link` - both
+required.**
 
-**What this does and does not establish**: it's a real, reproduced correlation between "this
-communication object currently has at least one GA link" and bit 2, observed going both
-directions (present→absent on object 8, and consistently present/absent across objects 5/6/7
-throughout). It is **not** proven to be *only* that - every test changed exactly one thing (a
-link existing or not), so a distinguishing factor riding along with link presence (e.g. number of
-links, which specific GA, the com-object's direction/DPT, or something ETS derives internally
-that happens to track link presence in every case tested) hasn't been ruled out. Treat "bit 2 =
-has a GA link" as the best-supported working description, not a settled mechanism, until a test
-that varies something else while holding link-presence constant (e.g. an object with 2 links vs
-1) is run.
+🟢 Confirmed directly, three real hardware tests: object 5 (linked, Communication enabled)
+showed bit 2 = `1`, consistently. Removing communication object 8's only GA link (Communication
+still enabled) flipped its bit 2 from `1` to `0`, corroborated independently by the GA and
+Association tables shrinking to remove that link in the same download. **Decisively**: disabling
+Communication on object 5 while its GA link stayed fully intact (checked explicitly - GA and
+Association tables byte-for-byte unchanged) *also* flipped bit 2 from `1` to `0` - two
+independent routes to the same bit, only one of which touches the link tables at all. Objects 6
+and 7 (never linked, Communication toggled both ways across many tests) always showed bit 2 = `0`
+- consistent with the AND relationship, since an unlinked object can never reach `1` regardless of
+the flag, which is exactly what made the flag's effect invisible in every earlier test.
 
-**Complete bit accounting**: with bit 2 now correlated, every bit in the byte has an observed
-role except none remain fully unexplained - `7=Update, 6=Transmit, 5=Read-On-Init, 4=Write,
-3=Read, 2=GA-link-presence (correlational), 1:0=Priority`. The Communication *flag* itself
-remains, separately, confirmed to have zero memory representation (above) - a real, deliberate
-distinction from bit 2: the project-level Communication setting isn't tracked at all, but the
-practical consequence of having a linked GA apparently is.
+**What this does and does not establish**: the AND-relationship (flag enabled AND link present)
+correctly predicts every result observed across all tests on three objects. It is not proven to
+be the complete picture - e.g., an object with 2 GA links, one active/one not, or other
+DPT/direction combinations, haven't been tested - but it is no longer merely a correlation with
+link presence alone; the Communication flag has a real, demonstrated, independent effect,
+distinguishable from link presence because the link tables were checked and confirmed unchanged
+in the decisive test.
+
+**Complete bit accounting**: `7=Update, 6=Transmit, 5=Read-On-Init, 4=Write, 3=Read,
+2=Communication-AND-linked, 1:0=Priority`. Every bit has an observed, evidenced role.
+
+**The offset formula does not reindex when an object is disabled** - 🟢 confirmed directly:
+disabling Communication on a lower-numbered object (6) left every higher-numbered object's byte
+(7 at offset 14, 8 at offset 16) completely unmoved - no table-compaction/reindexing occurs. The
+formula `offset = 2 × communication-object number` can be used unconditionally, regardless of
+which objects are linked or Communication-enabled elsewhere in the app.
 
 **Still open**: whether the formula/layout holds for a genuinely different mask family (only
-System B tested throughout this project); bit 2's exact semantics beyond "correlates with link
-presence" (see above).
+System B tested throughout this project); whether bit 2's AND-relationship holds under more
+complex link configurations (multiple links, mixed directions).
 
 ### 10.2 Partial Download write-trigger: conditional on any communication-object-level change
 
@@ -824,6 +837,13 @@ Full implementation narrative, commit hash, and test coverage:
   removed, bit 2's GA-link correlation confirmed by a real link removal corroborated by the GA
   and Association tables shrinking in lockstep) (knx-ets-manager repo) — primary source for
   §10.1's bit-2/Read-On-Init follow-up findings.
+- `docs/data/captures/2026-08-29-ets-partial-download-obj3-map-comm-reindex-test-1.1.9.pcapng`
+  (disabling Communication on a lower-numbered object does not shift higher-numbered objects'
+  offsets) and `2026-08-29-ets-partial-download-obj3-comm-flag-linked-object-1.1.9.pcapng`
+  (disabling Communication on a *linked* object flips bit 2 while the GA/Association tables stay
+  byte-for-byte unchanged - the decisive test that corrected the earlier wrong "Communication
+  flag has zero representation" claim) (knx-ets-manager repo) — primary source for §10.1's
+  corrected bit-2 finding and the offset-formula reindexing check.
 - `docs/data/captures/2026-08-28-ets-full-download-history-and-blob-params-1.1.10.pcapng`,
   cross-checked against every other saved capture (`grep -c "OX=3 P=5"` across
   `docs/data/captures/*.pcapng`), a live `PID_OBJECT_TYPE`/`PID_TABLE_REFERENCE` read via

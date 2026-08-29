@@ -1037,6 +1037,32 @@ state-drift case from Part 15, not a computation gap.
 Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
 (Part 17).
 
+## Part 18 — Object 3's write CONFIRMED on real hardware, first attempt (NEW 2026-08-29)
+
+The last standing gap from Parts 12-17 - Object 3's write, unlike GA/Association's, had never been
+independently exercised against real hardware through koolenex's own code path - is now closed.
+
+🟢 **CONFIRMED, first attempt, exact match**: a surgical, Object-3-only write to 1.1.9 (real
+project → real DB → `_buildDeviceProgramming()` → `downloadDevice('1.1.9', [], null, null, null,
+onProgress, { groupObjectTable, mode: 'full' })` - `steps=[]` and `gaTable`/`assocTable`/`paramMem`
+all `null` so nothing else touches the device, avoiding the object 8 GA-link state-drift side
+effect Part 15 identified). Real protocol sequence completed cleanly: `DeviceDescriptor_Read` →
+`Authorize` → `Unload`/`StartLoading`/`LoadData`/`LoadCompleted` (objIdx 3) → `Restart` →
+`Download complete`, chunked in 10-byte `MemExtWrite` frames at base `0x00570C` (koolenex's own
+chunking convention - real ETS itself sometimes writes the same amount in one frame, per §1.1',
+both are valid on the wire). Read back `PID_TABLE_REFERENCE` (objIdx 3) and the full 98-byte
+region immediately after: **byte-for-byte identical to what was computed and written, all 98
+bytes, no diffs** (one transient `Tunneling ACK timeout` on the very first read attempt - the
+device briefly unresponsive right after `Restart`, exactly as expected; a fresh connection and
+retry a few seconds later succeeded cleanly).
+
+This is the first-ever real-hardware confirmation of Object 3's write through koolenex's own code
+- previously this inherited the GA/Association precedent by construction only (same underlying
+mechanism, Part 6/11) without independent proof for Object 3 itself. That gap is now closed.
+
+Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
+(Part 18).
+
 ## Sources
 
 - `docs/data/captures/2026-08-29-ets-*-obj3-map-*-1.1.9.pcapng` (12 captures: read/write/
@@ -1115,3 +1141,6 @@ Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigg
 - `koolenex_reference` memory (knx-ets-manager repo's persistent memory) — broader project
   narrative, including findings unrelated to the write path itself (e.g. the enum-mapping
   retraction in Part 3).
+- `docs/data/captures/2026-08-29-koolenex-first-real-object3-write-1.1.9.pcapng` (knx-ets-manager
+  repo) — primary source for Part 18, the first real koolenex-driven Object 3 write and its
+  read-back verification.

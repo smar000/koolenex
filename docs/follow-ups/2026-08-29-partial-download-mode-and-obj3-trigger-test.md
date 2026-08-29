@@ -200,6 +200,65 @@ capture data (rather than trusting the prior write-up) is what surfaced the actu
 Don't assume an established claim in this doc is still fully checked just because it's tagged
 🟢 - re-derive from source when it matters, especially when directly asked to confirm something.
 
+## Part 7: full bit-by-bit mapping of Object 3's record layout, cross-device confirmed
+
+User asked directly whether koolenex could now *build* Object 3 write packets, given the identity
+and two flag mappings already known. Correct answer at the time: no - two bit positions out of a
+98/942-byte object, no known record layout or offset formula, no idea whether Communication or
+Priority were even represented. User: "let's investigate in turn and try to break the back on
+this one."
+
+**Methodology**: toggled one communication-object flag at a time on com-object 7 (1.1.9),
+comparing each capture's Object 3 payload against the immediately preceding one, confirming a
+single clean bit flip each time before moving to the next flag. User's own methodological
+choices along the way, all correct and load-bearing:
+
+- Used Partial Download for most tests (faster, and - as it turned out - itself confirmed a real
+  finding: Object 3 gets written on Partial Downloads for flag-only changes too, not just GA
+  changes, broadening §10.2, reference doc).
+- After the Communication-flag test came back with literally zero change anywhere, asked for a
+  full 98-byte comparison (not just the region already being watched) against the immediately
+  prior capture - confirmed byte-for-byte identical, then asked for a retry to rule out a UI/save
+  mistake before accepting it as real. Reproduced identically on retry.
+- Then asked for a full **whole-capture** frame-by-frame comparison (every read, every write, not
+  just the three memory writes) between the two captures - found exactly one difference, an
+  ACK-coalescing timing artifact with zero content difference. This is the level of rigor that
+  makes the negative Communication-flag result trustworthy rather than "we didn't look hard
+  enough."
+- Independently caught and corrected an assumed "Priority" field before it had been confirmed to
+  exist in this device's actual ETS UI (not in the flags row - a dropdown just above it, found
+  after the correction).
+- After mapping Priority's three available values (Low/Alarm/High showed a clean linear
+  2-bit pattern; System was not available as an option on this object, so `00` is inferred by
+  pattern, not confirmed), asked for a full reset-and-compare sanity check: reverted every flag
+  and Priority back to manufacturer default, then diffed the resulting capture against the very
+  first pre-testing baseline - byte-for-byte identical, full whole-stream comparison, confirming
+  the whole test sequence was self-consistent and left nothing lingering.
+- Requested verification on a **second communication object** (6) before trusting the layout
+  generalizes - Update and Read both landed exactly where the offset formula (`2 × 12` and
+  `2 × 14`... i.e. `2 × object number`) predicted, including a two-flags-simultaneously case
+  computed correctly (`0xD3 | 0x08 = 0xDB`) before the capture was even decoded.
+- Requested one final test on **1.1.10** (a different device, different manufacturer app
+  entirely) specifically to test whether the structure is app-specific or a real mask/device-
+  generation-level standard - and, rather than saying what had changed, asked me to determine it
+  from the capture alone. Computed the expected default byte from the app's own XML
+  (`M-0004_A-3030-23-F0EA-O000A.xml`, object 96 "Dimming channel 4") and diffed against the real
+  captured value (`0xDB` at offset `0xC0` = `2×96`) - correctly identified the Write flag as the
+  single change, blind, before being told the answer. Confirmed correct.
+
+**Result**: a complete, computable record structure -
+`offset = 2 × communication-object-number`, `bit7=Update, bit6=Transmit, bit4=Write, bit3=Read,
+bits1:0=Priority (Low=11/Alarm=10/High=01/System=00 inferred)`, `Communication=no representation
+anywhere`. Cross-confirmed on two objects on 1.1.9 and one object on a completely different
+device/app (1.1.10) - the blind prediction against 1.1.10 is the strongest evidence yet that this
+is a mask-level standard structure, not an app-specific quirk. Full details, tables, and evidence
+tags: reference doc's §10.1 (rewritten) and §10.2 (broadened).
+
+**Still genuinely open**: bits 2 and 5 (always observed as `0` - reserved/unused, not confirmed);
+Priority's `System` value (inferred by pattern, no object available to test it directly); whether
+the structure holds on a non-System-B mask family (untested, as with everything else in this
+project).
+
 ## Still open, after Part 6's redo
 
 - ~~1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo~~ -
@@ -207,12 +266,14 @@ Don't assume an established claim in this doc is still fully checked just becaus
   property-27 checksum read that comes back anomalous only after an out-of-band write.
 - **Why Object 3 is written on *every* 1.1.9 Full Download tested, unconditionally, remains
   genuinely unreconciled** with 1.1.10's now-resolved conditional behavior - 1.1.9's app doesn't
-  even declare property 27 (Part 7), so the exact same checksum mechanism can't directly apply.
-  Real next step: an out-of-band tamper test on 1.1.9 checking for a different anomalous-read
-  signal, and hunting for any genuinely untampered 1.1.9 session that skips Object 3 (none found
-  yet, in 5 real captures).
-- The general Object 3 record layout (which bit means which flag, for every communication
-  object) is only mapped at two positions so far (com-objects 6 and 7) - not a full decode.
+  even declare property 27 (reference doc's Part 7), so the exact same checksum mechanism can't
+  directly apply. Real next step: an out-of-band tamper test on 1.1.9 checking for a different
+  anomalous-read signal, and hunting for any genuinely untampered 1.1.9 session that skips
+  Object 3 (none found yet, in 5 real captures).
+- ~~The general Object 3 record layout~~ - **RESOLVED, see Part 7 above**: a complete, computable
+  formula (`offset = 2 × com-object number`) and bit map for four of six flags, cross-confirmed
+  on two objects and two devices/apps. Still open within this: bits 2/5 (always `0`, unconfirmed
+  reserved), and Priority's `System` value (inferred by pattern only).
 - Whether the checksum-trigger mechanism (Part 6, reference doc Part 8) generalizes beyond
   1.1.10's app.
 - Whether the partial-download GA/Association-table skip logic (Part 11) generalizes beyond this

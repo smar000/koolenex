@@ -12,11 +12,13 @@ import { planVerify, type PlanStep } from '../server/knx-download-plan.ts';
 import {
   buildGATable,
   buildAssocTable,
+  buildGroupObjectTable,
   decodeGATable,
   decodeAssocTable,
   buildParamMem,
   resolveParamSegment,
 } from '../server/routes/knx-tables.ts';
+import type { GroupObjectFlags } from '../server/routes/knx-tables.ts';
 import { APPS_DIR } from '../server/routes/shared.ts';
 
 // ── Mock KnxBusManager ───────────────────────────────────────────────────────
@@ -1353,5 +1355,145 @@ describe('POST /bus/verify-device — GA/Association table fallback for an app t
     assert.equal(co48.expectedValue, '(none)');
     assert.equal(co48.actualValue, '0/0/1 0/0/2');
     assert.equal(co48.match, false);
+  });
+});
+
+// ── program-device: buildDeviceProgramming() constructs a real Object 3
+// (Group Object Table) and passes it through to downloadDevice() (2026-08-29)
+// ─────────────────────────────────────────────────────────────────────────
+const OBJ3_APP = 'M-00FB_A-0002-01-AB01';
+const OBJ3_MODEL = {
+  appId: OBJ3_APP,
+  loadProcedures: [
+    { type: 'RelSegment', lsmIdx: 4, size: 4 },
+    { type: 'WriteRelMem', objIdx: 4, offset: 0, size: 4 },
+  ],
+  relSegData: { '4': '00000000' },
+  paramMemLayout: {},
+  params: {},
+  dynTree: { main: { items: [] } },
+  // The value under test - see ParamModel.groupObjectTableSize's doc
+  // comment (ets-app.ts) for the real-hardware-verified formula this
+  // mirrors (2 x maxComObjectNumber + 2).
+  groupObjectTableSize: 20,
+};
+
+describe('POST /bus/program-device — builds and passes a real Object 3 (Group Object Table)', () => {
+  let projectId: number;
+  const deviceAddr = '1.1.34';
+  const GA_BASE = 0x7000;
+  const ASSOC_BASE = 0x7100;
+  const OBJ3_BASE = 0x7200;
+  const PARAM_BASE = 0x7300;
+
+  before(() => {
+    writeModel(OBJ3_APP, OBJ3_MODEL);
+    ts.db.run(`INSERT INTO projects (name) VALUES ('program-obj3')`);
+    projectId = ts.db.get<{ id: number }>(
+      `SELECT id FROM projects WHERE name='program-obj3'`,
+    )!.id;
+    ts.db.run(
+      `INSERT INTO devices (project_id, individual_address, name, app_ref, param_values) VALUES (?,?,?,?,?)`,
+      [projectId, deviceAddr, `dev-${deviceAddr}`, OBJ3_APP, '{}'],
+    );
+    const dev = ts.db.get<{ id: number }>(
+      'SELECT id FROM devices WHERE project_id=? AND individual_address=?',
+      [projectId, deviceAddr],
+    )!;
+    ts.db.run(
+      `INSERT OR IGNORE INTO group_addresses (project_id, address, name, main_g, middle_g, sub_g) VALUES (?,?,?,?,?,?)`,
+      [projectId, '2/1/2', '2/1/2', 2, 1, 2],
+    );
+    // Object 5: linked, Read-On-Init on, Priority=alarm, Read+Communication
+    // (Write/Transmit/Update off) - exercises every new column at once.
+    ts.db.run(
+      `INSERT INTO com_objects (project_id, device_id, object_number, ga_address, read_on_init, priority, read, write, comm, tx, flags) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      [projectId, dev.id, 5, '2/1/2', 1, 'alarm', 1, 0, 1, 0, 'CR'],
+    );
+    // Object 7: unlinked, real 1.1.9-shaped default (Communication+Transmit
+    // on, Read-On-Init/Priority both absent -> readOnInit=false/'low').
+    ts.db.run(
+      `INSERT INTO com_objects (project_id, device_id, object_number, ga_address, read, write, comm, tx, flags) VALUES (?,?,?,?,?,?,?,?,?)`,
+      [projectId, dev.id, 7, '', 0, 1, 1, 1, 'CWT'],
+    );
+  });
+
+  it('constructs Object 3 from the real com_objects columns (read_on_init/priority/read/write/comm/tx) and passes it as extra.groupObjectTable', async () => {
+    mockBus.connected = true;
+    mockBus.propImage = new Map([
+      ['4/7', Buffer.from([0, 0, PARAM_BASE >> 8, PARAM_BASE & 0xff])],
+      ['1/7', Buffer.from([0, 0, GA_BASE >> 8, GA_BASE & 0xff])],
+      ['2/7', Buffer.from([0, 0, ASSOC_BASE >> 8, ASSOC_BASE & 0xff])],
+      ['3/7', Buffer.from([0, 0, OBJ3_BASE >> 8, OBJ3_BASE & 0xff])],
+    ]);
+    const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    mockBus.propImage = null;
+    assert.equal(r.status, 200);
+
+    const call = mockBus.calls.find((c) => c.method === 'downloadDevice');
+    assert.ok(call, 'expected downloadDevice to be called');
+    const extra = call!.args[6] as { groupObjectTable?: Buffer | null };
+    assert.ok(extra.groupObjectTable, 'expected extra.groupObjectTable to be set');
+
+    const expectedFlags: GroupObjectFlags[] = [
+      {
+        object_number: 5,
+        update: false,
+        transmit: false,
+        readOnInit: true,
+        write: false,
+        read: true,
+        communication: true,
+        linked: true,
+        priority: 'alarm',
+      },
+      {
+        object_number: 7,
+        update: false,
+        transmit: true,
+        readOnInit: false,
+        write: true,
+        read: false,
+        communication: true,
+        linked: false,
+        priority: 'low',
+      },
+    ];
+    const expected = buildGroupObjectTable(
+      OBJ3_MODEL.groupObjectTableSize,
+      expectedFlags,
+    );
+    assert.deepEqual([...extra.groupObjectTable!], [...expected]);
+    assert.equal(extra.groupObjectTable!.length, OBJ3_MODEL.groupObjectTableSize);
+  });
+
+  it('omits groupObjectTable (null) when the app model has no groupObjectTableSize', async () => {
+    mockBus.connected = true;
+    // Reuse RELMEM_APP/RELMEM_MODEL (declared earlier in this file) -
+    // identical shape, but with no groupObjectTableSize field at all.
+    ts.db.run(`INSERT INTO projects (name) VALUES ('program-obj3-none')`);
+    const noObj3Project = ts.db.get<{ id: number }>(
+      `SELECT id FROM projects WHERE name='program-obj3-none'`,
+    )!.id;
+    const addr = '1.1.35';
+    seedDevice(ts.db, noObj3Project, addr, RELMEM_APP, [], []);
+    mockBus.propImage = new Map([
+      ['4/7', Buffer.from([0, 0, PARAM_BASE >> 8, PARAM_BASE & 0xff])],
+    ]);
+    const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
+      deviceAddress: addr,
+      projectId: noObj3Project,
+    });
+    mockBus.propImage = null;
+    assert.equal(r.status, 200);
+    const call = [...mockBus.calls]
+      .reverse()
+      .find((c) => c.method === 'downloadDevice');
+    assert.ok(call, 'expected downloadDevice to be called');
+    const extra = call!.args[6] as { groupObjectTable?: Buffer | null };
+    assert.equal(extra.groupObjectTable, null);
   });
 });

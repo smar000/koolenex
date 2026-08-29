@@ -93,6 +93,9 @@ export interface DeviceModel {
   paramMemLayout?: Record<string, ParamMemEntry>;
   dynTree?: DynTree;
   params?: Record<string, ParamDef>;
+  // Object 3 (Group Object Table) real buffer size - see ets-app.ts's
+  // ParamModel.groupObjectTableSize's doc comment for the formula/rationale.
+  groupObjectTableSize?: number;
 }
 
 export interface ParamSegmentResult {

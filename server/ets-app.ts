@@ -316,6 +316,17 @@ export interface ParamModel {
   relSegData: Record<number, string>;
   absSegData: Record<number, { size: number; hex: string }>;
   loadProcedures?: LoadProcedureStep[];
+  // Object 3 (Group Object Table) real buffer size - added 2026-08-29.
+  // Confirmed against both real testbed apps' actual on-wire table sizes:
+  // `2 x maxComObjectNumber + 2` matches exactly (1.1.9: max object# 48 ->
+  // 98 bytes; 1.1.10: max object# 470 -> 942 bytes - see docs/knx-device-
+  // write-protocol.md §10 for the real captured sizes this was checked
+  // against). Deliberately the APP's total declared object-number range
+  // (every ComObject the app statically defines), not the per-device
+  // instantiated/linked subset in com_objects - real ETS pre-allocates
+  // Object 3 space for every com object the app could ever expose, not
+  // just the ones a given device instance currently links.
+  groupObjectTableSize?: number;
 }
 
 // ─── AppIndex return type ───────────────────────────────────────────────────
@@ -362,6 +373,12 @@ export interface AppIndex {
   } | null;
   buildParamModel: () => ParamModel;
   appId: string;
+  // Highest `Number` across every ComObject this app statically declares
+  // (all Static sections, including module Static) - see ParamModel.
+  // groupObjectTableSize's doc comment for why this, not the per-device
+  // linked/active subset, is the right basis for Object 3's real size. 0 if
+  // the app declares no ComObjects at all.
+  maxComObjectNumber: number;
   paramRefKeys: string[];
   moduleKeys: string[];
   getDefault: (prKey: string) => string | null;
@@ -1740,6 +1757,13 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
     }
   }
 
+  // See AppIndex.maxComObjectNumber's doc comment - the app's total static
+  // declaration range, not any per-device instantiated subset.
+  const maxComObjectNumber = Object.values(coDefs).reduce(
+    (max, co) => Math.max(max, co.num),
+    0,
+  );
+
   return {
     resolveCoRef,
     resolveParamRef,
@@ -1747,6 +1771,7 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
     resolveCoRefById,
     buildParamModel,
     appId,
+    maxComObjectNumber,
     paramRefKeys: Object.keys(paramRefDefs),
     moduleKeys: Object.keys(modArgs), // "{appId}_MD-n_M-k" — one per instantiated module
     getDefault,

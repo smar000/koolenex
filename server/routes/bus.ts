@@ -11,6 +11,7 @@ import { validateBody } from '../validate.ts';
 import {
   buildGATable,
   buildAssocTable,
+  buildGroupObjectTable,
   decodeGATable,
   decodeAssocTable,
   resolveParamSegment,
@@ -18,6 +19,7 @@ import {
   diffMemory,
   decodeParamMem,
 } from './knx-tables.ts';
+import type { GroupObjectFlags } from './knx-tables.ts';
 import type {
   Setting,
   Device,
@@ -834,6 +836,9 @@ interface DeviceModel {
   dynTree?: unknown;
   params?: Record<string, unknown>;
   absSegData?: Record<number, { size: number; hex?: string | null }>;
+  // Object 3 (Group Object Table) real buffer size - see ets-app.ts's
+  // ParamModel.groupObjectTableSize's doc comment for the formula/rationale.
+  groupObjectTableSize?: number;
 }
 
 type DeviceProgramming =
@@ -842,6 +847,7 @@ type DeviceProgramming =
       steps: DownloadStep[];
       gaTable: Buffer;
       assocTable: Buffer;
+      groupObjectTable: Buffer | null;
       paramMem: Buffer | null;
       paramBase: number | null;
       absSegData: Record<number, { size: number; hex?: string | null }>;
@@ -920,6 +926,45 @@ function buildDeviceProgramming(dev: Device): DeviceProgramming {
   const gaTable = buildGATable(gaLinks);
   const assocTable = buildAssocTable(coRows, gaLinks);
 
+  // Object 3 (Group Object Table) - added 2026-08-29. `size` comes from the
+  // app model, not from coRows (see ParamModel.groupObjectTableSize's doc
+  // comment: it's the app's total static declaration range, not this
+  // device's linked/active subset - real ETS pre-allocates space for every
+  // com object the app could ever expose). null (not an empty Buffer) when
+  // the app model has no groupObjectTableSize at all (e.g. a prop-only or
+  // AbsSegment-family app never captured one) - downloadDevice() already
+  // treats a falsy/empty groupObjectTable as "nothing to write" the same
+  // way it does for gaTable/assocTable being empty.
+  // 🟡 Not yet independently proven against real hardware for Object 3
+  // itself (see docs/knx-device-write-protocol.md Part 12) - the
+  // computation itself is golden-image tested (tests/group-object-table.
+  // test.ts), but no real device has been written to via this exact path.
+  let groupObjectTable: Buffer | null = null;
+  if (model.groupObjectTableSize && model.groupObjectTableSize > 0) {
+    const groupObjects: GroupObjectFlags[] = coRows.map((co) => ({
+      object_number: co.object_number,
+      // Update has no dedicated raw column (unlike the four below) because
+      // it's always safely recoverable from the composite `flags` string:
+      // buildFlags()'s only lossy case is its ALL-false fallback ('CW'),
+      // which never contains 'U' - so 'U' is present in `flags` iff Update
+      // is genuinely true, with no false-positive/negative case.
+      update: co.flags.includes('U'),
+      transmit: !!co.tx,
+      readOnInit: !!co.read_on_init,
+      write: !!co.write,
+      read: !!co.read,
+      communication: !!co.comm,
+      linked: (co.ga_address || '').trim().length > 0,
+      priority: (['low', 'alarm', 'high', 'system'].includes(co.priority)
+        ? co.priority
+        : 'low') as GroupObjectFlags['priority'],
+    }));
+    groupObjectTable = buildGroupObjectTable(
+      model.groupObjectTableSize,
+      groupObjects,
+    );
+  }
+
   // Parameter memory: build from param layout + current values
   const { paramSize, paramFill, relSegHex, paramBase } = resolveParamSegment(
     model as Parameters<typeof resolveParamSegment>[0],
@@ -957,6 +1002,7 @@ function buildDeviceProgramming(dev: Device): DeviceProgramming {
     steps,
     gaTable,
     assocTable,
+    groupObjectTable,
     paramMem,
     paramBase,
     absSegData: model.absSegData ?? {},
@@ -998,8 +1044,16 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
 
   const built = buildDeviceProgramming(dev);
   if (!built.ok) return res.status(built.status).json(built.body);
-  const { steps, gaTable, assocTable, paramMem, paramBase, absSegData, appId } =
-    built;
+  const {
+    steps,
+    gaTable,
+    assocTable,
+    groupObjectTable,
+    paramMem,
+    paramBase,
+    absSegData,
+    appId,
+  } = built;
 
   // Resolve device-resident relmem bases (PID 7) and refuse to write to an
   // unallocated segment — a zero base would target near-zero addresses and
@@ -1029,7 +1083,14 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       assocTable,
       paramMem,
       onProgress,
-      { paramBase, absSegData, appId, resolvedBases: bases, mode },
+      {
+        paramBase,
+        absSegData,
+        appId,
+        resolvedBases: bases,
+        mode,
+        groupObjectTable,
+      },
     );
     db.run('UPDATE devices SET status=? WHERE id=?', ['programmed', dev.id]);
     db.scheduleSave();
@@ -1113,9 +1174,18 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
   const isRelSegmentApp = (
     steps as Array<{ type: string; objIdx?: number }>
   ).some((s) => s.type === 'WriteRelMem');
+  // Only a genuine WriteRelMem step (a real content write) counts as
+  // "already handled" here - LoadImageProp is confirmed read-only for every
+  // objIdx (docs/knx-device-write-protocol.md Part 7), so a model
+  // declaring it never actually reads/writes the GA/Association table
+  // content itself. Same fix as knx-connection.ts's downloadDevice()
+  // (2026-08-29, koolenex 9eaed85) - this verify-side copy had the
+  // identical bug: for 1.1.10's app (which declares LoadImageProp for
+  // objIdx 1/2/3), verify silently skipped comparing the real GA/
+  // Association table content against the device at all.
   const declaredTableObjIdxs = new Set(
     (steps as Array<{ type: string; objIdx?: number }>)
-      .filter((s) => s.type === 'WriteRelMem' || s.type === 'LoadImageProp')
+      .filter((s) => s.type === 'WriteRelMem')
       .map((s) => s.objIdx),
   );
   const extraObjIdxs: number[] = [];

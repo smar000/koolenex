@@ -121,7 +121,11 @@ export async function init(
       ga_send       TEXT DEFAULT '',
       ga_receive    TEXT DEFAULT '',
       read_on_init  INTEGER DEFAULT 0,
-      priority      TEXT DEFAULT 'low'
+      priority      TEXT DEFAULT 'low',
+      read          INTEGER DEFAULT 0,
+      write         INTEGER DEFAULT 0,
+      comm          INTEGER DEFAULT 0,
+      tx            INTEGER DEFAULT 0
     )
   `);
   // Migrations for existing databases
@@ -210,6 +214,14 @@ export async function init(
   // lowercase-string convention ('low'/'alarm'/'high'/'system').
   migrate('com_objects', 'read_on_init', 'INTEGER DEFAULT 0');
   migrate('com_objects', 'priority', "TEXT DEFAULT 'low'");
+  // Raw Read/Write/Communication/Transmit booleans - added same day
+  // alongside read_on_init/priority above. `flags` is a composite DISPLAY
+  // string only (buildFlags()) and has a lossy all-false fallback ('CW') -
+  // not safe to parse back into individual booleans for a real download.
+  migrate('com_objects', 'read', 'INTEGER DEFAULT 0');
+  migrate('com_objects', 'write', 'INTEGER DEFAULT 0');
+  migrate('com_objects', 'comm', 'INTEGER DEFAULT 0');
+  migrate('com_objects', 'tx', 'INTEGER DEFAULT 0');
   migrate('devices', 'space_id', 'INTEGER');
   migrate('devices', 'parameters', "TEXT DEFAULT '[]'");
   migrate('devices', 'app_ref', "TEXT DEFAULT ''");

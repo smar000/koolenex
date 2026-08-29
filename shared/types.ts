@@ -99,6 +99,18 @@ export interface ComObject {
   ga_address: string;
   ga_send: string;
   ga_receive: string;
+  // Added 2026-08-29 for Object 3 (Group Object Table) support - see
+  // ets-app.ts's CoDef/CorDef and docs/knx-device-write-protocol.md §10.1.
+  // read_on_init/read/write/comm/tx are stored as SQLite's
+  // boolean-as-INTEGER convention (0/1). read/write/comm/tx are the raw
+  // booleans `flags` (a composite display string, lossy in its all-false
+  // fallback case) was never safe to parse back into.
+  read_on_init: number;
+  priority: string;
+  read: number;
+  write: number;
+  comm: number;
+  tx: number;
 }
 
 export interface ComObjectWithDevice extends ComObject {

@@ -279,6 +279,16 @@ interface ParsedComObject {
   // ets-app.ts's CoDef/CorDef and docs/knx-device-write-protocol.md §10.1.
   read_on_init?: boolean;
   priority?: string;
+  // Raw Read/Write/Communication/Transmit booleans - added alongside
+  // read_on_init/priority above, same day. `flags` (buildFlags()) is a
+  // composite DISPLAY string only, and has a lossy fallback ('CW' when
+  // comm/read/write/tx/u are ALL false - see buildFlags()'s own comment) -
+  // not safe to parse back into individual booleans for a real download.
+  // Object 3's computeGroupObjectByte() needs the real booleans directly.
+  read?: boolean;
+  write?: boolean;
+  comm?: boolean;
+  tx?: boolean;
 }
 
 interface ParsedSpace {
@@ -974,6 +984,10 @@ export function parseKnxproj(
               ga_receive: '',
               read_on_init: readOnInit,
               priority,
+              read,
+              write,
+              comm,
+              tx,
             };
 
             const coGAs: string[] = [],
@@ -1098,6 +1112,10 @@ export function parseKnxproj(
                   ga_address: '',
                   read_on_init: merged.readOnInit,
                   priority: merged.priority,
+                  read: merged.read,
+                  write: merged.write,
+                  comm: merged.comm,
+                  tx: merged.tx,
                 });
               } catch (e: unknown) {
                 logger.error('ets', 'CO merge error', {
@@ -1138,6 +1156,14 @@ export function parseKnxproj(
       if (m) {
         // Also attach loadProcedures so the client/downloader can use them
         m.loadProcedures = idx.loadProcedures || [];
+        // Object 3 (Group Object Table) real buffer size - see
+        // ParamModel.groupObjectTableSize's doc comment (ets-app.ts) for the
+        // real-hardware-verified formula. 0 maxComObjectNumber (an app with
+        // no declared ComObjects at all) intentionally yields undefined, not
+        // a bogus 2-byte table.
+        if (idx.maxComObjectNumber > 0) {
+          m.groupObjectTableSize = 2 * idx.maxComObjectNumber + 2;
+        }
         paramModels[aid] = m;
       }
     } catch (e) {

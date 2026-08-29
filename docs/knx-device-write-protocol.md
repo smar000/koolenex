@@ -619,7 +619,14 @@ parameters or other manufacturers' apps - confirmed for this one app's "Characte
 value domain" parameters only; `buildParamMem()`'s fallback (raw payload, no framing) is a
 deliberate safety net for an unverified shape, not assumed correct.
 
-## Part 10 — Object 3: the standard Group Object Table, content decoded, write-trigger resolved for both Partial and Full Downloads
+## Part 10 — Object 3 (interface object index 3): the standard Group Object Table, one of the four objects Property 27 (Part 7-8) applies to
+
+Object 3 is addressed here purely as a KNX interface object - "object 3" means objIdx 3, not
+property 27 itself. The connection to Property 27: objIdx 3 is one of the four interface objects
+(1/2/3/4, see Part 7) that each carry their own property-27 content-status/checksum value -
+`PropValueRead OX=3 P=27` appears in the same `LoadImageProp` read cycle as objIdx 4's checksum
+(§1.1', Part 8's trigger finding), just device/app-scoped to 1.1.10 the same way the rest of
+property 27 is (1.1.9's app never touches property 27 in any form, on any object - Part 8).
 
 🟢 **Identity and structure, confirmed directly**:
 - **Object 3 is the standard KNX "Group Object Table" object** (type `9`). Read live via
@@ -658,7 +665,7 @@ Priority (bits 1:0), values confirmed by direct empirical mapping in decreasing 
 | Low | `11` |
 | Alarm | `10` |
 | High | `01` |
-| System | `00` 🟡 inferred by pattern only - no object with a "System" option was available to test directly |
+| System | `00` 🟡 inferred by pattern, not directly tested - per KNX's own documentation (support.knx.org, "Group Object"), System priority is not settable from ETS at all, so no real project can exercise this value; the pattern-inferred bits are the practical answer |
 
 **Methodology**: toggled one flag at a time on communication object 7 (1.1.9), always confirming
 the resulting single-bit change against the previous known state, then reverted everything to
@@ -691,9 +698,14 @@ bit, only one of which touches the link tables at all. Objects 6 and 7 (never li
 Communication toggled both ways across many tests) always showed bit 2 = `0`, consistent with the
 AND relationship.
 
+**Multiple GA links tested**: object 5 with a second GA link added (both links confirmed in the
+Association table, `[gaIndex 1, gaIndex 2] → com-object 5`) and Communication re-enabled still
+shows bit 2 = `1`, byte-for-byte identical to the single-link case - a plain boolean
+("has at least one link"), not something that varies with link count.
+
 **Scope**: the AND-relationship (flag enabled AND link present) correctly predicts every result
-observed across all tests on three objects. Not yet tested: an object with 2 GA links (one
-active/one not), or other DPT/direction combinations.
+observed across all tests on three objects, one and two links. Not yet tested: mixed-direction
+links (e.g. one send, one receive on the same object), or other DPT/direction combinations.
 
 **Complete bit accounting**: `7=Update, 6=Transmit, 5=Read-On-Init, 4=Write, 3=Read,
 2=Communication-AND-linked, 1:0=Priority`. Every bit has an observed, evidenced role.
@@ -705,8 +717,8 @@ formula `offset = 2 × communication-object number` can be used unconditionally,
 which objects are linked or Communication-enabled elsewhere in the app.
 
 **Still open**: whether the formula/layout holds for a genuinely different mask family (only
-System B tested throughout this project); whether bit 2's AND-relationship holds under more
-complex link configurations (multiple links, mixed directions).
+System B tested throughout this project); whether bit 2's AND-relationship holds under
+mixed-direction links (e.g. one send, one receive on the same object).
 
 ### 10.2 Partial Download write-trigger: conditional on any communication-object-level change
 
@@ -824,6 +836,10 @@ Full implementation narrative, commit hash, and test coverage:
   byte-for-byte unchanged - the decisive test that corrected the earlier wrong "Communication
   flag has zero representation" claim) (knx-ets-manager repo) — primary source for §10.1's
   corrected bit-2 finding and the offset-formula reindexing check.
+- `docs/data/captures/2026-08-29-ets-partial-download-obj3-multilink-test-1.1.9.pcapng`
+  (knx-ets-manager repo) — a second GA link added to a communication object already linked once;
+  bit 2 stays a plain boolean, unaffected by link count. Primary source for §10.1's multi-link
+  finding.
 - `docs/data/captures/2026-08-28-ets-full-download-history-and-blob-params-1.1.10.pcapng`,
   cross-checked against every other saved capture (`grep -c "OX=3 P=5"` across
   `docs/data/captures/*.pcapng`), a live `PID_OBJECT_TYPE`/`PID_TABLE_REFERENCE` read via

@@ -958,6 +958,9 @@ function buildDeviceProgramming(dev: Device): DeviceProgramming {
       priority: (['low', 'alarm', 'high', 'system'].includes(co.priority)
         ? co.priority
         : 'low') as GroupObjectFlags['priority'],
+      // Companion size-code byte - see groupObjectSizeCode()'s doc comment
+      // (knx-tables.ts) for the real-hardware confirmation (2026-08-29).
+      objectSize: co.object_size,
     }));
     groupObjectTable = buildGroupObjectTable(
       model.groupObjectTableSize,

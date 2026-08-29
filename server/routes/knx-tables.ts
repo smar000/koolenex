@@ -312,6 +312,59 @@ export interface GroupObjectFlags {
   /** Whether this communication object has at least one real GA link (see bit 2 above). */
   linked?: boolean;
   priority?: 'low' | 'alarm' | 'high' | 'system';
+  /**
+   * The object's real ETS `ObjectSize` string (e.g. "1 Bit", "4 Bit", "1 Byte", "3 Bytes",
+   * "8 Bytes") - drives the companion byte immediately after the flag byte (see
+   * `groupObjectSizeCode()` below). Optional only because a caller with no size data at all
+   * still gets a usable (if incomplete) table - the companion byte simply stays `0` (= "1 Bit"),
+   * matching every object this project has seen that genuinely IS 1 Bit.
+   */
+  objectSize?: string;
+}
+
+// The companion byte immediately after each object's flag byte (2026-08-29, real-hardware
+// confirmed) is the KNX standard "Group Object Size" 4-bit code - NOT unused padding, as
+// originally assumed when Object 3's format was first decoded (§10.1). Confirmed by a real,
+// independent cross-device/cross-manufacturer test: pulled real ComObject/ComObjectRef
+// `ObjectSize` declarations from both testbed apps' own XML and checked them against the real
+// captured companion byte at that object's offset - 4 for 4 matches, on two completely different
+// devices (1.1.9: DPST-10-1/DPST-11-1, both 3 bytes -> 0x09 on both; DPST-19-1, 8 bytes -> 0x0C.
+// 1.1.10: DPST-3-7, 4 bit -> 0x03; DPST-5-1, 1 byte -> 0x07), plus the 1-bit case confirmed
+// extensively on both devices by every ordinary object showing companion byte 0. This also
+// explains why toggling Read-On-Init (a flag) never moved the mystery byte (docs/knx-device-
+// write-protocol.md Part 16) - it isn't flag-derived at all, it's fixed by the object's DPT.
+// String keys are ETS's own exact `ObjectSize` attribute text (confirmed against real project
+// XML this session) - singular "Bit"/"Byte" for 1, plural for 2+, matching ETS's own wording.
+const GROUP_OBJECT_SIZE_CODES: Record<string, number> = {
+  '1 Bit': 0,
+  '2 Bit': 1,
+  '3 Bit': 2,
+  '4 Bit': 3,
+  '5 Bit': 4,
+  '6 Bit': 5,
+  '7 Bit': 6,
+  '1 Byte': 7,
+  '2 Bytes': 8,
+  '3 Bytes': 9,
+  '4 Bytes': 10,
+  '6 Bytes': 11,
+  '8 Bytes': 12,
+  '10 Bytes': 13,
+  '14 Bytes': 14,
+  'Variable length': 15,
+};
+
+/**
+ * Maps a real ETS `ObjectSize` string to Object 3's companion-byte size code (0-15). Only 4 of
+ * the 16 codes have been directly confirmed against real captured hardware bytes so far (4 Bit,
+ * 1 Byte, 3 Bytes, 8 Bytes - see the doc comment above); the rest follow the same well-known KNX
+ * standard size-code sequence but haven't individually been checked against a real device.
+ * Unrecognized/missing input defaults to `0` (1 Bit) rather than throwing - matches this
+ * project's own convention elsewhere (e.g. `computeGroupObjectByte()`'s priority default) of
+ * degrading to the most common real-world case rather than failing the whole table build.
+ */
+export function groupObjectSizeCode(objectSize: string | undefined): number {
+  return GROUP_OBJECT_SIZE_CODES[(objectSize ?? '').trim()] ?? 0;
 }
 
 const GROUP_OBJECT_PRIORITY_BITS: Record<string, number> = {
@@ -336,19 +389,32 @@ export function computeGroupObjectByte(co: GroupObjectFlags): number {
 /**
  * Builds Object 3 (Group Object Table) content: a zero-filled buffer of the device's real,
  * per-app table size (98 bytes for 1.1.9, 942 for 1.1.10 - resolved via PID_TABLE_REFERENCE, not
- * computed here) with each communication object's flag byte placed at `2 × object_number`.
+ * computed here) with each communication object's flag byte placed at `2 × object_number` and its
+ * companion size-code byte at `2 × object_number + 1` (see `groupObjectSizeCode()` above).
  * Communication objects not present in `comObjects` are left at the buffer's zero fill, matching
- * every real device default observed (§10.1 - Object 3's content is almost entirely zero-filled).
+ * every real device default observed (§10.1 - Object 3's content is almost entirely zero-filled;
+ * a zero-filled companion byte correctly means "1 Bit", the size of every such absent/unmodeled
+ * object seen so far).
+ *
+ * Bytes 0-1 (the table's first 2 bytes) are a real, confirmed 2-byte big-endian header - NOT a
+ * slot for a nonexistent "object 0" as originally assumed - holding the app's total declared
+ * communication-object count. Confirmed against real captures on both testbed devices: `0x0030`
+ * (48) for 1.1.9, `0x01D6` (470) for 1.1.10 - both exactly matching `maxComObjectNumber`
+ * (ets-app.ts), the same value the caller already used to compute `size` itself
+ * (`size = 2 × maxComObjectNumber + 2`), so it's derived here from `size` directly rather than
+ * requiring a separate parameter (`(size - 2) / 2` recovers the original count exactly).
  */
 export function buildGroupObjectTable(
   size: number,
   comObjects: GroupObjectFlags[],
 ): Buffer {
   const buf = Buffer.alloc(size);
+  if (size >= 2) buf.writeUInt16BE((size - 2) / 2, 0);
   for (const co of comObjects) {
     const offset = co.object_number * 2;
     if (offset < 0 || offset >= size) continue; // out of range for this device's real table
     buf[offset] = computeGroupObjectByte(co);
+    if (offset + 1 < size) buf[offset + 1] = groupObjectSizeCode(co.objectSize);
   }
   return buf;
 }

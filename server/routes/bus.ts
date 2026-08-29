@@ -966,7 +966,12 @@ function buildDeviceProgramming(dev: Device): DeviceProgramming {
   };
 }
 
-// Full application download for a device
+// Full (or, since 2026-08-29, partial) application download for a device.
+// mode defaults to 'full' - the original, only-ever-tested behavior, kept
+// as the default so existing callers/tests see zero change. mode='partial'
+// is a new, best-effort code path (see DownloadExtra.mode's doc comment in
+// knx-connection.ts) - only exercised so far against 1.1.9's RelSegment-
+// style app (mask 07B0).
 router.post('/bus/program-device', async (req: Request, res: Response) => {
   const b = requireBus(res);
   if (!b) return;
@@ -976,9 +981,10 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       deviceAddress: z.string().min(1),
       projectId: z.number().int().optional(),
       deviceId: z.number().int().optional(),
+      mode: z.enum(['full', 'partial']).optional().default('full'),
     }),
   );
-  const { deviceAddress, projectId, deviceId } = body;
+  const { deviceAddress, projectId, deviceId, mode } = body;
   if (!b.connected) return res.status(409).json({ error: 'Bus not connected' });
 
   // Load device data
@@ -1023,11 +1029,11 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       assocTable,
       paramMem,
       onProgress,
-      { paramBase, absSegData, appId, resolvedBases: bases },
+      { paramBase, absSegData, appId, resolvedBases: bases, mode },
     );
     db.run('UPDATE devices SET status=? WHERE id=?', ['programmed', dev.id]);
     db.scheduleSave();
-    res.json({ ok: true, deviceAddress });
+    res.json({ ok: true, deviceAddress, mode });
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
     b.broadcast('program:progress', {

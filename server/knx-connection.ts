@@ -112,6 +112,21 @@ export interface DownloadExtra {
   absSegData?: Record<number, AbsSegSeed>;
   appId?: string;
   resolvedBases?: Record<number, number>;
+  // 'full' (default) preserves all pre-existing behavior exactly: LoadData's
+  // mode byte follows the model's own declared full/combined shape, and
+  // every RelSegment/table write always happens regardless of current
+  // device content - matches every real ETS Full Download this project has
+  // captured. 'partial' is new (2026-08-29): forces LoadData's mode byte to
+  // the real captured Partial-Download value (0x00, see
+  // docs/knx-device-write-protocol.md) and, before touching an object, reads
+  // its current on-device bytes and skips the whole Unload/StartLoading/
+  // LoadData/write/LoadCompleted cycle when they already match the computed
+  // image - mirroring the real "17 bytes only, rest skipped" optimization
+  // observed in an ETS Partial Download capture. Only tested against
+  // RelSegment/ABB-style (System 7) apps (1.1.9/1.1.10's app family, mask
+  // 07B0) - the AbsoluteSegment (MDT-style) branch above is untouched by
+  // this and still only ever does a full replay.
+  mode?: 'full' | 'partial';
 }
 
 // ── Device info type ───────────────────────────────────────────────────────────
@@ -717,8 +732,11 @@ export class KnxConnection extends EventEmitter {
       return;
     }
 
-    await this.managementSession(deviceAddr, async ({ nextSeq, waitResponse }) => {
+    await this.managementSession(deviceAddr, async (fns) => {
+      const { nextSeq, waitResponse } = fns;
       const MEM_CHUNK = 10;
+      // See DownloadExtra.mode's doc comment above for what 'partial' does.
+      const mode: 'full' | 'partial' = extra?.mode ?? 'full';
 
       // Waits for the device's actual PropertyValue_Response before
       // resolving - PropertyValue_Write/Response (0x3D7/0x3D5) aren't
@@ -943,6 +961,31 @@ export class KnxConnection extends EventEmitter {
             if (!paramMem) throw new Error('Parameter memory not available');
             const objIdx = step.objIdx ?? 4;
             const relSeg = relSegByObj.get(objIdx);
+            const base = extra?.resolvedBases?.[objIdx] ?? 0;
+            const mem = paramMem.slice(0, step.size);
+            // Partial mode: skip this object entirely (no Unload/
+            // StartLoading/LoadData/write/LoadCompleted at all) when the
+            // device's current content already matches what we'd write -
+            // mirrors the real "17 bytes only" optimization seen in an
+            // actual ETS Partial Download capture (see DownloadExtra.mode's
+            // doc comment). Full mode's behavior below is unchanged either
+            // way - this whole block only runs `readRegionInSession` in
+            // partial mode.
+            if (mode === 'partial' && base) {
+              const current = await this.readRegionInSession(
+                fns,
+                deviceAddr,
+                base + (step.offset ?? 0),
+                mem.length,
+                MEM_CHUNK,
+              );
+              if (current.equals(mem)) {
+                log(
+                  `WriteRelMem ObjIdx=${objIdx}: partial mode, device already matches - skipping`,
+                );
+                break;
+              }
+            }
             if (relSeg) {
               log(`Unload ObjIdx=${objIdx}`);
               await lsmWrite(objIdx, LSM_EVENT.UNLOAD);
@@ -952,12 +995,18 @@ export class KnxConnection extends EventEmitter {
               await lsmWrite(
                 objIdx,
                 LSM_EVENT.LOAD_DATA,
-                loadDataExtra(relSeg.size, relSeg.fill, relSeg.combined),
+                // Full mode: preserve the model's own declared full/combined
+                // shape exactly as before. Partial mode: force the real
+                // captured Partial-Download mode byte (0x00) regardless of
+                // what the model declares - see DownloadExtra.mode.
+                loadDataExtra(
+                  relSeg.size,
+                  relSeg.fill,
+                  mode === 'full' ? relSeg.combined : false,
+                ),
               );
               anyRelSegmentLoaded = true;
             }
-            const base = extra?.resolvedBases?.[objIdx] ?? 0;
-            const mem = paramMem.slice(0, step.size);
             for (let off = 0; off < mem.length; off += MEM_CHUNK) {
               const chunk = mem.slice(off, off + MEM_CHUNK);
               const seq = nextSeq();
@@ -1114,6 +1163,33 @@ export class KnxConnection extends EventEmitter {
         table: Buffer,
         label: string,
       ): Promise<void> => {
+        // Partial mode: peek the real base and current content BEFORE
+        // starting any load-state transition, and skip the whole cycle if
+        // the device already matches - same rationale as the WriteRelMem
+        // case above. No real Partial Download example of a GA/Association
+        // table write exists yet (see the reference doc's caveat below), so
+        // this is a best-effort extrapolation of the same pattern, not
+        // something independently confirmed for these two objects.
+        if (mode === 'partial') {
+          const peekBuf = await propRead(objIdx, 7);
+          const peekBase =
+            peekBuf && peekBuf.length >= 4 ? peekBuf.readUInt32BE(0) : 0;
+          if (peekBase) {
+            const current = await this.readRegionInSession(
+              fns,
+              deviceAddr,
+              peekBase,
+              table.length,
+              MEM_CHUNK,
+            );
+            if (current.equals(table)) {
+              log(
+                `ObjIdx=${objIdx} (${label}): partial mode, device already matches - skipping`,
+              );
+              return;
+            }
+          }
+        }
         log(`Unload ObjIdx=${objIdx} (${label})`);
         await lsmWrite(objIdx, LSM_EVENT.UNLOAD);
         log(`StartLoading ObjIdx=${objIdx} (${label})`);
@@ -1122,9 +1198,12 @@ export class KnxConnection extends EventEmitter {
         await lsmWrite(
           objIdx,
           LSM_EVENT.LOAD_DATA,
-          // fill=0, mode=Full - matches every real GA/Association table
-          // LoadData observed (see docs/knx-device-write-protocol.md §2.3).
-          loadDataExtra(table.length, 0, true),
+          // fill=0. mode=Full matches every real GA/Association table
+          // LoadData observed so far (see docs/knx-device-write-protocol.md
+          // §2.3); mode=Partial (2026-08-29) is the same best-effort
+          // extrapolation noted above, not independently confirmed on the
+          // wire for these two objects.
+          loadDataExtra(table.length, 0, mode === 'full'),
         );
         anyRelSegmentLoaded = true;
         const baseBuf = await propRead(objIdx, 7);

@@ -412,12 +412,15 @@ Consolidated from throughout this document, for visibility:
    between the two otherwise-identical Partial Download captures? (§1.2)
 2. ~~Object 3's identity, content, and write-trigger~~ - **RESOLVED, see Part 10**: the standard
    Group Object Table; content fully decoded as `offset = 2 × com-object number`, with a per-
-   object flag byte (Update=bit7, Transmit=bit6, Write=bit4, Read=bit3, Priority=bits1:0),
-   cross-confirmed on a second object and a second device/app entirely (§10.1); Communication
-   flag confirmed to have no memory representation at all. Write trigger resolved for both
-   Partial (§10.2, conditional on any communication-object-level change, not just GA links) and
-   Full Downloads (§10.3, conditional on an anomalous `OX=4 P=27` checksum read - itself tied to
-   Part 8's comprehensive-rewrite trigger). **Still open**: bits 2/5 unmapped; 1.1.9 writes
+   object flag byte (Update=bit7, Transmit=bit6, Read-On-Init=bit5, Write=bit4, Read=bit3,
+   bit2=correlates with GA-link presence but not proven to be *only* that, Priority=bits1:0),
+   cross-confirmed on a second object, a third object with a different DPT/size, and a second
+   device/app entirely (§10.1); Communication flag confirmed to have no memory representation at
+   all (a real, deliberate distinction from bit 2). Write trigger resolved for both Partial
+   (§10.2, conditional on any communication-object-level change, not just GA links) and Full
+   Downloads (§10.3, conditional on an anomalous `OX=4 P=27` checksum read - itself tied to
+   Part 8's comprehensive-rewrite trigger). **Still open**: bit 2's exact semantics beyond the
+   observed correlation; 1.1.9 writes
    Object 3 on every Full Download tested, never yet shown skipping it - not reconciled with
    1.1.10's conditional behavior, and 1.1.9's app doesn't even declare property 27.
 3. Whether the mask-version gate (§3) generalizes beyond System B, or whether a real legacy
@@ -644,8 +647,8 @@ byte offset within Object 3 = 2 × communication-object number
 ```
 
 ```
-bit:    7      6         5      4      3     2      1  0
-        Update Transmit  (unmapped)   Write  Read  (unmapped)   Priority
+bit:    7      6         5           4      3     2         1  0
+        Update Transmit  Read-On-Init Write  Read  see below   Priority
 ```
 
 Priority (bits 1:0), values confirmed by direct empirical mapping in decreasing order:
@@ -677,11 +680,40 @@ bit) - determined blind, from the capture alone, by computing the expected defau
 app's own XML and diffing against the real captured value, which correctly identified the single
 changed flag (Write) before being told what had changed. This cross-device, cross-app,
 predicted-not-fitted match is strong evidence this is a genuine mask/device-generation-level
-standard structure, not an app-specific quirk.
+standard structure, not an app-specific quirk. **Read-On-Init (bit 5)** was independently
+reconfirmed a second time, blind, on a third object (object 5, an 8-byte `DPST-19-1` date/time
+object - a different DPT/size than every other object tested, confirming the record format is
+independent of the object's own payload size).
 
-**Still open**: bits 2 and 5 are unmapped (every test so far showed them at `0`) - likely reserved
-or unused, not confirmed either way. Whether the formula/layout holds for a genuinely different
-mask family (only System B tested throughout this project) is untested.
+**Bit 2 correlates with GA-link presence - a real, direct, but still narrow finding.**
+🟢 Confirmed directly: object 5 (linked to a real GA) showed bit 2 = `1` in every capture,
+consistently; objects 6 and 7 (never linked to any GA in this project) showed bit 2 = `0` in
+every capture; and, decisively, removing communication object 8's only GA link mid-session
+flipped its bit 2 from `1` to `0` in the same download that shrank the GA and Association tables
+to remove that link - independently corroborated by two other memory regions changing in lockstep
+with Object 3, not just Object 3 alone.
+
+**What this does and does not establish**: it's a real, reproduced correlation between "this
+communication object currently has at least one GA link" and bit 2, observed going both
+directions (present→absent on object 8, and consistently present/absent across objects 5/6/7
+throughout). It is **not** proven to be *only* that - every test changed exactly one thing (a
+link existing or not), so a distinguishing factor riding along with link presence (e.g. number of
+links, which specific GA, the com-object's direction/DPT, or something ETS derives internally
+that happens to track link presence in every case tested) hasn't been ruled out. Treat "bit 2 =
+has a GA link" as the best-supported working description, not a settled mechanism, until a test
+that varies something else while holding link-presence constant (e.g. an object with 2 links vs
+1) is run.
+
+**Complete bit accounting**: with bit 2 now correlated, every bit in the byte has an observed
+role except none remain fully unexplained - `7=Update, 6=Transmit, 5=Read-On-Init, 4=Write,
+3=Read, 2=GA-link-presence (correlational), 1:0=Priority`. The Communication *flag* itself
+remains, separately, confirmed to have zero memory representation (above) - a real, deliberate
+distinction from bit 2: the project-level Communication setting isn't tracked at all, but the
+practical consequence of having a linked GA apparently is.
+
+**Still open**: whether the formula/layout holds for a genuinely different mask family (only
+System B tested throughout this project); bit 2's exact semantics beyond "correlates with link
+presence" (see above).
 
 ### 10.2 Partial Download write-trigger: conditional on any communication-object-level change
 
@@ -782,9 +814,16 @@ Full implementation narrative, commit hash, and test coverage:
 
 - `docs/data/captures/2026-08-29-ets-*-obj3-map-*-1.1.9.pcapng` (12 captures: read/write/
   transmit/comm flag tests and their reverts/reproductions on com-objects 6 and 7, three Priority
-  values, two full-session reset sanity checks) and
-  `2026-08-29-ets-download-obj3-map-flag-1.1.10.pcapng` (knx-ets-manager repo) — primary source
-  for §10.1's full bit-mapping/offset-formula finding and §10.2's broadened trigger description.
+  values, two full-session reset sanity checks), `2026-08-29-ets-download-obj3-map-flag-1.1.10.pcapng`
+  (knx-ets-manager repo) — primary source for §10.1's full bit-mapping/offset-formula finding and
+  §10.2's broadened trigger description.
+- `docs/data/captures/2026-08-29-ets-partial-download-obj3-map-followup-1.1.9.pcapng` (Read-On-Init
+  reconfirmed blind on a third object, object 5, a different DPT/size) and
+  `2026-08-29-ets-partial-download-obj3-map-followup-2-1.1.9.pcapng` (two simultaneous changes
+  decoded correctly in one download - object 5's Read-On-Init reverted, object 8's GA link
+  removed, bit 2's GA-link correlation confirmed by a real link removal corroborated by the GA
+  and Association tables shrinking in lockstep) (knx-ets-manager repo) — primary source for
+  §10.1's bit-2/Read-On-Init follow-up findings.
 - `docs/data/captures/2026-08-28-ets-full-download-history-and-blob-params-1.1.10.pcapng`,
   cross-checked against every other saved capture (`grep -c "OX=3 P=5"` across
   `docs/data/captures/*.pcapng`), a live `PID_OBJECT_TYPE`/`PID_TABLE_REFERENCE` read via

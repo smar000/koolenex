@@ -373,6 +373,33 @@ interface objects (1/2/3/4) - Object 3 (objIdx 3) is one of the four, with its o
 objIdx 4 for the Full-Download trigger finding. Part 10's heading and intro now state this
 explicitly.
 
+## Part 11: link direction (Send vs receive-only) - not in Object 3, lives in Association-table order
+
+Last remaining item on bit 2's scope: does mixed-direction linking (one Send GA, one receive-only
+GA on the same object) change anything? User clarified ETS's own rule first - direction isn't an
+independently settable flag, it's implicit: the first-added link sends, every subsequent link is
+receive-only. That meant the earlier multi-link test (Part 10) already had one send + one receive
+link without either of us realizing it at the time.
+
+**Test**: kept the same two GA links on object 5 from Part 10, swapped which one sends (removed
+and re-added, changing which was "first"). Result: Object 3 and the GA table both stayed
+byte-for-byte unchanged. The Association table's two entries swapped position - same two entries
+(same `gaIndex`/`coNumber` pairs), same target object, order flipped.
+
+**Conclusion**: link direction is real, written to the device, but the encoding is table *order*,
+not a per-entry flag and not anything in Object 3. This is a clean, informative negative result
+for Object 3 specifically (bit 2 only ever tracks "has a link," never which one sends) and a real
+new positive finding for the Association table's own wire format - added to the reference doc's
+§2.6 alongside the existing GA/Association table format facts.
+
+**This closes out Object 3's decode as fully as real-hardware testing on this project's testbed
+can take it.** The one remaining, explicitly-flagged gap is structural, not something a further
+test on this hardware can resolve: **only System B mask family has ever been tested** (both real
+devices this whole project has used share that mask). User: "we cannot do much about that as yet,
+but will do in due course... keep this flagged and on our ultimate to-check list" - kept visible
+as a standing gap in the reference doc, CLAUDE.md, and memory, not silently dropped now that
+everything else is closed.
+
 ## Still open, after Part 6's redo
 
 - ~~1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo~~ -
@@ -384,14 +411,17 @@ explicitly.
   directly apply. Real next step: an out-of-band tamper test on 1.1.9 checking for a different
   anomalous-read signal, and hunting for any genuinely untampered 1.1.9 session that skips
   Object 3 (none found yet, in 5 real captures).
-- ~~The general Object 3 record layout~~ - **RESOLVED, see Parts 7-10 above**: a complete,
-  computable formula (`offset = 2 × com-object number`, confirmed not to reindex when objects are
-  disabled - Part 9) and a full bit map, cross-confirmed on three objects, two devices/apps, and
-  multiple GA links on the same object (Part 10). Bit 2 = `Communication flag AND has a real GA
-  link`, corrected in Part 9 after an earlier wrong "zero representation" claim, confirmed
-  link-count-independent in Part 10. ~~Priority's `System` value~~ - **resolved, non-issue**: per
-  KNX's own documentation, System priority isn't settable from ETS at all (Part 10). Still open:
-  bit 2's behavior under mixed-direction links (one send, one receive on the same object).
+- ~~The general Object 3 record layout~~ - **FULLY RESOLVED AND CLOSED, see Parts 7-11 above**: a
+  complete, computable formula (`offset = 2 × com-object number`, confirmed not to reindex when
+  objects are disabled - Part 9) and a full bit map, cross-confirmed on three objects, two
+  devices/apps, multiple GA links, and mixed send/receive links (Parts 10-11). Bit 2 =
+  `Communication flag AND has a real GA link`, corrected in Part 9 after an earlier wrong "zero
+  representation" claim, confirmed link-count- and direction-independent in Parts 10-11 (link
+  direction itself lives in Association-table entry order, not Object 3 - Part 11). Priority's
+  `System` value resolved as a non-issue - per KNX's own documentation, unreachable from ETS at
+  all (Part 10). **Only remaining gap: only System B mask family tested throughout this project**
+  - flagged as a standing, not-yet-investigable limitation, not silently dropped now that
+  everything else is closed.
 - Whether the checksum-trigger mechanism (Part 6, reference doc Part 8) generalizes beyond
   1.1.10's app.
 - Whether the partial-download GA/Association-table skip logic (Part 11) generalizes beyond this

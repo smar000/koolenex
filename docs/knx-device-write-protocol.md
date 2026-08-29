@@ -411,12 +411,15 @@ Consolidated from throughout this document, for visibility:
 1. Why does the NTP-parameter write differ in byte count (5 bytes for "off" vs 1 byte for "on")
    between the two otherwise-identical Partial Download captures? (§1.2)
 2. ~~Object 3's identity, content, and write-trigger~~ - **RESOLVED, see Part 10**: the standard
-   Group Object Table, content decoded as a per-communication-object flag bitfield (§10.1), write
-   trigger resolved for both Partial (§10.2, conditional on a GA/link change) and Full Downloads
-   (§10.3, conditional on an anomalous `OX=4 P=27` checksum read - itself tied to Part 8's
-   comprehensive-rewrite trigger). **Still open**: 1.1.9 writes Object 3 on every Full Download
-   tested, never yet shown skipping it - not reconciled with 1.1.10's conditional behavior, and
-   1.1.9's app doesn't even declare property 27, so the same mechanism can't directly explain it.
+   Group Object Table; content fully decoded as `offset = 2 × com-object number`, with a per-
+   object flag byte (Update=bit7, Transmit=bit6, Write=bit4, Read=bit3, Priority=bits1:0),
+   cross-confirmed on a second object and a second device/app entirely (§10.1); Communication
+   flag confirmed to have no memory representation at all. Write trigger resolved for both
+   Partial (§10.2, conditional on any communication-object-level change, not just GA links) and
+   Full Downloads (§10.3, conditional on an anomalous `OX=4 P=27` checksum read - itself tied to
+   Part 8's comprehensive-rewrite trigger). **Still open**: bits 2/5 unmapped; 1.1.9 writes
+   Object 3 on every Full Download tested, never yet shown skipping it - not reconciled with
+   1.1.10's conditional behavior, and 1.1.9's app doesn't even declare property 27.
 3. Whether the mask-version gate (§3) generalizes beyond System B, or whether a real legacy
    device needs something different — untested, no legacy hardware available.
 4. Whether the LoadData `mode` byte's Full/Partial meaning holds for objects other than OX=4 —
@@ -631,36 +634,75 @@ deliberate safety net for an unverified shape, not assumed correct.
 - Not declared in either app's own `LoadProcedures` XML - written via the same universal,
   mask-defined mechanism as the GA/Association tables (Part 6).
 
-### 10.1 Content: a genuine per-communication-object flag bitfield
+### 10.1 Content: a per-communication-object flag record, fully decoded and cross-app confirmed
 
-🟢 **Confirmed, reproduced twice on real hardware (1.1.9)**: flipping one communication-object
-flag in ETS, nothing else changed, flips exactly one bit in Object 3's own written content, at a
-byte position specific to that object.
+🟢 **CONFIRMED - full record layout for Object 3, one byte per communication object, offset
+computed by a real formula, decoded via a systematic bit-by-bit mapping session (2026-08-29)**:
 
-| Flag changed | Byte offset | Before → After | Bit |
-|---|---|---|---|
-| Update, com-object 7 (NTP sync input): off→on | 14 | `0x53` → `0xD3` | 7 (`XOR 0x80`) |
-| Update, com-object 7: on→off (revert) | 14 | `0xD3` → `0x53` | 7 (reverted cleanly) |
-| Read-On-Init, com-object 6 (Date/time input): off→on | 12 | `0x53` → `0x73` | 5 (`XOR 0x20`) |
+```
+byte offset within Object 3 = 2 × communication-object number
+```
 
-Two objects, 2 bytes apart, consistent with a small regular per-object record. Two specific
-flag↔bit mappings confirmed; the full record layout (every bit, every object) is not mapped
-beyond these two positions.
+```
+bit:    7      6         5      4      3     2      1  0
+        Update Transmit  (unmapped)   Write  Read  (unmapped)   Priority
+```
 
-### 10.2 Partial Download write-trigger: conditional on a GA/link change
+Priority (bits 1:0), values confirmed by direct empirical mapping in decreasing order:
 
-🟢 **Confirmed, reproduced twice, both directions (1.1.9)**: on a Partial Download, GA table /
-Association table / Object 3 are written together exactly when a GA link genuinely changes, and
-skipped together otherwise - not unconditional either way.
+| Priority | Bits |
+|---|---|
+| Low | `11` |
+| Alarm | `10` |
+| High | `01` |
+| System | `00` 🟡 inferred by pattern only - no object with a "System" option was available to test directly |
 
-| Partial Download | GA/link changed? | OX=1/2/3 |
+**Communication flag has NO representation anywhere in device memory** - confirmed rigorously,
+twice: toggling it off produced a byte-for-byte identical Object 3 payload, GA table, and
+Association table (checked against every one of the 98/942 bytes, not just the record itself),
+and a full whole-capture diff (every frame, both directions) showed zero content difference
+anywhere in the entire session, reproduced on a fresh retry. Whatever ETS does with this flag, it
+is not written to the device via any mechanism this project has observed.
+
+**Methodology**: toggled one flag at a time on communication object 7 (1.1.9), always confirming
+the resulting single-bit change against the previous known state, then reverted everything to
+manufacturer default and did a full-session byte comparison against the very first (pre-testing)
+baseline capture - zero diffs, confirming the whole sequence was self-consistent and fully
+reversible. The formula and bit layout were then independently verified on a **second
+communication object on the same device** (object 6, offset 12 = 2×6, Update and Read both
+matched exactly, including an additive two-flags-at-once case computed correctly in advance) and,
+decisively, on **a completely different device and app** (1.1.10, object 96 "dimming channel 4",
+offset `0xC0` = 2×96, matching manufacturer-declared defaults for that object exactly except one
+bit) - determined blind, from the capture alone, by computing the expected default byte from the
+app's own XML and diffing against the real captured value, which correctly identified the single
+changed flag (Write) before being told what had changed. This cross-device, cross-app,
+predicted-not-fitted match is strong evidence this is a genuine mask/device-generation-level
+standard structure, not an app-specific quirk.
+
+**Still open**: bits 2 and 5 are unmapped (every test so far showed them at `0`) - likely reserved
+or unused, not confirmed either way. Whether the formula/layout holds for a genuinely different
+mask family (only System B tested throughout this project) is untested.
+
+### 10.2 Partial Download write-trigger: conditional on any communication-object-level change
+
+🟢 **Confirmed, reproduced many times, both directions (1.1.9)**: on a Partial Download, GA table
+/ Association table / Object 3 are written together exactly when a communication object's state
+genuinely changes - a GA link, a flag, or Priority - and skipped together otherwise. This is
+broader than an earlier framing of this finding ("conditional on a GA/link change") - the bit-
+mapping session above ran many Partial Downloads changing only a flag or Priority, never a GA
+link, and every one still wrote all three objects together; a plain, no-change download in
+between correctly skipped them.
+
+| Partial Download | What changed | OX=1/2/3 |
 |---|---|---|
-| NTP flag toggle (×2, 2026-08-28) | No | not written |
-| GA 9/1/4→9/1/5 (2026-08-29) | Yes | written |
-| GA 9/1/5→9/1/4 + flag revert, same download | Yes | written |
+| NTP flag toggle (×2, 2026-08-28) | nothing (Partial, different objects) | not written |
+| GA 9/1/4→9/1/5 (2026-08-29) | GA link | written |
+| GA 9/1/5→9/1/4 + flag revert, same download | GA link + flag | written |
+| Read/Write/Transmit/Priority flag changes (2026-08-29 mapping session, ~8 downloads) | flag or Priority only, no GA link touched | written every time |
+| Reset-to-default downloads (×2) | flags reverted | written (content matched pre-testing baseline exactly) |
 
-Object 3's content is correct in both directions too, not a blind rewrite - the flag-revert
-test's byte 14 cleanly returned to baseline. Confirmed for 1.1.9 only.
+Object 3's content is correct every time, not a blind rewrite - every flag/Priority change and
+every revert produced exactly the predicted byte. Confirmed for 1.1.9 only.
 
 ### 10.3 Full Download write-trigger: resolved via a systematic controlled redo (1.1.10, 2026-08-29)
 
@@ -738,6 +780,11 @@ Full implementation narrative, commit hash, and test coverage:
 
 ## Sources
 
+- `docs/data/captures/2026-08-29-ets-*-obj3-map-*-1.1.9.pcapng` (12 captures: read/write/
+  transmit/comm flag tests and their reverts/reproductions on com-objects 6 and 7, three Priority
+  values, two full-session reset sanity checks) and
+  `2026-08-29-ets-download-obj3-map-flag-1.1.10.pcapng` (knx-ets-manager repo) — primary source
+  for §10.1's full bit-mapping/offset-formula finding and §10.2's broadened trigger description.
 - `docs/data/captures/2026-08-28-ets-full-download-history-and-blob-params-1.1.10.pcapng`,
   cross-checked against every other saved capture (`grep -c "OX=3 P=5"` across
   `docs/data/captures/*.pcapng`), a live `PID_OBJECT_TYPE`/`PID_TABLE_REFERENCE` read via

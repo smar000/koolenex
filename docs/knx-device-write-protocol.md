@@ -1116,38 +1116,77 @@ no existing test exercised a sub-byte parameter before this fix).
 Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
 (Part 20).
 
-## Part 21 — Object 3's flags/priority/size shown on the device compare page, as per-flag chips (NEW/UPDATED 2026-08-29)
+## Part 21 — Object 3's flags/priority/size shown on the device compare page, as per-flag chips (UPDATED 2026-08-29)
 
 UI follow-up to Part 19: the verify-device response already carried Object 3 comparison rows, but
 as a raw hex byte pair (`"4f 0c"`) - none of the underlying data was actually legible. Went through
-two more iterations after real, live user feedback before settling on the current design - kept
-here as the current, correct state; the intermediate attempts (a single wrapped sentence) are in
-the follow-up doc's narrative, not repeated here.
+several more rounds of real, live user feedback before settling on the current design - kept here
+as the current, correct state; the intermediate attempts (a single wrapped sentence, a row-wide
+tooltip, "Object 3"/"flag row" wording) are in the follow-up doc's narrative, not repeated here.
 
 **Current design**: Object 3 rows show one small letter chip per boolean flag (green = set, muted
 = clear) in real ETS's own checkbox order - Communication, Read, Write, Transmit, Update, Read On
 Init (`C R W T U RI`) - not the underlying bit order. Priority/Size sit alongside as plain compact
 text. A chip gets a red ring when the project and device sides genuinely disagree on that one
 specific flag, so a single-bit difference is visible without comparing both rows letter by letter.
-The full sentence (`describeGroupObjectEntry()`, unchanged) is still available as a hover tooltip.
-Server-side, `decodeGroupObjectEntryFlags()` (`knx-tables.ts`) provides the same six bits plus
-Priority/Size as real structured booleans, not a string to re-parse - `describeGroupObjectEntry()`
-now builds its sentence from this same decode. Object 3 rows get the same distinct-section styling
-GA rows already have, and their own tracked match/differ counts composed into the summary badges
-(`composeCount()` generalized from a fixed pair to an arbitrary list). Chips are deliberately plain
-`<span>`s, not buttons yet - structured so a future click-to-edit pass can wire an `onClick`
-directly onto each chip without restructuring the display again (see the koolenex-ui-todo memory).
+Each chip carries its OWN short tooltip (just that one flag's name, e.g. "Read: Yes") rather than
+one composite-sentence tooltip for the whole row - an earlier version wrapped the whole chip row in
+a single tooltip anchored at the row's left edge, which pushed a wide (up to 380px) box off the
+right side of the screen for columns near the viewport edge. Server-side,
+`decodeGroupObjectEntryFlags()` (`knx-tables.ts`) provides the same six bits plus Priority/Size as
+real structured booleans, not a string to re-parse - `describeGroupObjectEntry()` builds its
+sentence from this same decode. Object 3 rows get the same distinct-section styling GA rows already
+have, and their own tracked match/differ counts composed into the summary badges (`composeCount()`
+generalized from a fixed pair to an arbitrary list). Chips are deliberately plain `<span>`s, not
+buttons yet - structured so a future click-to-edit pass can wire an `onClick` directly onto each
+chip without restructuring the display again (see the koolenex-ui-todo memory).
 
-**A real consistency bug found live while testing this**: the top-level `match` flag (and the
-log line/UI states derived from it) was computed purely from `totalDiffering === 0` - raw
+**Terminology**: "Object 3" is meaningless to anyone who isn't a KNX protocol engineer, so every
+user-facing spot (section header, sections-jump popover, log lines) renders it as "Communication
+Flags" instead, via a single `displaySectionName()` mapping in `DeviceCompareResults.tsx` - the
+server's own `section: 'Group Object Table'` string, and every test/route that compares against it,
+is untouched. Similarly the per-row unit was originally labeled "Object 3 row", then briefly "flag
+row" - both wrong, since one row bundles a whole communication object's flags (up to 6 booleans +
+Priority + Size) compared as one unit, so "N flags differ" would undercount whenever two or more
+flags on the same object differ at once (a real, common case - e.g. toggling Communication moves
+the same bit Comm+Linked already occupies). Settled on "Comm Object" (shortened from "communication
+object" per follow-up feedback) - accurate regardless of how many individual flags inside that one
+row actually differ.
+
+**Summary badges**: the standalone "X/Y bytes match" raw-memory badge was removed once Object 3 (and
+GA) rows existed - it was telling the same story as the named-row badges, just a noisier, harder-to-
+interpret scope, so it read as a second, contradictory-sounding source of truth rather than new
+information (the exact complaint that triggered this: "log shows everything matched, but we show a
+row differing"). Its number/scope explanation now lives in the match/differ badges' own tooltips
+instead. A third, neutral "All" chip was added alongside the green/red match/differ badges so both
+can be viewed together without toggling a colored badge back off - previously the only "show
+everything" affordance was re-clicking whichever badge was already active, not discoverable as its
+own action.
+
+**Log line, and a real consistency bug found live while testing this**: the top-level `match` flag
+(and the log line/UI states derived from it) was computed purely from `totalDiffering === 0` - raw
 parameter memory bytes only, since GA/Association/Object 3 are deliberately kept OUT of that scope
 (`undeclaredTableMem`'s own doc comment). A genuine Object 3 mismatch therefore left the overall
 status saying "matches computed image" while the per-row table correctly showed a real
 disagreement - a real, visible inconsistency, not a display bug. Fixed: `match` now also requires
-every decoded row (GA + Object 3) to match, not just the raw byte total.
+every decoded row (GA + Object 3) to match, not just the raw byte total. The log line itself went
+through a second round of feedback once that landed: it was still saying "0/N bytes differ" for an
+Object-3-only mismatch (accurate but confusing, since that scope genuinely never included Object 3),
+and later "Communication Flags differ" with no count at all. Now quotes real "N/M bytes match"
+figures for BOTH scopes it can (parameter memory always; Object 3 via new
+`flagsTotalBytes`/`flagsDifferingBytes` response fields, computed from the same buffer the
+per-communication-object decode above already reads - see routes/bus.ts), and names any remaining
+mismatching section (GA links have no byte-level total at all) with a real count, e.g.
+`"≠ 1.1.10 — parameter memory 10428/10433 bytes match; 3 Comm Objects differ"` instead of a bare
+"Communication Flags differ".
 
-8 new tests across the whole sequence, all 1263 pass. Server and client both typecheck/build/lint
-clean throughout.
+**Log panel now auto-closes** when the device-compare slide-over opens (from Verify, or from
+clicking a device row directly) - the two were otherwise fighting for the same screen space right
+after the slide-over became the thing actually being looked at.
+
+8+ new tests across the whole sequence, all 1263 pass throughout (unchanged by this round - it's
+client display/log wording plus one small server-side byte-diff addition, no protocol/write-path
+behavior changed). Server and client both typecheck/build/lint clean throughout.
 
 ## Sources
 

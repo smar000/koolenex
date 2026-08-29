@@ -439,10 +439,9 @@ Consolidated from throughout this document, for visibility:
    real ETS Partial Download of these objects, so this item stays open as originally scoped.)
 5. The exact meaning of several unidentified property reads in Stage 1 (OX=0 P=15/25/56/78) —
    never looked up against a KNX property ID reference table.
-6. `buildParamMem()`'s padding-bit fill bug (fills unrelated bits sharing a byte with a
-   sub-byte-packed parameter as `1` instead of the real device's `0`) — root-caused, not fixed,
-   unrelated to the write-path findings in this document but affects write *correctness* once
-   the write-path itself works.
+6. ~~`buildParamMem()`'s padding-bit fill bug (fills unrelated bits sharing a byte with a
+   sub-byte-packed parameter as `1` instead of the real device's `0`)~~ — **FIXED 2026-08-29, see
+   Part 20**.
 7. ~~Whether these findings hold for 1.1.10 specifically re-tested against the current fixed
    code~~ — **RESOLVED 2026-08-29, see Part 7**: re-tested with a fresh 3-download session;
    confirmed the universal GA/Association mechanism a second time and surfaced a real,
@@ -1092,6 +1091,30 @@ tests pass.
 
 Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
 (Part 19).
+
+## Part 20 — `buildParamMem()`'s padding-bit fill bug FIXED (NEW 2026-08-29)
+
+Closes a real, standing gap flagged since 2026-08-28 (Part 4 item 6): a sub-byte parameter's
+"padding" bits (unnamed bits sharing its byte, not covered by any tracked parameter) were filled
+with `1`s (the default `fill` value) instead of the real device's `0`. Real evidence, unchanged
+since it was first found: a real 1-bit boolean at offset 69 - real device/ETS value is `0x80` when
+the flag is on (bit 7 set, all other 7 bits **clear**), not `0xFF` as `buildParamMem()` computed.
+
+🟢 **Fixed**: a pre-pass before the main per-parameter loop zero-fills any byte a sub-byte field
+(`bitOffset !== 0 || bitSize % 8 !== 0`) declares it occupies, before the real `writeBits()` calls
+run - so padding bits start at `0` and only the field's own bits get set from its real value.
+`fill` itself is unchanged for genuinely unnamed bytes (no parameter touches them at all - real
+captures have consistently shown `0xFF` for those elsewhere in this project). Explicitly skips any
+byte already seeded by `relSegHex` (a real captured default in the one app that uses it) - zeroing
+that would destroy real, already-correct content, not fix anything.
+
+6 new tests (`tests/knx-tables.test.ts`) - the real captured on/off case, unnamed bytes staying at
+`fill`, multiple sub-byte fields sharing one byte, byte-aligned params completely unaffected, and
+`relSegHex`-seeded bytes surviving the pre-pass untouched. All 1255 tests pass (zero regressions -
+no existing test exercised a sub-byte parameter before this fix).
+
+Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md`
+(Part 20).
 
 ## Sources
 

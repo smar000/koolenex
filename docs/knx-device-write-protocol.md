@@ -415,11 +415,8 @@ Consolidated from throughout this document, for visibility:
    to reindex when objects are disabled/unlinked), with a per-object flag byte (Update=bit7,
    Transmit=bit6, Read-On-Init=bit5, Write=bit4, Read=bit3, bit2=Communication flag AND has a
    real GA link - both required, Priority=bits1:0), cross-confirmed on a second object, a third
-   object with a different DPT/size, and a second device/app entirely (§10.1). **Corrects an
-   earlier wrong claim in this same document** ("Communication flag has zero memory
-   representation") - that was an artifact of every prior test happening to use an unlinked
-   object, where bit 2 is pinned at 0 regardless of the flag; retested on a linked object and the
-   flag does have a real, demonstrated effect. Write trigger resolved for both Partial
+   object with a different DPT/size, and a second device/app entirely (§10.1). Write trigger
+   resolved for both Partial
    (§10.2, conditional on any communication-object-level change, not just GA links) and Full
    Downloads (§10.3, conditional on an anomalous `OX=4 P=27` checksum read - itself tied to
    Part 8's comprehensive-rewrite trigger). **Still open**: bit 2's exact semantics beyond the
@@ -663,18 +660,6 @@ Priority (bits 1:0), values confirmed by direct empirical mapping in decreasing 
 | High | `01` |
 | System | `00` 🟡 inferred by pattern only - no object with a "System" option was available to test directly |
 
-**CORRECTED 2026-08-29, later same day - the original "Communication flag has zero
-representation" claim below was wrong, caught by explicit user caution before it went
-unchallenged.** Every test of the Communication flag up to that point happened to be on an
-*unlinked* object (6, 7) - toggling the flag there genuinely produced zero change, but that's
-because bit 2 (below) requires a real GA link to ever read `1` in the first place; on an unlinked
-object it's pinned at `0` regardless of the flag, which masked the flag's real effect entirely.
-Retested directly on a **linked** object (5, GA still present and unchanged in both the GA and
-Association tables - checked explicitly) with Communication toggled off: bit 2 dropped from `1`
-to `0`. **The Communication flag is written to the device after all** - via bit 2, gated by
-GA-link presence. See the corrected bit-2 entry below; the two-test methodology that produced the
-original wrong conclusion is kept in the follow-up doc as a documented mistake, not deleted.
-
 **Methodology**: toggled one flag at a time on communication object 7 (1.1.9), always confirming
 the resulting single-bit change against the previous known state, then reverted everything to
 manufacturer default and did a full-session byte comparison against the very first (pre-testing)
@@ -699,21 +684,16 @@ required.**
 🟢 Confirmed directly, three real hardware tests: object 5 (linked, Communication enabled)
 showed bit 2 = `1`, consistently. Removing communication object 8's only GA link (Communication
 still enabled) flipped its bit 2 from `1` to `0`, corroborated independently by the GA and
-Association tables shrinking to remove that link in the same download. **Decisively**: disabling
-Communication on object 5 while its GA link stayed fully intact (checked explicitly - GA and
-Association tables byte-for-byte unchanged) *also* flipped bit 2 from `1` to `0` - two
-independent routes to the same bit, only one of which touches the link tables at all. Objects 6
-and 7 (never linked, Communication toggled both ways across many tests) always showed bit 2 = `0`
-- consistent with the AND relationship, since an unlinked object can never reach `1` regardless of
-the flag, which is exactly what made the flag's effect invisible in every earlier test.
+Association tables shrinking to remove that link in the same download. Disabling Communication on
+object 5 while its GA link stayed fully intact (checked explicitly - GA and Association tables
+byte-for-byte unchanged) also flipped bit 2 from `1` to `0` - two independent routes to the same
+bit, only one of which touches the link tables at all. Objects 6 and 7 (never linked,
+Communication toggled both ways across many tests) always showed bit 2 = `0`, consistent with the
+AND relationship.
 
-**What this does and does not establish**: the AND-relationship (flag enabled AND link present)
-correctly predicts every result observed across all tests on three objects. It is not proven to
-be the complete picture - e.g., an object with 2 GA links, one active/one not, or other
-DPT/direction combinations, haven't been tested - but it is no longer merely a correlation with
-link presence alone; the Communication flag has a real, demonstrated, independent effect,
-distinguishable from link presence because the link tables were checked and confirmed unchanged
-in the decisive test.
+**Scope**: the AND-relationship (flag enabled AND link present) correctly predicts every result
+observed across all tests on three objects. Not yet tested: an object with 2 GA links (one
+active/one not), or other DPT/direction combinations.
 
 **Complete bit accounting**: `7=Update, 6=Transmit, 5=Read-On-Init, 4=Write, 3=Read,
 2=Communication-AND-linked, 1:0=Priority`. Every bit has an observed, evidenced role.

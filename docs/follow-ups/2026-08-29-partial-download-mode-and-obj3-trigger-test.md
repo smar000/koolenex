@@ -474,6 +474,55 @@ production trigger behind it yet. And Object 3's write itself, unlike GA/Associa
 been exercised against real hardware through this code path - it inherits the GA/Assoc precedent's
 real-hardware proof by construction (same mechanism) but isn't itself independently confirmed.
 
+## Part 13: closing the Read-On-Init/Priority parser gap
+
+Direct follow-up to Part 12's finding, explicitly prioritized by the user ("Let's fix the
+Read-On-Init/Priority first, as this should be straightforward").
+
+**Confirming the real attribute names first**, rather than guessing from the KNX spec in the
+abstract: unzipped the live Test Bed `.knxproj` again and grepped the two real app XML files
+(1.1.9's `M-0004_A-0025-10-1BA6-O00A6.xml`, 1.1.10's `M-0004_A-3030-23-F0EA-O000A.xml`) directly.
+Confirmed: `ReadOnInitFlag="Enabled"/"Disabled"` (identical vocabulary to `ReadFlag`/`WriteFlag`/
+etc.), `Priority="Low"/"Alarm"/"High"/"System"`. Interesting real-data note: 1.1.9's app never
+declares `Priority` at all on any `ComObject` (consistent with the earlier finding that absent
+means "Low"); 1.1.10's app does declare it explicitly, and - genuinely useful - also overrides it
+per-instance on individual `ComObjectRef`s (e.g. `Priority="Low"` on the `ComObject`, still
+`Priority="Low"` on every `ComObjectRef` in the real file, but the override mechanism is real and
+exercised by ETS's own schema even when the value doesn't change in this particular project).
+
+**Implementation**: extended `CoDef`/`CorDef` (`server/ets-app.ts`) with `readOnInit`/`priority`
+fields, extracted identically to the existing flags. Added a small `normalizePriority()` helper
+converting the XML's Title-Case vocabulary to the lowercase one `knx-tables.ts`'s
+`GroupObjectFlags` already uses (`'low'|'alarm'|'high'|'system'`) - kept as a local type rather
+than importing `GroupObjectFlags` directly, to avoid coupling the parser module to the Object 3
+write-path code for what's really just a shared vocabulary, not a shared abstraction. Both
+`resolveCoRef()` and `resolveCoRefById()` (and the `AppIndex` interface they implement) now return
+these two fields, following the exact same `cor.X ?? co.X` override-wins pattern the other flags
+already use - confirmed this correctly lets a `ComObjectRef`-level override win over the
+`ComObject` default via a dedicated test.
+
+Threaded the two fields through `ets-parser.ts`'s `ParsedComObject` (both the main
+`ComObjectInstanceRef` loop and the supplement path for active-but-unlinked COM objects), then
+`db.ts`'s `com_objects` table (`read_on_init INTEGER`, `priority TEXT` - both in the `CREATE TABLE`
+for fresh DBs and via the existing `migrate()` helper for upgrading existing ones), then
+`routes/projects.ts`'s `INSERT INTO com_objects`.
+
+**Testing**: 5 new cases in `tests/com-object-read-on-init-priority.test.ts`, using synthetic app
+XML built from real attribute combinations (same pattern `ets-app.test.ts` already uses for its
+Union/Memory tests) - default-when-absent, an explicit Enabled/Alarm combo, a `ComObjectRef`-level
+override winning over the `ComObject` default, `Priority="System"` normalizing correctly (even
+though it's confirmed unreachable from ETS's own UI, per Part 10 - the parser should still
+round-trip it faithfully if a file somehow carries it), and `resolveCoRefById()` matching
+`resolveCoRef()`'s behavior. All 1230 tests pass (1225 existing + 5 new). Typechecked clean.
+Committed and pushed (`7301f4b Capture Read-On-Init and Priority for com objects (parser + DB
+schema)`).
+
+**What this does and doesn't close**: the data is now captured and stored - a real project's
+Read-On-Init/Priority values are available in the DB per com object. `bus.ts`'s
+`buildDeviceProgramming()` still doesn't construct a real `groupObjectTable` from this data and
+pass it to `downloadDevice()` - that's the next, separate step before Object 3's write can be
+exercised against real hardware for the first time.
+
 ## Still open, after Part 6's redo
 
 - ~~1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo~~ -
@@ -501,11 +550,12 @@ real-hardware proof by construction (same mechanism) but isn't itself independen
 - Whether the partial-download GA/Association-table skip logic (Part 11) generalizes beyond this
   one device/app - it's a best-effort extrapolation of the parameter-object pattern, now proven
   correct for 1.1.9 specifically, not proven to generalize.
-- **NEW (Part 12)**: Object 3's real write invocation exists in code and is tested, but has no
-  real production caller yet - `bus.ts`'s `buildDeviceProgramming()` doesn't construct a real
-  `groupObjectTable`, blocked on Read-On-Init and Priority not being captured anywhere in the
-  ETS-XML parser or `com_objects` DB schema. Fixing that parser/schema gap is the real next step
-  before any of this can run against a live device.
+- ~~Object 3's real write invocation exists in code and is tested, but has no real production
+  caller yet - blocked on Read-On-Init/Priority not being captured anywhere~~ - **the parser/schema
+  half is RESOLVED, see Part 13**: both fields are now captured and stored in `com_objects`. `bus.ts`'s
+  `buildDeviceProgramming()` still doesn't construct a real `groupObjectTable` from this data and
+  pass it to `downloadDevice()` - that's the real remaining next step before any of this can run
+  against a live device.
 - **NEW (Part 12)**: Object 3's write itself, unlike GA/Association's (Part 6, real-hardware
   proven), has never been independently exercised against real hardware through this code path -
   it inherits the GA/Assoc precedent by construction (same mechanism) but isn't itself confirmed.

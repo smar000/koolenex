@@ -857,6 +857,26 @@ built on the old wrong assumption and updated accordingly.
 
 Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 12).
 
+## Part 13 — Read-On-Init and Priority now captured by the ETS-XML parser (NEW 2026-08-29)
+
+The parser/schema gap Part 12 flagged - `server/ets-app.ts`'s `buildFlags()` only ever extracted
+Communication/Read/Write/Transmit/Update, never Read-On-Init or Priority, both required to compute
+Object 3's byte (§10.1) - is now closed. Real attribute names/vocabulary confirmed against this
+project's own real app XML: `ReadOnInitFlag="Enabled"/"Disabled"` (same vocabulary as the other
+flags), `Priority="Low"/"Alarm"/"High"/"System"` (present on both the `ComObject` definition and,
+observed on 1.1.10's app, overridden per-instance on individual `ComObjectRef`s - the parser
+follows the same `cor.X ?? co.X` override pattern already used for the other flags).
+`resolveCoRef()`/`resolveCoRefById()` now return both fields; `ParsedComObject` and the
+`com_objects` DB table (`read_on_init`, `priority`) carry them through to storage. 5 new tests
+(`tests/com-object-read-on-init-priority.test.ts`), golden-cased against real attribute
+combinations from this project's own app XML. All 1230 tests pass.
+
+**Still not done**: `bus.ts`'s `buildDeviceProgramming()` doesn't yet construct a real
+`groupObjectTable` from this newly-available data and pass it to `downloadDevice()` - this closes
+the data-capture gap only, not the "no real caller exists yet" gap from Part 12.
+
+Full narrative: `docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` (Part 13).
+
 ## Sources
 
 - `docs/data/captures/2026-08-29-ets-*-obj3-map-*-1.1.9.pcapng` (12 captures: read/write/

@@ -931,3 +931,33 @@ implementation, `b5d1657` reference doc).
 Object 3" gap is resolved. Combined with Part 18's real-hardware write confirmation, Object 3 now
 has both a proven write path AND a proven (if only unit/route-tested, not yet exercised against
 real hardware) verify path.
+
+## Part 20: buildParamMem()'s padding-bit fill bug fixed
+
+Direct continuation, next item on the write-path capability status memory's open-items list.
+The bug itself was already fully root-caused back on 2026-08-28 (see that day's own follow-up doc)
+- real evidence never changed: a real 1-bit boolean at offset 69, real device value `0x80` when on
+(bit 7 set, all other 7 bits clear), koolenex computing `0xFF`/`0x7F` instead because the "padding"
+bits sharing that byte got the generic `fill` value rather than the real `0`.
+
+**The fix itself was small once decided**: a pre-pass over `paramMemLayout` before the main
+per-parameter write loop, zero-filling any byte a sub-byte field declares it occupies. The one real
+design question was whether this should apply universally or need a carve-out: checked whether
+`relSegHex` (the one app that seeds `buildParamMem()`'s buffer with a real captured default rather
+than a plain `fill` byte) could have its own real, correct padding bits accidentally clobbered by
+this new pre-pass - it could, so added an explicit skip for any byte already within `relSegHex`'s
+coverage range. Verified with a dedicated test using both a sub-byte field AND `relSegHex` seeding
+together, confirming the seeded byte survives untouched.
+
+**Testing found the confirming evidence was already sufficient**: no NEW real-hardware capture was
+needed - the exact real byte value (`0x80`/`0x00`) was already established during the original
+2026-08-28 investigation, so the fix's correctness could be verified directly against that known
+value in a synthetic unit test, without re-capturing anything. 6 new tests, all passing first
+attempt after fixing one arithmetic slip in the test itself (a multi-field test initially expected
+`0x88` instead of the correct `0x90` for bits 7+4 - caught immediately by the test failing, not a
+code bug). All 1255 tests pass (1249 + 6 new), zero regressions - no existing test had ever
+exercised a sub-byte parameter before this fix existed to matter.
+
+**What this closes**: the write-path capability status memory's `buildParamMem()` padding-bit-fill
+item is resolved - a real, standing, previously-unfixed write-correctness bug (independent of the
+write-path mechanism itself, which was already proven working) is now closed.

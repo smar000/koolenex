@@ -303,6 +303,44 @@ elsewhere.
 Communication-flag negative result (Part 7), this is now a complete, evidenced picture of the
 byte, with one item (bit 2's exact mechanism) explicitly flagged as narrower than it might look.
 
+## Part 9: closing item 2 (offset reindexing), and a real correction to the Communication-flag finding
+
+User moved to item 2 of their own earlier list ("what prevents us writing Object 3"): does
+disabling Communication on one object shift other objects' offsets, breaking the fixed-formula
+assumption for real projects with disabled objects?
+
+**Test 1**: disabled Communication on a lower-numbered object (6), checked whether higher-numbered
+objects (7 at offset 14, 8 at offset 16) moved. Neither did - the offset formula is safe to use
+unconditionally, no table compaction/reindexing occurs regardless of which objects are disabled.
+
+**Then user raised a sharp, correct objection to the standing Communication-flag finding**: "my
+understanding is that disabling it turns off all comms on that device... there absolutely must be
+something written to the device." Right instinct, and it exposed a real confound in every prior
+test: toggling Communication had only ever been tried on *unlinked* objects (6, 7) - both times
+producing zero change, which is exactly what an AND-gated bit pinned at 0 by the missing link
+would look like, with or without the flag's own effect. This is precisely the caution the user had
+already given when bit 2 was first documented as "linked to GAs being present, we don't know if it
+is more than that" - now vindicated directly.
+
+**Test 2, decisive**: disabled Communication on object 5 (already linked, GA link deliberately
+left untouched). Checked the GA and Association tables explicitly - byte-for-byte unchanged, the
+link genuinely still there. Object 3's bit 2 (offset 10) still dropped from `1` to `0`. Two
+independent routes to the same bit (a real link removal in the earlier test, and now a
+Communication-disable on a still-fully-linked object) that don't touch the same memory region -
+proof the flag has a real, demonstrated effect, not just a correlation with link presence.
+
+**Correction applied everywhere this was documented**: reference doc §10.1 (the original
+"confirmed rigorously, twice" claim replaced with the corrected finding, kept visible as a
+correction rather than silently edited away), CLAUDE.md, captures/README.md. Real bit 2 meaning:
+`Communication flag AND has a real GA link` - both required for `1`.
+
+**Reusable lesson, explicit user callback**: "hence my caution when you last documented it!!" -
+a documented finding that's technically true of every test run so far can still be wrong about
+the general mechanism if every test shares an unexamined confound (here: link presence). The
+user's insistence on hedging language ("correlation, not proven to be only that") rather than
+accepting the first clean-looking result is what kept this catchable and cheap to fix, rather than
+a wrong fact quietly propagating through later work.
+
 ## Still open, after Part 6's redo
 
 - ~~1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo~~ -
@@ -314,12 +352,12 @@ byte, with one item (bit 2's exact mechanism) explicitly flagged as narrower tha
   directly apply. Real next step: an out-of-band tamper test on 1.1.9 checking for a different
   anomalous-read signal, and hunting for any genuinely untampered 1.1.9 session that skips
   Object 3 (none found yet, in 5 real captures).
-- ~~The general Object 3 record layout~~ - **RESOLVED, see Parts 7-8 above**: a complete,
-  computable formula (`offset = 2 × com-object number`) and a full bit map, cross-confirmed on
-  three objects and two devices/apps. Still open within this: bit 2's exact mechanism (confirmed
-  correlation with GA-link presence, not proven to be *only* that - Part 8); Priority's `System`
-  value (inferred by pattern only); whether disabling Communication on one object shifts other
-  objects' offsets (untested - every test so far only checked the changed object's own bytes).
+- ~~The general Object 3 record layout~~ - **RESOLVED, see Parts 7-9 above**: a complete,
+  computable formula (`offset = 2 × com-object number`, confirmed not to reindex when objects are
+  disabled - Part 9) and a full bit map, cross-confirmed on three objects and two devices/apps.
+  Bit 2 = `Communication flag AND has a real GA link`, corrected in Part 9 after an earlier wrong
+  "zero representation" claim. Still open: Priority's `System` value (inferred by pattern only);
+  bit 2's behavior under more complex link configurations (multiple links, mixed directions).
 - Whether the checksum-trigger mechanism (Part 6, reference doc Part 8) generalizes beyond
   1.1.10's app.
 - Whether the partial-download GA/Association-table skip logic (Part 11) generalizes beyond this

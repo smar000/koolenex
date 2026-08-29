@@ -1625,6 +1625,10 @@ describe('POST /bus/verify-device — Object 3 (Group Object Table) fallback', (
     assert.match(co7.expectedValue, /Priority=Low/);
     // Object 3 rows stay out of the raw-byte scope (matches GA rows' own convention).
     assert.equal(body.totalBytes, paramMem.length);
+    // Top-level match must still be true when everything genuinely matches
+    // (the fix below only needed to catch the false-true case, not
+    // introduce a false-false one).
+    assert.equal(body.match, true);
   });
 
   it('flags a mismatch when the device\'s actual Object 3 content differs from the project', async () => {
@@ -1646,5 +1650,18 @@ describe('POST /bus/verify-device — Object 3 (Group Object Table) fallback', (
     const byKey = new Map(obj3Rows.map((r: any) => [r.key, r]));
     assert.equal((byKey.get('co-5-obj3') as any).match, true);
     assert.equal((byKey.get('co-7-obj3') as any).match, false);
+    // Regression test for a real bug found live, 2026-08-29: the top-level
+    // `match` flag was computed purely from `totalDiffering === 0` (raw
+    // parameter memory bytes only - Object 3 is deliberately kept OUT of
+    // that scope), so a genuine Object 3 mismatch here previously left
+    // `body.match` reporting `true` ("matches computed image") even while a
+    // real row showed `match: false` - visibly inconsistent between the
+    // top-level summary/log line and the per-row table. `match` must now
+    // reflect every decoded row too, not just the raw byte total.
+    assert.equal(
+      body.match,
+      false,
+      'top-level match must be false when any decoded row (here, Object 3) differs, even if raw parameter bytes match exactly',
+    );
   });
 });

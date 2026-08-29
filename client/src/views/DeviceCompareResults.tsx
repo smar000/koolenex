@@ -582,24 +582,36 @@ export function DeviceCompareResults({
                               </td>
                             )}
                             <td className={`${styles.td} ${styles.mono}`}>
-                              <span
-                                className={styles.tip}
-                                data-tip={r.expectedValue}
-                              >
-                                <span className={styles.tipText}>
+                              {isObj3 ? (
+                                <span className={styles.tipTextWrap}>
                                   {r.expectedValue}
                                 </span>
-                              </span>
+                              ) : (
+                                <span
+                                  className={styles.tip}
+                                  data-tip={r.expectedValue}
+                                >
+                                  <span className={styles.tipText}>
+                                    {r.expectedValue}
+                                  </span>
+                                </span>
+                              )}
                             </td>
                             <td className={`${styles.td} ${styles.mono}`}>
-                              <span
-                                className={styles.tip}
-                                data-tip={r.actualValue ?? undefined}
-                              >
-                                <span className={styles.tipText}>
+                              {isObj3 ? (
+                                <span className={styles.tipTextWrap}>
                                   {r.actualValue ?? '—'}
                                 </span>
-                              </span>
+                              ) : (
+                                <span
+                                  className={styles.tip}
+                                  data-tip={r.actualValue ?? undefined}
+                                >
+                                  <span className={styles.tipText}>
+                                    {r.actualValue ?? '—'}
+                                  </span>
+                                </span>
+                              )}
                             </td>
                             <td className={styles.td}>
                               <MatchIcon match={r.match} />

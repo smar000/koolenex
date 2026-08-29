@@ -1532,10 +1532,23 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
       if (obj3Rows.length) decoded = [...(decoded ?? []), ...obj3Rows];
     }
 
+    // `totalDiffering`/`totalBytes` are deliberately scoped to raw memory
+    // only (segments) - GA table, Association table, and Object 3 rows are
+    // kept OUT of that scope on purpose (see `undeclaredTableMem`'s own doc
+    // comment in knx-download-plan.ts), so a real mismatch in any of those
+    // would previously leave `totalDiffering === 0` true and this top-level
+    // `match` flag reporting a false "everything matches" - inconsistent
+    // with the real per-row mismatches shown in `decoded` (found live,
+    // 2026-08-29: a real Object 3 mismatch on 1.1.9 showed up correctly as
+    // a row and a summary badge, but the overall match flag - and the
+    // ProgrammingView log line derived from it - still said "matches
+    // computed image"). `match` now requires every decoded row to match
+    // too, not just the raw byte scope.
+    const allDecodedMatch = !decoded || decoded.every((d) => d.match !== false);
     res.json({
       deviceAddress,
       family: plan.family,
-      match: totalDiffering === 0,
+      match: totalDiffering === 0 && allDecodedMatch,
       totalBytes,
       totalDiffering,
       segments,

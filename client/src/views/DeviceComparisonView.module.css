@@ -351,6 +351,21 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Object 3 rows' expected/actual values are a long, structured, multi-part
+   description (every flag + priority + size - describeGroupObjectEntry(),
+   server-side) meant to be read directly, not glanced at - unlike GA
+   addresses or short param values, forcing this behind a single truncated
+   line + hover (like .tipText below) made the actual content invisible
+   without hovering every row individually (reported live, 2026-08-29).
+   Wraps across multiple lines instead, growing the row's height rather than
+   clipping - no hover needed to read it. */
+.tipTextWrap {
+  display: block;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
 .tip[data-tip]:hover::after {
   content: attr(data-tip);
   position: absolute;

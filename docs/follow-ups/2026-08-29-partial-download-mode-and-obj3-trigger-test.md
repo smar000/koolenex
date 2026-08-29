@@ -164,17 +164,57 @@ are written together exactly when a GA/link genuinely changes, and skipped toget
 not "never touched," a real conditional trigger, symmetric in both directions. Full details and
 the exact per-capture table: reference doc §10.2.
 
-## Still open, for the next session
+## Part 6: systematic 1.1.10 redo, and the checksum-read discovery
 
-- **1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo** -
-  explicitly requested by the user, not yet done. Multiple clean baseline Full Downloads first,
-  then a deliberate change, before treating the 08-28 figure as established rather than one
-  unreproduced data point.
-- Why Object 3 is written on *every* 1.1.9 Full Download (the "differs from default" theory is
-  now refuted for this device - see reference doc §10.1) is still open for the Full Download case
-  specifically, separate from the now-resolved Partial Download case (§10.2).
+User explicitly pushed back on treating 1.1.10's historical 08-28 2-of-4 Object 3 pattern as
+settled - it was a single, unreproduced session, and the two "not written" cases could have been
+"anomalies, error on my part, error on your part or any number of things." Requested a systematic,
+controlled redo before forming any strong opinion - the right call, and it paid off.
+
+Ran five real Full Downloads to 1.1.10 in sequence, each separately captured: two genuinely clean
+(no project changes at all), one with an out-of-band tamper (same offset-172 parameter used
+throughout the original investigation, written via `/bus/write-memory` bypassing any project),
+and - after the user specifically proposed testing "does an intended project write to a parameter
+also trigger Object 3" - two genuine, ETS-driven changes: a GA link re-point, and a change to the
+*exact same* offset-172 byte the tamper test used, this time via ETS itself (confirmed by decoding
+the resulting real write: `MemExtWrite X=$0C30AC $1E` = 30 decimal, matching the 30-second
+"Display length" value set). Result table in the reference doc's Part 10.3 - the tampered
+download was the only one that wrote Object 3, and the same-byte control (test 5) is what makes
+this decisive rather than just "tampering vs nothing."
+
+**Along the way, a genuine mid-session correction**: the user asked directly "are you 100% sure
+ETS does not read anything from the device before it starts the full download?" - a fair
+challenge to a claim in this document taken on faith rather than freshly re-checked. Re-examining
+the actual capture data (not just recalling the earlier "no live memory read" finding) surfaced
+that ETS DOES read something meaningful early in every session: `PropertyValue_Read OX=4 P=27`,
+the same content-dependent checksum property already known from Part 7. Every genuine session
+got back the identical valid 2-element response; only the tampered session's identical request
+came back empty (`N=0`). This is the real detection mechanism for Part 8's comprehensive-rewrite
+fallback - not a raw memory read (there genuinely are none, that part of the original claim
+holds), but a property-level checksum whose result differs based on real device state. Full
+decode: reference doc's Part 8 and Part 10.3.
+
+**Lesson worth repeating**: the "no live memory read anywhere, detection mechanism unknown"
+framing had stood unchallenged in this document since 2026-08-28 - re-verifying it from the raw
+capture data (rather than trusting the prior write-up) is what surfaced the actual mechanism.
+Don't assume an established claim in this doc is still fully checked just because it's tagged
+🟢 - re-derive from source when it matters, especially when directly asked to confirm something.
+
+## Still open, after Part 6's redo
+
+- ~~1.1.10's Full Download 2-of-4 Object 3 pattern needs a systematic, controlled redo~~ -
+  **RESOLVED, see Part 6 above and reference doc §10.3**: reproduced and explained by a
+  property-27 checksum read that comes back anomalous only after an out-of-band write.
+- **Why Object 3 is written on *every* 1.1.9 Full Download tested, unconditionally, remains
+  genuinely unreconciled** with 1.1.10's now-resolved conditional behavior - 1.1.9's app doesn't
+  even declare property 27 (Part 7), so the exact same checksum mechanism can't directly apply.
+  Real next step: an out-of-band tamper test on 1.1.9 checking for a different anomalous-read
+  signal, and hunting for any genuinely untampered 1.1.9 session that skips Object 3 (none found
+  yet, in 5 real captures).
 - The general Object 3 record layout (which bit means which flag, for every communication
   object) is only mapped at two positions so far (com-objects 6 and 7) - not a full decode.
+- Whether the checksum-trigger mechanism (Part 6, reference doc Part 8) generalizes beyond
+  1.1.10's app.
 - Whether the partial-download GA/Association-table skip logic (Part 11) generalizes beyond this
   one device/app - it's a best-effort extrapolation of the parameter-object pattern, now proven
   correct for 1.1.9 specifically, not proven to generalize.

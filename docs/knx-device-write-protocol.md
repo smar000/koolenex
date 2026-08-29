@@ -284,14 +284,10 @@ in this document, cited here for completeness:
 - Full decode logic and fixtures: `tests/relmem-real-device-fixtures.test.ts`, and
   `decodeGaTable()`/`decodeAssocTable()` in the codebase.
 
-### 2.7 Object 3 (98 bytes, unidentified)
+### 2.7 Object 3 — see Part 10
 
-Present in every Full Download, written as a single 98-byte block at its own PID-7-resolved
-base. Content starts with a header-like `0030000000004B094B094F0C...` pattern followed by many
-repeated `5B` bytes and a long zero tail. 🔴 **entirely unidentified** — not GA table, not
-Association table, not the parameter object. Working theory (unconfirmed): 🔴 "possibly a
-per-channel mapper/routing config table" — carried over from the earlier 2026-08-27
-investigation, never actually confirmed.
+Present in every 1.1.9 Full Download, written as a single 98-byte block at its own
+PID-7-resolved base. Identity, decoded content, and write-trigger: Part 10.
 
 ## Part 3 — Which memory service a device actually needs: the mask-version finding
 
@@ -337,24 +333,19 @@ The fallback branch is **only protocol-level tested** (fake device in
 BCU1/BCU2/System-7-family device is ever available to test, that closes the one remaining real
 gap in this finding.
 
-### Retracted theories — do not re-propose these without new evidence
+### Do not re-propose these — already tested and found wrong
 
-Recorded so a future session doesn't waste time re-deriving conclusions already tested and
-found wrong:
-
-- **"The LoadData mode byte means 'combined full+par declaration'."** Retracted 2026-08-28 —
-  real data from two independent Partial Downloads showed mode `0x00` even though the model
-  still declares both `full` and `par` `RelSegment` entries for the same object. Real meaning:
-  Full(`0x01`) vs Partial(`0x00`) download type (§2.3).
-- **"Always use `A_MemoryExtended_Write`, unconditionally, for every device."** Shipped briefly
-  (koolenex commit `68c0394`), corrected the same day (commit `95805ff`) after the user pushed
-  back on generalizing from a two-device, single-mask-family sample. See above.
-- **koolenex's enum-to-byte mapping is wrong** (an earlier, unrelated 2026-08-26 theory about a
-  different bug, Finding A in `koolenex_reference` memory) — retracted after checking the actual
-  parser code directly; the enum parsing was faithful, the real mechanism was something else
-  entirely (conditional-activation gating, itself only partially explaining the observed
-  mismatch — see that memory file for the fuller, still partially open story, unrelated to
-  device-write correctness itself).
+- LoadData mode byte = "combined full+par declaration": wrong. Real meaning is Full(`0x01`) vs
+  Partial(`0x00`) download type (§2.3).
+- Always use `A_MemoryExtended_Write` unconditionally for every device: wrong; gate on mask
+  version (above), not a blanket rule.
+- koolenex's enum-to-byte mapping was wrong (unrelated 2026-08-26 bug theory): wrong; the parser
+  is faithful, the real mechanism was conditional-activation gating (see `koolenex_reference`
+  memory).
+- Object 3 tied to application-version management, or to "differs from manufacturer default": both
+  wrong (Part 10).
+- Object 3 written whenever a GA/parameter change is present in the project, tampered or not: wrong
+  (Part 10.3) - only an out-of-band write (bypassing ETS) triggers it.
 
 ## Part 4 — Known gotchas (tooling and methodology)
 
@@ -382,15 +373,13 @@ Consolidated from throughout this document, for visibility:
 
 1. Why does the NTP-parameter write differ in byte count (5 bytes for "off" vs 1 byte for "on")
    between the two otherwise-identical Partial Download captures? (§1.2)
-2. ~~What object 3 actually represents~~ - **RESOLVED, see Part 10**: the standard KNX Group
-   Object Table (object type `9`, confirmed against real KNX Master Data), and its content is now
-   partly decoded directly (§10.1: a genuine per-communication-object flag bitfield, two specific
-   flag↔bit mappings confirmed). ~~Whether it's written during a Partial Download~~ - **RESOLVED,
-   see §10.2**: yes, conditionally, exactly when a GA/link changes, reproduced twice in both
-   directions. What remains open, narrower still: why it's written on *every* Full Download for
-   1.1.9 but only *some* for 1.1.10 (§10.3) - the "differs from default" theory is refuted for
-   1.1.9; 1.1.10's 2-of-4 figure is from a single unreproduced session and needs a systematic
-   redo before being trusted.
+2. ~~Object 3's identity, content, and write-trigger~~ - **RESOLVED, see Part 10**: the standard
+   Group Object Table, content decoded as a per-communication-object flag bitfield (§10.1), write
+   trigger resolved for both Partial (§10.2, conditional on a GA/link change) and Full Downloads
+   (§10.3, conditional on an anomalous `OX=4 P=27` checksum read - itself tied to Part 8's
+   comprehensive-rewrite trigger). **Still open**: 1.1.9 writes Object 3 on every Full Download
+   tested, never yet shown skipping it - not reconciled with 1.1.10's conditional behavior, and
+   1.1.9's app doesn't even declare property 27, so the same mechanism can't directly explain it.
 3. Whether the mask-version gate (§3) generalizes beyond System B, or whether a real legacy
    device needs something different — untested, no legacy hardware available.
 4. Whether the LoadData `mode` byte's Full/Partial meaning holds for objects other than OX=4 —
@@ -499,34 +488,42 @@ so while the *shape* of both facts above is now backed by many different manufac
 data in `data/apps/*.json`, the actual live wire confirmation is still one real device. Object 3's
 identity (Part 5 item 2) remains unresolved.
 
-## Part 8 — Full Download isn't purely history-independent-and-minimal; it falls back to a comprehensive rewrite (RESOLVED 2026-08-28)
+## Part 8 — Full Download's comprehensive-rewrite fallback, and its real detection mechanism (RESOLVED 2026-08-28; trigger mechanism identified 2026-08-29)
 
 Part 7 established that ETS only writes named-parameter bytes that differ from a file-derivable
-target - raising a real question: could a device carrying stale content from elsewhere (a
-different, discarded project; a factory reset) keep that content forever, if it happens to already
-match what the *current* project's target computation predicts needs no write? Tested directly
-against real hardware rather than reasoned about from file data alone (see the follow-up log for
-full methodology, including two self-caught mistakes along the way).
+target. Does a device carrying stale content from elsewhere (a different, discarded project; a
+factory reset) keep that content forever, if it happens to already match what the *current*
+project's target computation predicts needs no write?
 
-🟢 **Confirmed: no.** A value written directly into device memory bypassing ETS entirely (via
-koolenex's own debug write route, simulating stale/foreign content) was detected on the very next
-real Full Download - but not via a minimal, targeted correction. ETS instead performed a
-**comprehensive rewrite**: nearly the entire 10433-byte parameter segment (offset ~12 through
-~1650), a separate block covering objIdx3's still-unidentified region, the offset-10432 marker,
-and both the GA and Association tables - essentially everything, not a delta. Reproduced twice,
-with the injected write declared two different ways (an incomplete RelSegment mode, then the
-complete `full,par` pair matching real ETS's own declared shape exactly) - both produced the
-identical comprehensive-rewrite response, ruling out "the intervening write's own protocol
-correctness" as the trigger.
+🟢 **No.** A value written directly into device memory bypassing ETS entirely (koolenex's own
+debug write route, simulating stale/foreign content) is detected on the very next real Full
+Download - not via a minimal, targeted correction, but a **comprehensive rewrite**: nearly the
+entire 10433-byte parameter segment, the Group Object Table (Part 10), and both the GA and
+Association tables - essentially everything, not a delta. Reproduced on both 1.1.9 and 1.1.10
+(2026-08-28 and 2026-08-29 respectively), each time regardless of exactly how the injected write
+was declared on the wire. **The rewrite's content is correct, not a blind reset** - real
+previously-captured device values are written back correctly (e.g. `2` stays `2`), which directly
+enabled Part 9's finding.
 
-🟡 **Inferred, not confirmed**: any write to the device from something other than ETS's own last
-session appears to trigger this fallback. The actual detection mechanism is unknown - 🟢
-confirmed there is no live memory read anywhere in any capture this project has (which would be
-the obvious way to detect a mismatch), so whatever signal ETS uses is something else entirely.
+### The detection mechanism: a property-27 checksum read, confirmed 2026-08-29
 
-**The comprehensive rewrite's content is correct, not a blind reset** - checked byte-for-byte
-against real, previously-captured device values (e.g. a byte with real value `2` was written back
-as `2`, not reset to the segment's static default). This directly enabled Part 9's finding below.
+🟢 **Confirmed, reproduced across 5 independent real Full Downloads on 1.1.10**: early in every
+session, before any load/write decision, ETS reads `PropertyValue_Read OX=4 P=27` (the same
+content-dependent checksum property established in Part 7). In every genuine session - two clean
+baselines, a real GA-link change, a real parameter change - this read returns the identical, valid
+2-element checksum (`$000028C0003365E4000000010133DCBD`). In the one session preceded by an
+out-of-band write bypassing ETS, the identical read instead returns **empty** (`N=0`) - the
+device's own checksum computation broke down as a direct, observable consequence of the tampering.
+This is not a raw memory read of the parameter/GA/Object-3 content (no `Memory_Read`/
+`MemoryExtended_Read` frame appears in any of these captures, confirmed directly) - it's a
+property-level read whose *result* differs based on device state, and it happens well before the
+Unload/StartLoading cycle begins. This is the real, evidenced trigger signal for the comprehensive
+rewrite - not a guess. See Part 10.3 for the exact 5-capture comparison table.
+
+**Still open**: whether this generalizes beyond 1.1.10's app (only device/app this has been
+checked against), and the precise decision rule ETS applies once it sees an anomalous checksum
+(e.g. whether *any* anomaly triggers the same universal comprehensive rewrite, or the response is
+graded).
 
 ## Part 9 — The "1984-byte gap" is a parser bug (manufacturer-shipped blob parameters), not device-internal state (RESOLVED 2026-08-28)
 
@@ -577,122 +574,90 @@ byte gap is fully resolved, not just mostly.
 **Still open**: whether this `TypeRawData`/length-prefix framing generalizes to other blob-typed
 parameters or other manufacturers' apps - confirmed for this one app's "Characteristic curve
 value domain" parameters only; `buildParamMem()`'s fallback (raw payload, no framing) is a
-deliberate safety net for an unverified shape, not assumed correct. The Part 8 detection-
-mechanism question (how ETS decides a comprehensive rewrite is needed) remains open and is
-unrelated to this fix.
+deliberate safety net for an unverified shape, not assumed correct.
 
-## Part 10 — Object 3 identified: the standard Group Object Table, content partly decoded, write-trigger behavior resolved for Partial Downloads (RESOLVED identity 2026-08-28; content and Partial-Download trigger RESOLVED 2026-08-29; Full-Download trigger still open)
+## Part 10 — Object 3: the standard Group Object Table, content decoded, write-trigger resolved for both Partial and Full Downloads
 
-Object 3's identity (below) was resolved 2026-08-28. 2026-08-29 added two further, harder
-results: (1) direct byte/bit-level decoding of real content inside the object, and (2) a clean,
-reproduced answer for when it gets written **during a Partial Download** specifically - a genuine
-resolution, not a guess. What remains open is narrower still: why it's written on *every* Full
-Download for one device (1.1.9) but only *some* Full Downloads for another (1.1.10, unconfirmed
-by a systematic redo as of this writing).
-
-🟢 **Confirmed, directly, no speculation involved**:
-- Real size for 1.1.10: **942 bytes** (`LoadData` size field `0x03AE`, matching the real chunked
-  write total exactly) - a different figure from §2.7's 98 bytes for 1.1.9, because it's a
-  **different device/app**, not a correction of that earlier number. Object 3's content is
-  evidently per-app, even though the object's presence is universal/mask-defined (§Part 6's
-  established pattern).
-- Real base address: `0x0C2000` for 1.1.10, `0x00570C` for 1.1.9 (`PID_TABLE_REFERENCE`,
-  confirmed repeatedly, stable across sessions for each device).
-- **Object 3's real identity, resolved**: `PID_OBJECT_TYPE` (property 1), read live from the real
-  device, reports type `9`. Cross-referenced against koolenex's own bundled real KNX Master Data
-  (`data/knx_master_1.xml`, the authoritative standard reference, not a guess or a memory recall):
+🟢 **Identity and structure, confirmed directly**:
+- **Object 3 is the standard KNX "Group Object Table" object** (type `9`). Read live via
+  `PID_OBJECT_TYPE` (property 1) on the real device, cross-referenced against koolenex's own
+  bundled real KNX Master Data (`data/knx_master_1.xml`):
   `<InterfaceObjectType Number="9" Name="OT_GROUP_OBJECT_TABLE" Text="Group Object Table Object" />`.
-  **Object 3 is the standard KNX "Group Object Table" object** - confirmed the same way for
-  objIdx 1/2/4 too (types `1`/`2`/`3` = Address Table/Association Table/Application Program,
-  all correctly matching what was already independently established), which validates the method.
-  Distinct from the Association table (which maps GA links to communication objects) and the
-  Address/GA table itself - not an exotic or opaque thing.
-- Content is almost entirely zero-filled for 1.1.10 - only ~30 meaningful bytes (a small
-  structure repeating 4 times, channel-shaped like everything else on this device) out of 942
-  total; a similar small-structure-in-a-mostly-empty-buffer shape holds for 1.1.9's 98 bytes.
+  Confirmed the same way for objIdx 1/2/4 too (Address Table/Association Table/Application
+  Program), validating the method. Distinct from the GA table (object 1, holds the group
+  addresses themselves) and the Association table (object 2, maps GA links to communication
+  objects) - an easy name mix-up to avoid.
+- Real size and base are per-device/app: **98 bytes at `0x00570C`** for 1.1.9; **942 bytes at
+  `0x0C2000`** for 1.1.10 (`PID_TABLE_REFERENCE`, stable across sessions). Content is almost
+  entirely zero-filled in both cases - a small structure repeating once per channel/object, with
+  the rest padding.
+- Not declared in either app's own `LoadProcedures` XML - written via the same universal,
+  mask-defined mechanism as the GA/Association tables (Part 6).
 
-### 10.1 Content decoded: Object 3 genuinely is a per-communication-object flag bitfield (RESOLVED 2026-08-29)
+### 10.1 Content: a genuine per-communication-object flag bitfield
 
-🟢 **Confirmed directly, reproduced twice, on real hardware**: for 1.1.9's app, deliberately
-flipping one communication-object flag in ETS - with nothing else changed - flips exactly one bit
-in Object 3's own written content, at a byte position specific to that object, and nothing else
-in the 98-byte payload moves.
+🟢 **Confirmed, reproduced twice on real hardware (1.1.9)**: flipping one communication-object
+flag in ETS, nothing else changed, flips exactly one bit in Object 3's own written content, at a
+byte position specific to that object.
 
-| Test | Change made | Byte offset | Before | After | Bit(s) |
-|---|---|---|---|---|---|
-| 1 | Update flag, com-object 7 (NTP sync input): off → **on** | 14 | `0x53` | `0xD3` | bit 7 (`XOR 0x80`) |
-| 2 | Update flag, com-object 7: on → **off** (revert) | 14 | `0xD3` | `0x53` | bit 7 (reverted cleanly) |
-| 2 (same download) | Read-On-Init flag, com-object 6 (Date/time input): off → **on** | 12 | `0x53` | `0x73` | bit 5 (`XOR 0x20`) |
+| Flag changed | Byte offset | Before → After | Bit |
+|---|---|---|---|
+| Update, com-object 7 (NTP sync input): off→on | 14 | `0x53` → `0xD3` | 7 (`XOR 0x80`) |
+| Update, com-object 7: on→off (revert) | 14 | `0xD3` → `0x53` | 7 (reverted cleanly) |
+| Read-On-Init, com-object 6 (Date/time input): off→on | 12 | `0x53` → `0x73` | 5 (`XOR 0x20`) |
 
-Both objects sit exactly 2 bytes apart (offset 12 vs 14) in the payload, consistent with a small,
-regular per-object record. This is real, decisive, bit-precise evidence: **Object 3 is a genuine
-per-communication-object flag bitfield** - exactly what a "Group Object Table" should hold - not
-an opaque or speculative structure. Two specific flag↔bit mappings are now confirmed for 1.1.9's
-app; the general record layout (which bit means which flag, for every object) is not fully mapped
-- only these two positions have been isolated so far.
+Two objects, 2 bytes apart, consistent with a small regular per-object record. Two specific
+flag↔bit mappings confirmed; the full record layout (every bit, every object) is not mapped
+beyond these two positions.
 
-**A "differs from manufacturer default" theory for Full Downloads was tested directly and
-refuted for 1.1.9** - checked the live `.knxproj`'s own data, not inferred: the project's stored
-communication-object instances (`ComObjectInstanceRef` elements) carried **zero** `Flag`
-attribute overrides anywhere, for any device, before 2026-08-29's flag tests - every flag on
-every com-object was sitting at its manufacturer default (cross-checked against the real app XML,
-e.g. `UpdateFlag="Disabled"` for object 7, `ReadOnInitFlag="Disabled"` for object 6). Yet Object 3
-was written on every 1.1.9 Full Download captured before those flag tests existed, all-default or
-not. 🔴 **This specific theory does not hold for 1.1.9's Full Download behavior** - "some flag
-differs from default" cannot be the trigger there, since it was written even when nothing
-differed from default at all.
+### 10.2 Partial Download write-trigger: conditional on a GA/link change
 
-### 10.2 Partial Download write-trigger: RESOLVED and reproduced - conditional on a GA/link change
+🟢 **Confirmed, reproduced twice, both directions (1.1.9)**: on a Partial Download, GA table /
+Association table / Object 3 are written together exactly when a GA link genuinely changes, and
+skipped together otherwise - not unconditional either way.
 
-🟢 **Confirmed, reproduced twice, in both directions, on real hardware**: unlike the Full Download
-case, GA table / Association table / Object 3 writes during a **Partial** Download are genuinely
-conditional, not written unconditionally every time - and the trigger for all three, together, is
-whether a GA link actually changed.
+| Partial Download | GA/link changed? | OX=1/2/3 |
+|---|---|---|
+| NTP flag toggle (×2, 2026-08-28) | No | not written |
+| GA 9/1/4→9/1/5 (2026-08-29) | Yes | written |
+| GA 9/1/5→9/1/4 + flag revert, same download | Yes | written |
 
-| Partial Download | GA/link changed? | OX=1 (GA) | OX=2 (Assoc) | OX=3 | OX=4 (params) |
-|---|---|---|---|---|---|
-| 2026-08-28, NTP flag toggle (×2, one each direction) | No | not written | not written | not written | written |
-| 2026-08-29, GA 9/1/4→9/1/5 | Yes | written | written | written | not written (nothing there changed) |
-| 2026-08-29, GA 9/1/5→9/1/4 + flag revert (same download) | Yes | written | written | written | not written |
+Object 3's content is correct in both directions too, not a blind rewrite - the flag-revert
+test's byte 14 cleanly returned to baseline. Confirmed for 1.1.9 only.
 
-An earlier, weaker framing of this ("Partial Downloads never touch GA/Assoc/Object 3 at all") was
-explicitly challenged and correctly retracted - it was confounded, since every Partial Download
-captured up to that point happened to have zero GA changes in it, so the claim couldn't
-distinguish "never touched" from "only touched when a link changes." The corrected, now-tested
-claim: **on Partial Downloads, GA/Association/Object 3 form one linked group that's written
-together exactly when a GA link genuinely changes, and skipped together otherwise** - a clean,
-reproduced, symmetric result (works both directions of the same GA flip, and Object 3's own
-content correctly reflects a flag revert made in the same download). Object 3's *content* here is
-correct too, not a blind rewrite - the flag-revert test's byte-14 value cleanly returned to its
-pre-test baseline.
+### 10.3 Full Download write-trigger: resolved via a systematic controlled redo (1.1.10, 2026-08-29)
 
-**Scope, don't overclaim**: confirmed for 1.1.9 only, two reproductions, one app/device. Whether
-"any GA/link change" is precisely the right trigger (versus e.g. "any change to objIdx 1/2/3's
-own declared content specifically") isn't separately isolated - the tests so far always changed a
-real GA link, never e.g. a com-object flag alone via Partial Download without also changing a GA.
+🟢 **Confirmed, five real Full Downloads in one controlled session, 1.1.10**: Object 3 is written
+exactly when the device's `OX=4 P=27` checksum read (Part 8) comes back anomalous, which happens
+only after an out-of-band write - not for any kind of genuine, ETS-driven change.
 
-### 10.3 Full Download write-trigger: still genuinely open, now on a firmer footing
+| # | Change | Origin | `OX=4 P=27` checksum | Object 3 written? |
+|---|---|---|---|---|
+| 1 | none | — | valid | No |
+| 2 | none | — | valid | No |
+| 3 | parameter byte (offset 172) | out-of-band, bypassing ETS | **empty (`N=0`)** | **Yes** |
+| 4 | GA link re-point | genuine, via ETS | valid | No |
+| 5 | same offset-172 byte, real value | genuine, via ETS | valid | No |
 
-🔴 **Still open**: why Object 3 is written on **every** 1.1.9 Full Download captured (5 for 5,
-including 2 with zero content differing from manufacturer default) while 1.1.10's single 08-28
-session showed only 2 of 4. The "differs from default" theory is now directly refuted for 1.1.9
-(§10.1). The earlier "written after out-of-band tampering" theory, tested directly on 1.1.9
-2026-08-29, came back inconclusive rather than confirmed or refuted - see the capture comparison
-table and full narrative in
-`docs/follow-ups/2026-08-29-partial-download-mode-and-obj3-trigger-test.md` - because 1.1.9's
-baseline was already "always written," so no test on this device can isolate a trigger for the
-Full-Download case specifically.
+Test 5 is the decisive control: the *exact same byte* as test 3, written via ETS instead of
+bypassing it, produces a valid checksum and no Object 3 write - isolating the origin of the write
+(ETS session vs. out-of-band) as the real variable, not the byte or parameter itself. This
+directly refutes two prior hypotheses tested along the way: neither "any project change to a
+parameter" nor "any project change to a GA link" (test 4) triggers Object 3 - only an anomalous
+checksum does, which only an out-of-band write produces. This also supersedes the earlier 1.1.9
+data (which showed Object 3 written on every Full Download, tampered or not, without a systematic
+redo isolating the variable) and the historical unreproduced 1.1.10 session from 2026-08-28 - both
+are now explained by this same mechanism.
 
-**1.1.10's 2-of-4 pattern has NOT yet been re-verified** - it comes from a single historical
-session (2026-08-28), never independently reproduced, and the user has explicitly flagged this as
-needing a systematic, controlled redo (multiple clean baseline Full Downloads, then a deliberate
-change, on 1.1.10 specifically) before treating it as an established fact rather than one
-data point. **Do not cite the 2-of-4 figure as confirmed until that redo happens.**
-
-**Retracted (2026-08-28, kept for the record)**: an earlier, explicitly-flagged-as-speculative
-theory connected object 3 to application-version-management. The Group Object Table identity is
-unrelated to that, so the theory doesn't hold - recorded as an example of why marking something
-speculative rather than asserting it costs nothing when it's later retracted.
+**Still open**: 1.1.9 still writes Object 3 on every Full Download tested (never yet shown *not*
+written) - not yet reconciled with 1.1.10's conditional behavior. This is a real, unexplained gap
+in the checksum theory as it stands: **1.1.9's app doesn't declare property 27 at all** (Part 7),
+so the exact same `OX=4 P=27` mechanism can't straightforwardly apply to it - either 1.1.9 uses a
+different signal ETS checks, or something about its Object 3 write path is genuinely
+unconditional rather than checksum-gated. Not investigated - the natural next test is checking
+whether 1.1.9 also gets an anomalous read of *something* after out-of-band tampering, and whether
+a genuinely untampered 1.1.9 session can ever be found that skips Object 3. Whether the
+checksum-trigger mechanism generalizes beyond 1.1.10's app is also open.
 
 ## Part 11 — koolenex has a real Partial-Download write mode, confirmed round-trip on real hardware (NEW 2026-08-29)
 
@@ -761,6 +726,10 @@ Full implementation narrative, commit hash, and test coverage:
   `2026-08-29-ets-partial-download-ga-change-9-1-5-to-9-1-4-1.1.9.pcapng`, is kept for the record
   but is NOT a Partial Download despite its filename - real Full Download signature on the wire,
   confirmed by the user afterward as a misclick.)
+- `docs/data/captures/2026-08-29-ets-full-download-1.1.10-systematic-{1,2}-clean.pcapng`,
+  `...-3-tampered.pcapng`, `...-4-real-param-change.pcapng`, and
+  `...-5-real-offset172-change.pcapng` (knx-ets-manager repo) — the 5-download controlled redo,
+  primary source for Part 8's checksum-trigger finding and Part 10.3.
 - `docs/follow-ups/2026-08-27-relmem-write-scope-investigation.md`,
   `docs/follow-ups/2026-08-28-write-path-missing-load-sequence.md`,
   `docs/follow-ups/2026-08-29-property27-ga-write-wiring-and-ui.md`,

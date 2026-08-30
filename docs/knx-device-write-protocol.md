@@ -271,6 +271,15 @@ apart by re-reading with the same buggy read path, no matter how many times or h
 took an intentionally differently-shaped read (a smaller, separate chunk) to reveal which one it
 actually was.
 
+**A third, separate read bug found the same day, once the short-response fix made larger reads
+practical again** 🟢: the legacy (non-extended) `Memory_Read` service packs its requested byte
+count into a 6-bit field of the APCI byte, giving a real maximum of 63, not 255 (the extended
+service's limit). A request for exactly 64 bytes silently wrapped to a 0-byte count field
+(`64 & 0x3f = 0`), producing a well-formed but meaningless request; the device correctly rejected
+it with a genuine `Memory_Response returned zero bytes` failure. Fixed by capping the per-request
+count to the real limit of whichever service is in use (63 legacy / 255 extended) before building
+the request, rather than only after receiving a response.
+
 ### 4.2 The 9-byte "LoadData" declaration
 
 Before writing the real content, the tool declares what's about to come, as 9 extra bytes on the
@@ -368,6 +377,12 @@ with no other change anywhere (the object-3 flags described below, and the group
 itself, are both unaffected). Link direction is **not** represented anywhere else — this entry
 order is the only encoding of it.
 
+**A real bug, found 2026-08-30**: koolenex's own table builder sorted entries by group-address
+index/communication-object number before writing them, discarding this real declared order. The
+communication objects are already supplied to the builder in the project's own declared order;
+the sort was unnecessary and actively wrong. Fixed by removing it. Confirmed byte-for-byte against
+a real ETS capture once removed.
+
 ### 6.4 Object 3 — per-communication-object flags table
 
 🟢 This is the standard KNX "Group Object Table" — confirmed via a live object-type property read
@@ -428,6 +443,13 @@ configuration data before capturing the real device, and matched exactly):
   | Alarm | `10` |
   | High | `01` |
   | System | `00` 🟡 inferred by pattern — this level isn't reachable from ETS's own user interface at all (per KNX's own documentation), so no real configuration can exercise this value directly to confirm it |
+
+**A real parser bug, found 2026-08-30**: a project's XML declares each communication object twice
+— once at the application level (the object's default `Read-On-Init`/`Priority`), and once per
+device instance, which can override either. koolenex's parser only read the application-level
+declaration; a device-instance override was silently dropped. Fixed by also reading the
+instance-level attributes, when present, and preferring them. Confirmed against a real ETS
+capture: the affected byte (Read-On-Init) now matches exactly once the override is applied.
 
 **Group Object Size code** (the companion byte) — the standard KNX 4-bit code for a
 communication object's expected data size, confirmed 4-for-4 against real declared sizes on two

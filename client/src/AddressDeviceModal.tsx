@@ -41,6 +41,9 @@ import styles from './AddressDeviceModal.module.css';
 export function AddressDeviceModal({
   devices: allDevices,
   initialDeviceId,
+  initialTab,
+  initialSerial,
+  lockDevice,
   onClose,
   addLog,
 }: {
@@ -49,13 +52,26 @@ export function AddressDeviceModal({
   // both tabs' "ASSIGN TO" dropdowns, instead of leaving them blank/
   // auto-matched-by-serial only. Still changeable - opening from one row
   // doesn't prevent addressing a different device if the scan turns up
-  // something else.
+  // something else - UNLESS lockDevice is also set (see below).
   initialDeviceId?: number;
+  // Opens directly on the given tab instead of always defaulting to
+  // 'detect' - added 2026-08-30 for the serial icon's "already has a
+  // known serial" case (ProgrammingView.tsx), which makes more sense to
+  // open straight on the serial tab with that value pre-filled than to
+  // make the operator re-scan/re-enter something already on record.
+  initialTab?: 'detect' | 'serial';
+  // Pre-fills the manual serial-entry field (serial tab only).
+  initialSerial?: string;
+  // The target device is already fully known (a real serial is already
+  // recorded against it) - hides the "ASSIGN TO" picker entirely rather
+  // than offering a choice that doesn't apply. Only meaningful together
+  // with initialDeviceId.
+  lockDevice?: boolean;
   onClose: () => void;
   addLog: (line: string) => void;
 }) {
   const { updateDevice } = useProjectActions();
-  const [tab, setTab] = useState<'detect' | 'serial'>('detect');
+  const [tab, setTab] = useState<'detect' | 'serial'>(initialTab ?? 'detect');
   const [showAllDevices, setShowAllDevices] = useState(false);
 
   // A device with no real project address at all (has_address=0, a
@@ -171,7 +187,7 @@ export function AddressDeviceModal({
   };
 
   // ── Serial-entry tab ─────────────────────────────────────────────────────
-  const [manualSerial, setManualSerial] = useState('');
+  const [manualSerial, setManualSerial] = useState(initialSerial ?? '');
   const [manualDeviceId, setManualDeviceId] = useState<number | ''>(
     initialDeviceId ?? '',
   );
@@ -182,6 +198,9 @@ export function AddressDeviceModal({
 
   const manualSerialValid = /^[0-9a-fA-F]{12}$/.test(manualSerial);
   const manualMatch = manualSerialValid ? matchBySerial(manualSerial) : null;
+  const lockedTarget = lockDevice
+    ? (devices.find((d) => d.id === initialDeviceId) ?? null)
+    : null;
 
   const writeManual = async () => {
     const deviceId = manualDeviceId || manualMatch?.id;
@@ -249,14 +268,21 @@ export function AddressDeviceModal({
             </button>
           </div>
 
-          <label className={styles.checkboxRow}>
-            <input
-              type="checkbox"
-              checked={showAllDevices}
-              onChange={(e) => setShowAllDevices(e.target.checked)}
-            />
-            Show already-programmed devices too (re-addressing a factory-reset unit)
-          </label>
+          {/* Only meaningful for a dropdown that picks among candidates -
+              hidden on the serial tab when the target is already fully
+              known (lockDevice), since that tab shows no picker at all
+              in that case. Still shown on the detect tab, which can
+              still turn up other devices to match. */}
+          {!(lockDevice && tab === 'serial') && (
+            <label className={styles.checkboxRow}>
+              <input
+                type="checkbox"
+                checked={showAllDevices}
+                onChange={(e) => setShowAllDevices(e.target.checked)}
+              />
+              Show already-programmed devices too (re-addressing a factory-reset unit)
+            </label>
+          )}
 
           {tab === 'detect' ? (
             <>
@@ -384,31 +410,42 @@ export function AddressDeviceModal({
                   Serial must be exactly 12 hex characters (6 bytes).
                 </div>
               )}
-              <div className={styles.row}>
-                <div className={styles.col}>
-                  <div className={styles.fieldLabel}>ASSIGN TO</div>
-                  <select
-                    className={styles.select}
-                    value={manualDeviceId || manualMatch?.id || ''}
-                    onChange={(e) =>
-                      setManualDeviceId(
-                        e.target.value ? Number(e.target.value) : '',
-                      )
-                    }
-                  >
-                    <option value="">— select a device —</option>
-                    {candidates.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.individual_address} — {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              {manualMatch && !manualDeviceId && (
-                <div className={styles.matchedTag}>
-                  Matched project record: {manualMatch.name}
-                </div>
+              {lockDevice ? (
+                lockedTarget && (
+                  <div className={styles.matchedTag}>
+                    Addressing: {lockedTarget.individual_address} —{' '}
+                    {lockedTarget.name}
+                  </div>
+                )
+              ) : (
+                <>
+                  <div className={styles.row}>
+                    <div className={styles.col}>
+                      <div className={styles.fieldLabel}>ASSIGN TO</div>
+                      <select
+                        className={styles.select}
+                        value={manualDeviceId || manualMatch?.id || ''}
+                        onChange={(e) =>
+                          setManualDeviceId(
+                            e.target.value ? Number(e.target.value) : '',
+                          )
+                        }
+                      >
+                        <option value="">— select a device —</option>
+                        {candidates.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.individual_address} — {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  {manualMatch && !manualDeviceId && (
+                    <div className={styles.matchedTag}>
+                      Matched project record: {manualMatch.name}
+                    </div>
+                  )}
+                </>
               )}
               <Btn
                 onClick={writeManual}

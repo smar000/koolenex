@@ -537,31 +537,32 @@ export function ProgrammingView() {
                             programming button is pressed during a write, or
                             when entered by hand (see AddressDeviceModal) -
                             it is NOT always present just because the
-                            imported project has a planned address. Disabled
-                            entirely for a has_address=0 row (nothing to
-                            commission until a real address exists). */}
+                            imported project has a planned address. Enabled
+                            even for a has_address=0 row (2026-08-30, real
+                            request) - routes into the address-assignment
+                            step first rather than being a dead end,
+                            matching the "-.-.-" badge's own click target. */}
                         <span
                           className={styles.serialIcon}
                           style={{
                             color: !d.has_address
-                              ? 'var(--muted)'
+                              ? 'var(--amber)'
                               : d.serial_number
                                 ? 'var(--green)'
                                 : 'var(--amber)',
-                            opacity: d.has_address ? 1 : 0.4,
-                            cursor: d.has_address ? 'pointer' : 'default',
+                            cursor: 'pointer',
                           }}
                           title={
                             !d.has_address
-                              ? 'Assign a project address first'
+                              ? 'No project address yet — click to assign one'
                               : d.serial_number
                                 ? `Serial ${d.serial_number} — click to re-address`
                                 : 'Not yet commissioned — no serial recorded. Click to address this device.'
                           }
-                          onClick={
+                          onClick={() =>
                             d.has_address
-                              ? () => setAddressModalFor(d.id)
-                              : undefined
+                              ? setAddressModalFor(d.id)
+                              : setAssignAddressFor(d.id)
                           }
                         >
                           <IconSerial size={12} />
@@ -932,19 +933,38 @@ export function ProgrammingView() {
           onClick={() => setSlideOverDevice(null)}
         />
       )}
-      {addressModalFor !== null && (
-        <AddressDeviceModal
-          devices={devices}
-          initialDeviceId={
-            typeof addressModalFor === 'number' ? addressModalFor : undefined
-          }
-          onClose={() => setAddressModalFor(null)}
-          addLog={(line) => {
-            setLogOpen(true);
-            addLog(line);
-          }}
-        />
-      )}
+      {addressModalFor !== null &&
+        (() => {
+          // A known-serial device (already commissioned once) opens
+          // straight on the serial tab, pre-filled, with the picker
+          // locked to it - re-scanning/re-picking a device we already
+          // have a record for is unnecessary friction. A row with no
+          // recorded serial still opens on the general 'detect' tab
+          // (its own default), since that IS the discovery step.
+          const rowDevice =
+            typeof addressModalFor === 'number'
+              ? devices.find((d: any) => d.id === addressModalFor)
+              : undefined;
+          const known = !!rowDevice?.serial_number;
+          return (
+            <AddressDeviceModal
+              devices={devices}
+              initialDeviceId={
+                typeof addressModalFor === 'number'
+                  ? addressModalFor
+                  : undefined
+              }
+              initialTab={known ? 'serial' : undefined}
+              initialSerial={known ? rowDevice!.serial_number : undefined}
+              lockDevice={known}
+              onClose={() => setAddressModalFor(null)}
+              addLog={(line) => {
+                setLogOpen(true);
+                addLog(line);
+              }}
+            />
+          );
+        })()}
       {assignAddressFor !== null &&
         (() => {
           const target = devices.find((d: any) => d.id === assignAddressFor);

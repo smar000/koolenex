@@ -58,8 +58,8 @@
      the matching floor so the table (not the DEVICE column) is what
      shrinks/scrolls once the log pane leaves too little room, rather than
      squeezing DEVICE toward zero again. */
-  /* other columns' widths (88+280=368, thActions widened 2026-08-30 - see
-     its own comment) + thDevice's own 168px min-width, below -
+  /* other columns' widths (88+300=388, thActions widened again 2026-08-30
+     - see its own comment) + thDevice's own 168px min-width, below -
      table-layout:fixed derives DEVICE's actual share from (this min-width
      minus the other columns' widths), not from its own min-width
      directly, so this has to stay in sync with both. (The PROGRESS column
@@ -73,7 +73,7 @@
      trimmed 20px -> 14px for the same reason. ADDRESS used to be its own
      46px column; folded into DEVICE as a small pill instead (see
      .addrBadge) so thDevice's min-width absorbs it. */
-  min-width: 536px;
+  min-width: 556px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -94,6 +94,14 @@
   flex-shrink: 0;
   font-family: monospace;
   font-size: 10px;
+  /* Fixed width (not just padding) - added 2026-08-30, real request: a
+     real address ("1.1.10") and the "-.-.-" placeholder aren't the same
+     length, so without this the device name/manufacturer text after the
+     badge started at a different x per row, reading as misaligned columns
+     even though the table's own grid was fine. Centered within it so
+     shorter values ("1.1.0") don't look lopsided. */
+  width: 46px;
+  text-align: center;
   /* color defaults here but is overridden inline per-state by DeviceAddr
      (primitives.tsx) - background/border follow currentColor rather than
      a hardcoded --accent so the whole pill (not just the text) reflects
@@ -232,8 +240,14 @@
      narrowly enough to go unnoticed until Re-program's button visibly
      spilled out past the column into whatever sits to its right (the log
      panel's collapsed strip). Widened with real slack this time - see
-     .table's min-width comment for how this feeds into it. */
-  width: 280px;
+     .table's min-width comment for how this feeds into it.
+     Widened again 2026-08-30 (same day) alongside .actionBtn going from a
+     92px min-width to a fixed 104px (both Verify and Program, so
+     "✓ Re-program" - the longest real label - no longer grows one button
+     past the other): new content total 52+6+104+6+104=272px, needing
+     more than the 24px of slack the 280px width left over TD's own 24px
+     padding. */
+  width: 300px;
 }
 .logEntrySuccess {
   composes: logEntry;
@@ -265,12 +279,17 @@
 .rowActions :global(button) {
   white-space: nowrap;
 }
-/* Shared min-width across Verify/Re-verify and Program/Re-program/Retry so
-   the buttons stay the same size regardless of which label is currently
-   showing ("Re-verify"/"Re-program" are longer than "Verify"/"Program") -
-   sized to fit "Re-program", the longest label used here, plus padding. */
+/* Shared FIXED width (not just a floor) across Verify/Re-verify and
+   Program/Re-program/✓ Re-program/Retry so the buttons stay exactly the
+   same size regardless of which label is currently showing - real
+   request 2026-08-30: a plain min-width let "✓ Re-program" (the longest
+   real label, checkmark included) grow past Verify's own width, so the
+   two buttons visibly weren't aligned/matched anymore. Widened slightly
+   and paired with a 1px-smaller font (below) to fit that longest label
+   without the column needing to grow again. */
 .actionBtn {
-  min-width: 92px;
+  width: 104px;
+  font-size: 9px;
   text-align: center;
 }
 /* Fixed-width slot for the View/clear-cache icon pair so Verify/Program

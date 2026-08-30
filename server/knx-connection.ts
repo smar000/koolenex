@@ -221,16 +221,13 @@ export class KnxConnection extends EventEmitter {
 
   /**
    * Send a CEMI frame via KNXnet/IP Routing (multicast) instead of the
-   * normal Tunneling connection - used for the KNX "System Broadcast"
-   * services (checkProgrammingMode(), the serial-number addressing
-   * services below), which Tunneling cannot carry at all - see
-   * knx_routing_transport_gap memory / docs/knx-device-write-protocol.md
-   * §9. Default throws (no Routing capability) - only KnxIpConnection
-   * (knx-protocol.ts) overrides this; USB has no IP path at all.
+   * normal Tunneling connection. Default throws (no Routing capability) -
+   * only KnxIpConnection (knx-protocol.ts) overrides this; USB has no IP
+   * path at all. See docs/knx-device-write-protocol.md §9.
    */
   sendCEMIViaRouting(_cemi: Buffer): Promise<void> {
     throw new Error(
-      'KNXnet/IP Routing is not available on this transport - System Broadcast services (programming-mode detection, serial-number addressing) need an IP connection',
+      'KNXnet/IP Routing is not available on this transport',
     );
   }
 
@@ -241,20 +238,13 @@ export class KnxConnection extends EventEmitter {
 
   /** Called by transport subclass when a CEMI frame is received from the bus. */
   _onCEMI(cemi: CemiFrame): void {
-    // Real, confirmed 2026-08-30: KNX network-management "broadcast"
-    // services (individual-address discovery, serial-number addressing)
-    // use the GROUP address space's reserved broadcast address 0/0/0, not
-    // an individual-type frame to 0.0.0 - confirmed against Calimero's
-    // real TransportLayer.broadcast(): its `system` flag ("true for system
-    // broadcast, false for default (domain) broadcast") is false for
-    // writeAddress()/readAddress() (both plain and serial-number
-    // variants), which routes to `GroupAddress.Broadcast` (0/0/0), a real
-    // GROUP-type cEMI frame - not the individual-broadcast framing this
-    // codebase built and tested first. See knx_routing_transport_gap
-    // memory. 0/0/0 is never a legitimate application group address, so a
-    // reply here is routed to '_mgmt' (where checkProgrammingMode()/the
-    // serial-number services listen), not 'telegram', even though it's a
-    // GROUP-type frame.
+    // KNX network-management broadcast services (individual-address
+    // discovery, serial-number addressing) use the GROUP address space's
+    // reserved broadcast address 0/0/0 - see
+    // docs/knx-device-write-protocol.md §9. 0/0/0 is never a legitimate
+    // application group address, so a reply here is routed to '_mgmt'
+    // (where checkProgrammingMode()/the serial-number services listen),
+    // not 'telegram', even though it's a GROUP-type frame.
     if (cemi.isGroup && cemi.dst === '0/0/0') {
       this.emit('_mgmt', cemi);
     } else if (cemi.isGroup && cemi.apciName) {
@@ -474,33 +464,21 @@ export class KnxConnection extends EventEmitter {
    * complementary to (not the same mechanism as) the serial-number-based
    * addressing below.
    *
-   * **Real root cause found 2026-08-30 (second pass) - this was never a
-   * Tunneling-vs-Routing transport problem at all.** Two earlier framing
-   * attempts (individual-type frame to 0.0.0, both "ordinary" and "system"
-   * broadcast ctrl1) got zero reply via both Tunneling and Routing.
-   * Confirmed against Calimero's real reference implementation
-   * (`TransportLayer.broadcast(system, ...)`, doc comment: *"system: true
-   * for system broadcast, false for default (domain) broadcast"*) -
-   * `writeAddress()`/`readAddress()` (both the plain and serial-number
-   * variants) pass `system=false`, which sends to `GroupAddress.Broadcast`
-   * (group address `0/0/0`) - a real **GROUP-type** cEMI frame, not an
-   * individual-type one, and not "system broadcast" ctrl1 framing either.
-   * Calimero's own test suite for this exact procedure
-   * (`ManagementProceduresImplTest`) uses a plain `newTunnelingLink()` -
-   * confirming Tunneling was never the problem. See
-   * knx_routing_transport_gap memory for the fuller trail (kept for
-   * the real, separately-useful TCP Tunneling work that came out of that
-   * investigation).
+   * Sent as a GROUP-type frame to address `0/0/0` (KNX's "default
+   * broadcast" address) at System priority (ctrl1 `0xB0`), over the
+   * normal Tunneling connection - confirmed byte-for-byte against a real
+   * KNXnet/IP capture of ETS's own commissioning traffic; see
+   * docs/knx-device-write-protocol.md §9 for the full wire-format
+   * reference.
    *
    * Real KNX precondition, not enforced here: only ONE device should be in
    * programming mode on a bus at a time - if more than one is, only the
-   * first response is surfaced. Confirmed on real hardware, 2026-08-30:
-   * with two devices (different manufacturers) simultaneously in
-   * programming mode, BOTH replied cleanly with no collision/corruption -
-   * this function simply returns whichever arrives first and stops
-   * listening, silently not surfacing that a second device was also
-   * active. Real UX consideration for a future rollout tool, not
-   * addressed here.
+   * first response is surfaced. Real-hardware testing with two devices
+   * simultaneously in programming mode showed both reply cleanly with no
+   * collision/corruption - this function simply returns whichever arrives
+   * first and stops listening, silently not surfacing that a second
+   * device was also active. Worth accounting for in a future rollout
+   * tool's UX, not addressed here.
    */
   checkProgrammingMode(
     timeoutMs: number = 3000,
@@ -553,23 +531,20 @@ export class KnxConnection extends EventEmitter {
    * whichever device(s) are currently in physical programming mode, no
    * prior knowledge of any device needed at all. Unlike
    * checkProgrammingMode() above, this deliberately does NOT stop on the
-   * first match - confirmed real-hardware evidence (2026-08-30, two
-   * different manufacturers simultaneously in programming mode) is that
-   * multiple devices reply cleanly with no collision, so collecting all of
-   * them is the whole point: for genuinely blank devices,
-   * checkProgrammingMode()'s address-based response can't tell two blank
-   * devices apart (both report the same factory-default address), but
-   * their serial numbers are always unique. Duplicates from normal KNX
-   * frame repetition are de-duplicated by serial.
+   * first match - multiple devices reply cleanly with no collision (real
+   * hardware confirmed with two different manufacturers simultaneously in
+   * programming mode), so collecting all of them is the whole point: for
+   * genuinely blank devices, checkProgrammingMode()'s address-based
+   * response can't tell two blank devices apart (both report the same
+   * factory-default address), but their serial numbers are always
+   * unique. Duplicates from normal KNX frame repetition are de-duplicated
+   * by serial.
    *
-   * **Confirmed byte-for-byte against real ETS traffic** (tshark capture
-   * of ETS's own commissioning flow, 2026-08-30 - see
-   * knx_serial_number_addressing_research memory): sent as a GROUP-type
-   * frame to `0/0/0` at System priority (ctrl1 `0xB0`) - the same framing
-   * as checkProgrammingMode() and the address-assignment services below,
-   * NOT the individual-type "system broadcast" framing an earlier version
-   * of this function used (based on a since-corrected reading of
-   * Calimero's source that didn't match real ETS behavior).
+   * Sent as a GROUP-type frame to `0/0/0` at System priority (ctrl1
+   * `0xB0`) - the same framing as checkProgrammingMode() and the
+   * address-assignment services below - confirmed byte-for-byte against a
+   * real KNXnet/IP capture of ETS's own commissioning traffic; see
+   * docs/knx-device-write-protocol.md §9.
    */
   readSerialNumbersInProgrammingMode(
     timeoutMs: number = 3000,
@@ -610,18 +585,12 @@ export class KnxConnection extends EventEmitter {
   // or queries a device's individual address via its 6-byte KNX serial number,
   // with no physical programming-button press needed (unlike programIA() above,
   // which relies on the device being in programming mode and only one device
-  // responding). GROUP-type frame to 0/0/0 (KNX's "default broadcast" address),
-  // ordinary ctrl1 framing, sent via the normal Tunneling connection - see
-  // checkProgrammingMode()'s doc comment above for the full real-hardware
-  // correction (2026-08-30, second pass): this is NOT "system broadcast"
-  // ctrl1 framing and NOT an individual-type frame, confirmed against
-  // Calimero's real reference implementation
-  // (`TransportLayer.broadcast(system=false, ...)` → `GroupAddress.
-  // Broadcast`). UNNUMBERED (no TPCI sequence, no managementSession()/
-  // T_Connect - broadcast destinations don't carry a transport-layer
-  // connection to ack/sequence against). Real standard KNX procedure,
-  // sourced from Falcon SDK's own doc comments + Calimero's real
-  // implementation - see knx_serial_number_addressing_research memory.
+  // responding). Sent as a GROUP-type frame to 0/0/0 (KNX's "default broadcast"
+  // address) at System priority, over the normal Tunneling connection - see
+  // docs/knx-device-write-protocol.md §9 for the full wire-format reference.
+  // UNNUMBERED (no TPCI sequence, no managementSession()/T_Connect - broadcast
+  // destinations don't carry a transport-layer connection to ack/sequence
+  // against). Real standard KNX procedure, spec 3/5/2 §2.4/§2.5.
 
   /**
    * Broadcast A_IndividualAddressSerialNumber_Write - assigns `newAddr` to
@@ -808,8 +777,8 @@ export class KnxConnection extends EventEmitter {
       // bits. Devices whose address does fit keep using the legacy service
       // unchanged - some legacy/ABB-style devices are only known to answer
       // that one, so this is deliberately the minimum change, not a blanket
-      // switch to extended. See koolenex-reference memory, 2026-08-26, for the
-      // real-hardware evidence this was root-caused from.
+      // switch to extended, based on real-hardware evidence of which
+      // service each device family actually answers.
       if (wantAddr > 0xffff) {
         const apdu = apduMemoryExtendedRead(seq, n, wantAddr);
         const respP = waitResponse('MemoryExtended_Read_Response', 3000);
@@ -1106,10 +1075,10 @@ export class KnxConnection extends EventEmitter {
       // `data/knx_master_*.xml`'s `<MaskVersion>` table: `ManagementModel`
       // "SystemB" for masks `07B0`/`17B0`/`27B0`/`57B0`, vs. legacy
       // `Bcu1`/`Bcu2`/`BimM112`/`PropertyBased` families for older masks).
-      // The user correctly pushed back on generalizing "always extended"
-      // from a same-family two-device sample - a genuinely older
-      // Bcu1/Bcu2/System-7 device could still require the legacy service.
-      // Real ETS itself reads the device descriptor as the very first frame
+      // Generalizing "always extended" from a same-family two-device
+      // sample would be unsound - a genuinely older Bcu1/Bcu2/System-7
+      // device could still require the legacy service. Real ETS itself
+      // reads the device descriptor as the very first frame
       // of every download session (confirmed in every real capture this
       // project has) - almost certainly for exactly this reason. Mirror
       // that: read it here, and gate on the mask's low byte being `0xB0`
@@ -1322,8 +1291,7 @@ export class KnxConnection extends EventEmitter {
               // silently truncates to the wrong (low) address and writes
               // nothing meaningful to the real target. Originally this only
               // switched to A_MemoryExtended_Write when the address itself
-              // didn't fit in 16 bits (see koolenex-reference memory,
-              // 2026-08-26). 2026-08-28 correction: a real captured ETS
+              // didn't fit in 16 bits. Correction: a real captured ETS
               // Partial Download against 1.1.9 (address 0x5F53, well within
               // 16 bits) still used A_MemoryExtended_Write exclusively -
               // confirmed via byte-level replay: a verbatim replay of ETS's

@@ -334,7 +334,7 @@ export interface GroupObjectFlags {
 // explains why toggling Read-On-Init (a flag) never moved the mystery byte (docs/knx-device-
 // write-protocol.md Part 16) - it isn't flag-derived at all, it's fixed by the object's DPT.
 // String keys are ETS's own exact `ObjectSize` attribute text (confirmed against real project
-// XML this session) - singular "Bit"/"Byte" for 1, plural for 2+, matching ETS's own wording.
+// XML) - singular "Bit"/"Byte" for 1, plural for 2+, matching ETS's own wording.
 const GROUP_OBJECT_SIZE_CODES: Record<string, number> = {
   '1 Bit': 0,
   '2 Bit': 1,

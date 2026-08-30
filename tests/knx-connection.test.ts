@@ -30,7 +30,7 @@ class TestKnxConnection extends KnxConnection {
   // Separate from `sent` - real KNXnet/IP Routing (multicast) is a genuinely
   // different channel from Tunneling, used specifically by the KNX "System
   // Broadcast" services (checkProgrammingMode, serial-number addressing) -
-  // see knx_routing_transport_gap memory. `_routingAvailable` lets a test
+  // see docs/knx-device-write-protocol.md §9. `_routingAvailable` lets a test
   // opt into the base class's default-throw behavior instead (simulating a
   // connection with no Routing capability) by setting it false.
   sentViaRouting: Buffer[] = [];
@@ -330,7 +330,7 @@ describe('KnxConnection.ping', () => {
 
 // ── KnxConnection.sendCEMIViaRouting (default) ────────────────────────────────
 // The base class has no Routing capability (only KnxIpConnection in
-// knx-protocol.ts overrides this) - see knx_routing_transport_gap memory.
+// knx-protocol.ts overrides this) - see docs/knx-device-write-protocol.md §9.
 
 describe('KnxConnection.sendCEMIViaRouting (base class default)', () => {
   it('throws - no Routing capability without an IP transport override', () => {
@@ -373,11 +373,9 @@ describe('KnxConnection.programIA', () => {
 });
 
 // ── KnxConnection.checkProgrammingMode ────────────────────────────────────────
-// A_IndividualAddress_Read broadcast discovery - see knx_routing_transport_gap
-// memory / docs/knx-device-write-protocol.md §9: known NOT to elicit a real
-// reply through this codebase's Tunneling-only transport, root-caused to a
-// missing Routing connector, not a bug in this function. These tests cover
-// the application-layer behavior only (frame shape, response matching,
+// A_IndividualAddress_Read broadcast discovery - see
+// docs/knx-device-write-protocol.md §9. These tests cover the
+// application-layer behavior only (frame shape, response matching,
 // timeout) - the same protocol-shape-only coverage every other broadcast
 // service in this file gets.
 
@@ -390,10 +388,8 @@ describe('KnxConnection.checkProgrammingMode', () => {
     const p = conn.checkProgrammingMode(50);
     await delay(10);
     // Sent via the normal Tunneling connection, GROUP-type to 0/0/0 -
-    // confirmed byte-for-byte against real ETS traffic, 2026-08-30 (see
-    // knx_serial_number_addressing_research memory) - NOT Routing, NOT
-    // an individual-type frame, both earlier (wrong) guesses this session
-    // made before the real capture settled it.
+    // confirmed byte-for-byte against real ETS traffic (see
+    // docs/knx-device-write-protocol.md §9).
     assert.equal(conn.sent.length, 1);
     const parsed = parseCEMI(conn.sent[0]!);
     assert.ok(parsed);
@@ -449,7 +445,7 @@ describe('KnxConnection.checkProgrammingMode', () => {
 // ── KnxConnection.readSerialNumbersInProgrammingMode ──────────────────────────
 // NM_Read_SerialNumber_By_ProgrammingMode - confirmed byte-for-byte against
 // real ETS traffic (tshark capture, 2026-08-30, see
-// knx_serial_number_addressing_research memory): A_SystemNetworkParameter_
+// docs/knx-device-write-protocol.md §9): A_SystemNetworkParameter_
 // Read/Response for PID_SERIAL_NUMBER (11) on object type 0 (Device),
 // GROUP-type frame to 0/0/0 at System priority, response payload
 // [objectType(2)][pidField(2)][echoedOperand(1)][serial(6)].
@@ -591,7 +587,7 @@ describe('KnxConnection.readSerialNumbersInProgrammingMode', () => {
 
 // ── KnxConnection: individual address by serial number ───────────────────────
 // NM_IndividualAddress_SerialNumber_Write/_Read (spec 3/5/2 §2.5/§2.4) - see
-// knx_serial_number_addressing_research memory. No real-hardware capture
+// docs/knx-device-write-protocol.md §9. No real-hardware capture
 // backs this yet - these tests only cover the protocol-level shape (frame
 // addressing, system-broadcast priority bit, response matching by serial,
 // not by source address).
@@ -607,7 +603,7 @@ describe('KnxConnection.writeIndividualAddressBySerial', () => {
     assert.deepEqual(result, { ok: true });
     // Sent via the normal Tunneling connection, GROUP-type to 0/0/0 -
     // confirmed byte-for-byte against real ETS traffic, 2026-08-30 (see
-    // knx_serial_number_addressing_research memory).
+    // docs/knx-device-write-protocol.md §9).
     assert.equal(conn.sent.length, 1);
 
     const parsed = parseCEMI(conn.sent[0]!);
@@ -642,7 +638,7 @@ describe('KnxConnection.readIndividualAddressBySerial', () => {
     // zero bytes] - confirmed real payload shape (no address field at
     // all), src carries the device's address instead. Matched by serial
     // rather than by a known source address (unknown ahead of time) -
-    // see knx_serial_number_addressing_research memory.
+    // see docs/knx-device-write-protocol.md §9.
     const apduData = Buffer.concat([serial, Buffer.alloc(4)]);
     const apdu = Buffer.concat([
       Buffer.from([0x03, 0xdd & 0xff]), // TPCI=DATA_GROUP + full APCI 0x3DD
@@ -716,7 +712,7 @@ describe('KnxConnection.assignIndividualAddressBySerial', () => {
     await delay(10);
     // [serial(6)][4 reserved zero bytes] - confirmed real payload shape,
     // src carries the device's (newly-assigned) address instead - see
-    // knx_serial_number_addressing_research memory.
+    // docs/knx-device-write-protocol.md §9.
     const apduData = Buffer.concat([serial, Buffer.alloc(4)]);
     const apdu = Buffer.concat([Buffer.from([0x03, 0xdd]), apduData]);
     conn.simulateMgmtFrame({

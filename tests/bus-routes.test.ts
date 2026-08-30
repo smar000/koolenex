@@ -632,11 +632,9 @@ describe('POST /bus/program-ia', () => {
 });
 
 // ── POST /bus/check-programming-mode ────────────────────────────────────────
-// A_IndividualAddress_Read broadcast discovery - see knx_routing_transport_gap
-// memory / docs/knx-device-write-protocol.md §9: known NOT to get a real
-// reply through this app's Tunneling-only transport yet (root-caused,
-// requires a Routing connector). Route-level coverage only, same as every
-// other bus route in this file.
+// A_IndividualAddress_Read broadcast discovery - see
+// docs/knx-device-write-protocol.md §9. Route-level coverage only, same as
+// every other bus route in this file.
 
 describe('POST /bus/check-programming-mode', () => {
   it('returns the responding address', async () => {
@@ -664,7 +662,7 @@ describe('POST /bus/check-programming-mode', () => {
 
 // ── POST /bus/assign-address-by-serial ──────────────────────────────────────
 // NM_IndividualAddress_SerialNumber_Write/_Read (spec 3/5/2 §2.5/§2.4) - see
-// knx_serial_number_addressing_research memory. No real-hardware
+// docs/knx-device-write-protocol.md §9. No real-hardware
 // confirmation for this service yet.
 
 describe('POST /bus/assign-address-by-serial', () => {

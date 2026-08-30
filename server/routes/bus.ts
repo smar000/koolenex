@@ -379,7 +379,7 @@ router.post('/bus/connect', async (req: Request, res: Response) => {
       projectId: z.number().int().optional(),
       // Which KNXnet/IP transport to use for Tunneling. 'auto' (default)
       // tries TCP first, falling back to UDP - see knx-protocol.ts and
-      // knx_routing_transport_gap memory for why TCP matters here (real
+      // docs/knx-device-write-protocol.md §9 for why TCP matters here (real
       // ETS uses it against this project's own testbed router; this app
       // only ever spoke UDP before 2026-08-30).
       protocol: z.enum(['udp', 'tcp', 'auto']).optional(),
@@ -893,7 +893,7 @@ router.post(
 // (NM_IndividualAddress_SerialNumber_Write/_Read, spec 3/5/2 §2.5/§2.4) -
 // unlike /bus/program-ia above, this needs no physical programming-button
 // press and no programming-mode precondition. See
-// knx_serial_number_addressing_research memory: sourced from the Falcon
+// docs/knx-device-write-protocol.md §9: sourced from the Falcon
 // SDK's own doc comments + Calimero's real implementation, but has NO
 // real-hardware confirmation in this project yet - every other write path
 // this app exposes has a real capture behind it, this one doesn't.

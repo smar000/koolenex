@@ -410,7 +410,7 @@ describe('APDU: apduPropertyValueWrite', () => {
 
 // ── Serial-number individual-address addressing ─────────────────────────────
 // NM_IndividualAddress_SerialNumber_Write/_Read (spec 3/5/2 §2.5/§2.4) - see
-// knx_serial_number_addressing_research memory for the real sourcing (Falcon
+// docs/knx-device-write-protocol.md §9 for the real sourcing (Falcon
 // SDK doc comments + Calimero's real implementation). No real-hardware
 // capture exists for this service yet - these tests only pin down the wire
 // format against the two independent sources it was derived from.
@@ -461,7 +461,7 @@ describe('parseIndividualAddressSerialNumberResponse', () => {
     // Real payload shape confirmed against ETS traffic (tshark capture,
     // 2026-08-30): [serial(6)][4 reserved zero bytes] - there is no
     // address field in the payload, the device's address is carried by
-    // frame.src instead. See knx_serial_number_addressing_research memory.
+    // frame.src instead. See docs/knx-device-write-protocol.md §9.
     const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
     const apduData = Buffer.concat([serial, Buffer.alloc(4)]);
     const frame = { apduData, src: '1.1.20' } as any;
@@ -475,7 +475,7 @@ describe('APDU: apduSystemNetworkParamRead', () => {
   it('builds the exact APDU real ETS sends for NM_Read_SerialNumber_By_ProgrammingMode', () => {
     // Confirmed byte-for-byte against a real tshark capture of ETS's own
     // commissioning flow, 2026-08-30 - see
-    // knx_serial_number_addressing_research memory.
+    // docs/knx-device-write-protocol.md §9.
     const apdu = apduSystemNetworkParamRead(0, 11, 1);
     assert.deepEqual(
       [...apdu],

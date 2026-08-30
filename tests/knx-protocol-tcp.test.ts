@@ -3,7 +3,7 @@
  * real KNXnet/IP-over-TCP messages arrive as an arbitrary byte stream, not
  * one-message-per-event the way UDP datagrams do. Logic verified against
  * Calimero's real StreamConnection.runReceiveLoop() - see
- * knx_routing_transport_gap memory. Isolated from real sockets: constructs
+ * docs/knx-device-write-protocol.md §9. Isolated from real sockets: constructs
  * a KnxIpConnection directly and feeds _onTcpData() raw bytes, spying on
  * _onMsg() to record what full messages it reassembled.
  */
@@ -153,9 +153,7 @@ describe('KnxIpConnection._onConnectRes: heartbeat', () => {
 
 // ── KnxIpConnection.sendCEMIViaRouting ────────────────────────────────────────
 // Overrides the base class's default-throw (knx-connection.test.ts) when a
-// Routing channel came up during connect(). See knx_routing_transport_gap
-// memory - real-hardware confirmed this is the only transport that can
-// carry KNX "System Broadcast" services.
+// Routing channel came up during connect().
 
 describe('KnxIpConnection.sendCEMIViaRouting', () => {
   it('delegates to the active Routing socket', async () => {

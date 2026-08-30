@@ -1,18 +1,16 @@
 /**
  * KNXnet/IP transport — Tunneling (UDP and TCP) to a KNXnet/IP gateway,
- * plus a secondary Routing (multicast) channel for the KNX "System
- * Broadcast" services Tunneling can't carry - see knx-protocol-routing.ts
- * and knx_routing_transport_gap memory / docs/knx-device-write-protocol.md
- * §9. Extends KnxConnection (shared protocol logic) with IP-specific
- * transport.
+ * plus a secondary Routing (multicast) channel (knx-protocol-routing.ts).
+ * Extends KnxConnection (shared protocol logic) with IP-specific
+ * transport. See docs/knx-device-write-protocol.md §9.
  *
- * TCP support added 2026-08-30: a real tshark capture from an earlier
- * session confirmed real ETS uses TCP tunneling against this project's own
- * testbed router, while this class had only ever spoken UDP - see
- * docs/follow-ups/2026-08-27-relmem-write-scope-investigation.md and
- * knx_routing_transport_gap memory. Wire-level facts (HPAI protocol-code
- * byte, the TCP placeholder HPAI, stream frame-reassembly) cross-checked
- * against Calimero's real implementation (StreamConnection.java, HPAI.java).
+ * TCP support: a real capture confirmed ETS uses TCP tunneling against
+ * this project's testbed router, while this class had only ever spoken
+ * UDP - see docs/follow-ups/2026-08-27-relmem-write-scope-investigation.md
+ * and docs/knx-device-write-protocol.md §9. Wire-level facts (HPAI
+ * protocol-code byte, the TCP placeholder HPAI, stream frame-reassembly)
+ * cross-checked against Calimero's real implementation
+ * (StreamConnection.java, HPAI.java).
  */
 
 import dgram from 'dgram';

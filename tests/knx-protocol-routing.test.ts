@@ -1,6 +1,6 @@
 /**
  * Tests for KNXnet/IP Routing (multicast) packet builders/parsers - see
- * server/knx-protocol-routing.ts and knx_routing_transport_gap memory /
+ * server/knx-protocol-routing.ts and docs/knx-device-write-protocol.md §9 /
  * docs/knx-device-write-protocol.md §9. Pure-function coverage only,
  * matching this codebase's existing convention for the other IP transport
  * (KnxIpConnection's dgram-socket integration isn't unit-tested either,

@@ -21,15 +21,11 @@ export const APCI_EXT = {
   // network-management procedures NM_IndividualAddress_SerialNumber_Write/
   // _Read (spec 3/5/2 §2.5/§2.4): assign or query a device's individual
   // address via its 6-byte KNX serial number, no physical programming-
-  // button press needed. Sent as a SYSTEM broadcast (see buildCEMI's
-  // `systemBroadcast` option), never point-to-point. Codes confirmed from
-  // two independent sources (Falcon SDK's own doc comments + Calimero's
-  // real open-source implementation, IND_ADDR_SN_WRITE/READ in
-  // ManagementClientImpl.java) - see knx_serial_number_addressing_research
-  // memory. _Response (0x3DD) is INFERRED by the same one-below-Write
-  // numbering pattern seen elsewhere (e.g. Authorize_Request/_Response),
-  // not independently confirmed from a second source, and has never been
-  // captured against real hardware in this project.
+  // button press needed. Sent as a GROUP-type broadcast to address 0/0/0
+  // at System priority (see buildCEMI's `priority: 'system'` option),
+  // never point-to-point. Codes and wire format confirmed against a real
+  // KNXnet/IP capture of ETS's own commissioning traffic - see
+  // docs/knx-device-write-protocol.md §9.
   IndividualAddressSerialNumber_Read: 0x03dc,
   IndividualAddressSerialNumber_Response: 0x03dd,
   IndividualAddressSerialNumber_Write: 0x03de,
@@ -267,7 +263,7 @@ export function apduMemoryExtendedWrite(
   // A_MemoryExtended_Write (0x1FB): [count(1)] + [address(3, big-endian)] + [data...].
   // Same header shape as the read (minus the returned data), count = byte length
   // being written. Real-hardware wire format confirmed against a captured ETS
-  // MemExtWrite frame (2026-08-26 testbed capture) - see koolenex-reference memory.
+  // MemExtWrite frame - see docs/knx-device-write-protocol.md.
   const extra = Buffer.concat([
     Buffer.from([
       data.length & 0xff,
@@ -344,20 +340,15 @@ export interface IndividualAddressSerialNumberResponse {
 
 /**
  * Decode an A_IndividualAddressSerialNumber_Response payload: 6-byte
- * serial number + 4 reserved/zero bytes - there is NO address field in
- * the payload at all. Real ETS traffic (tshark capture of ETS's own
- * button-press + serial-number commissioning flow, 2026-08-30 - see
- * knx_serial_number_addressing_research memory) confirms the device's
- * address is instead communicated by *which device replies*
- * (`frame.src`) - the same convention A_IndividualAddress_Response (the
- * button-press discovery service) uses. An earlier version of this
- * function wrongly decoded a 2-byte address from payload bytes 6-8,
- * which don't exist for this purpose (real captures show them as zero) -
- * this silently broke `readIndividualAddressBySerial()`'s verify step
- * even when the underlying write demonstrably worked. Caller should
- * verify `serial` matches the one it queried before trusting `address` -
- * a broadcast reply isn't otherwise correlated to the request the way a
- * point-to-point managementSession() response is.
+ * serial number + 4 reserved/zero bytes - there is no address field in
+ * the payload. The device's address is instead communicated by *which
+ * device replies* (`frame.src`), the same convention
+ * A_IndividualAddress_Response (the button-press discovery service)
+ * uses. Confirmed against a real KNXnet/IP capture of ETS's own
+ * commissioning traffic - see docs/knx-device-write-protocol.md §9.
+ * Caller should verify `serial` matches the one it queried before
+ * trusting `address` - a broadcast reply isn't otherwise correlated to
+ * the request the way a point-to-point managementSession() response is.
  */
 export function parseIndividualAddressSerialNumberResponse(
   frame: CemiFrame,
@@ -370,14 +361,12 @@ export function parseIndividualAddressSerialNumberResponse(
  * A_SystemNetworkParameter_Read (0x1C8). Payload: [objectType(2, BE)]
  * [pid<<4 (2, BE)][operand(1)][...additionalTestInfo]. Used here for
  * NM_Read_SerialNumber_By_ProgrammingMode: objectType=0 (Device), pid=11
- * (PID_SERIAL_NUMBER), operand=1. **Confirmed byte-for-byte against real
- * ETS traffic** (tshark capture of ETS's own commissioning flow,
- * 2026-08-30 - see knx_serial_number_addressing_research memory) - real
- * ETS sends this exact APDU, repeated roughly every 3s while waiting for
- * a device to enter programming mode. Sent as a GROUP-type frame to
- * `0/0/0` with `{ priority: 'system' }` (ctrl1 `0xB0`), NOT the
- * individual-type "system broadcast" framing an earlier version of this
- * codebase used (see buildCEMI's doc comment).
+ * (PID_SERIAL_NUMBER), operand=1. Confirmed byte-for-byte against a real
+ * KNXnet/IP capture of ETS's own commissioning traffic - see
+ * docs/knx-device-write-protocol.md §9. Real ETS sends this exact APDU,
+ * repeated roughly every 3s while waiting for a device to enter
+ * programming mode. Sent as a GROUP-type frame to `0/0/0` with
+ * `{ priority: 'system' }` (ctrl1 `0xB0`) - see buildCEMI's doc comment.
  */
 export function apduSystemNetworkParamRead(
   objectType: number,
@@ -406,13 +395,10 @@ export interface SystemNetworkParamResponse {
 
 /**
  * Decode an A_SystemNetworkParameter_Response payload: [objectType(2,
- * BE)][pid<<4 (2, BE)][echoedOperand(1)][...value]. Real ETS traffic
- * (tshark capture, 2026-08-30 - see knx_serial_number_addressing_research
- * memory) confirms a real device's response echoes the request's operand
- * byte before the actual value - an earlier version of this parser missed
- * that byte, reading `value` one byte too early (which happened to still
- * "work" by accident for a 6-byte serial number read as 7 bytes with a
- * leading operand byte, but was wrong). `value` is empty when the
+ * BE)][pid<<4 (2, BE)][echoedOperand(1)][...value]. A real device's
+ * response echoes the request's operand byte before the actual value -
+ * confirmed against a real KNXnet/IP capture (see
+ * docs/knx-device-write-protocol.md §9). `value` is empty when the
  * responding device reports the object type/PID/response as unsupported
  * (per Calimero's own real decode logic) - callers should treat an empty
  * `value` as "no data", not assume a fixed length.
@@ -456,17 +442,14 @@ export function buildCEMI(
   // Low priority) - fine for point-to-point and group traffic. KNX
   // network-management broadcast services (individual-address discovery,
   // serial-number addressing, system-network-parameter reads) need System
-  // priority (bits3-2=00) - real ETS traffic confirms ctrl1=0xB0 for all
-  // of these (a real tshark capture of ETS's own button-press + serial-
-  // number commissioning flow, 2026-08-30 - see
-  // knx_serial_number_addressing_research memory), i.e. the *ordinary*
-  // broadcast bit (bit4=1) with System priority, not the "system
-  // broadcast" ctrl1 bit (bit4=0) an earlier guess this session had
-  // assumed. `systemBroadcast` is kept as a separate, still-available
-  // option (real, spec-defined value) for any future service that
-  // genuinely needs bit4=0, but nothing in this codebase currently does.
-  // Opt-in so every existing call site's frame stays byte-for-byte
-  // unchanged.
+  // priority (bits3-2=00): ctrl1=0xB0, the *ordinary* broadcast bit
+  // (bit4=1) combined with System priority - confirmed against a real
+  // KNXnet/IP capture of ETS's own commissioning traffic, see
+  // docs/knx-device-write-protocol.md §9. `systemBroadcast` sets the
+  // separate "system broadcast" ctrl1 bit (bit4=0, a real, spec-defined
+  // value) for any service that needs it - none of the services in this
+  // codebase currently do. Opt-in so every existing call site's frame
+  // stays byte-for-byte unchanged.
   let ctrl1 = 0xbc;
   if (opts?.priority === 'system') ctrl1 &= ~0x0c; // bits3-2 -> 00 (System)
   if (opts?.systemBroadcast) ctrl1 &= ~0x10; // bit4 -> 0 (system broadcast)

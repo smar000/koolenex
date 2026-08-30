@@ -9,7 +9,7 @@
  * Real spec facts here are cross-checked against Calimero's real
  * open-source implementation (calimero-project/calimero-core), same
  * methodology used for the serial-number addressing research - see
- * knx_routing_transport_gap memory for the full evidence trail.
+ * docs/knx-device-write-protocol.md §9 for the full evidence trail.
  */
 
 import os from 'os';

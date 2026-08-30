@@ -1,21 +1,17 @@
 /**
  * KNXnet/IP Routing (multicast) transport - a second, connectionless
- * channel alongside the normal Tunneling connection (knx-protocol.ts),
- * used specifically for KNX "System Broadcast" network-management
- * services (programming-mode discovery, serial-number addressing) that
- * Tunneling structurally cannot carry - see knx_routing_transport_gap
- * memory / docs/knx-device-write-protocol.md §9 for the full evidence
- * trail (confirmed both from Falcon SDK's own class model and real-hardware
- * testing).
+ * channel alongside the normal Tunneling connection (knx-protocol.ts).
+ * See docs/knx-device-write-protocol.md §9 for background on the KNX
+ * network-management broadcast services this project also implements.
  *
  * Unlike Tunneling, Routing has no connection handshake at all (no
  * CONNECT_REQ/RES, no channel ID, no CONNSTATE heartbeat) - any client on
  * the multicast group `224.0.23.12:3671` sees every ROUTING_INDICATION any
  * KNXnet/IP router on the segment sends, and can send its own the same
- * way. Real-hardware confirmed 2026-08-30: this project's own testbed
- * router continuously mirrors live TP-bus traffic onto this multicast
- * group unprompted - joining it is enough to start receiving, no
- * additional negotiation needed.
+ * way. Confirmed on real hardware: this project's own testbed router
+ * continuously mirrors live TP-bus traffic onto this multicast group
+ * unprompted - joining it is enough to start receiving, no additional
+ * negotiation needed.
  */
 
 import dgram from 'dgram';

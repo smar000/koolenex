@@ -572,6 +572,14 @@ export function AppShell(props: AppShellProps) {
                               const dev = state.projectData?.devices?.find(
                                 (d) => d.individual_address === w.address,
                               );
+                              // A device with no real project address at all
+                              // (has_address=0, a synthetic placeholder -
+                              // see ets-parser.ts) should never surface its
+                              // synthetic individual_address anywhere a
+                              // person reads it - matches DeviceAddr's
+                              // "-.-.-" convention (primitives.tsx).
+                              if (wtype === 'device' && dev && !dev.has_address)
+                                displayAddr = '-.-.-';
                               displayLabel = dev?.name ?? null;
                               const location = dev?.space_id
                                 ? spacePath(dev.space_id)
@@ -581,7 +589,7 @@ export function AppShell(props: AppShellProps) {
                                   ? `${displayLabel} — ${location}`
                                   : location;
                             }
-                            const tooltip = [w.address, displayLabel]
+                            const tooltip = [displayAddr, displayLabel]
                               .filter(Boolean)
                               .join(' — ');
                             return (

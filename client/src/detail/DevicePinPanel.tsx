@@ -161,11 +161,23 @@ export function DevicePinPanel({
           <div className={styles.headerFlex}>
             <div
               onClick={
-                pin ? () => pin('device', dev.individual_address) : undefined
+                dev.has_address && pin
+                  ? () => pin('device', dev.individual_address)
+                  : undefined
               }
-              className={pin ? styles.devAddressClickable : styles.devAddress}
+              className={
+                dev.has_address && pin
+                  ? styles.devAddressClickable
+                  : styles.devAddress
+              }
+              style={!dev.has_address ? { color: 'var(--amber)' } : undefined}
+              title={
+                !dev.has_address
+                  ? 'No individual address assigned in the project yet'
+                  : undefined
+              }
             >
-              {dev.individual_address}
+              {dev.has_address ? dev.individual_address : '-.-.-'}
             </div>
             {editing ? (
               <div className={styles.editRow}>
@@ -923,7 +935,8 @@ function DuplicateDeviceModal({
       >
         <div className={styles.modalTitle}>Duplicate Device</div>
         <div className={styles.modalSubtitle}>
-          Copy {dev.individual_address} ({dev.manufacturer} {dev.model}) with
+          Copy {dev.has_address ? dev.individual_address : '-.-.-'} (
+          {dev.manufacturer} {dev.model}) with
           parameters. Group addresses and channel assignments are not copied.
         </div>
 

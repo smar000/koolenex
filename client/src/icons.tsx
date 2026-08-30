@@ -573,6 +573,40 @@ export function IconScan({ size = 14 }: SizeOnlyProps) {
   );
 }
 
+export function IconSerial({ size = 14 }: SizeOnlyProps) {
+  // Barcode glyph - per-device row indicator for whether a real physical
+  // unit's serial number has been recorded against this address (see
+  // ProgrammingView.tsx's serial-status icon, added 2026-08-30). Deliberately
+  // distinct from IconScan (the general "scan for devices" action icon)
+  // so the two aren't confused at a glance despite both relating to
+  // addressing.
+  return (
+    <_SvgIcon size={size}>
+      <rect
+        x="1.5"
+        y="2.5"
+        width="11"
+        height="9"
+        rx="1"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="0.8"
+        strokeOpacity="0.6"
+      />
+      {[3, 4.2, 5, 6.2, 7, 7.8, 9, 10.2].map((x, i) => (
+        <rect
+          key={x}
+          x={x}
+          y="4.2"
+          width={i % 3 === 0 ? 0.9 : 0.5}
+          height="5.6"
+          fill="currentColor"
+        />
+      ))}
+    </_SvgIcon>
+  );
+}
+
 export function IconProgramming({ size = 14 }: SizeOnlyProps) {
   // Download-to-device arrow
   return (

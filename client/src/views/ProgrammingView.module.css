@@ -94,11 +94,21 @@
   flex-shrink: 0;
   font-family: monospace;
   font-size: 10px;
+  /* color defaults here but is overridden inline per-state by DeviceAddr
+     (primitives.tsx) - background/border follow currentColor rather than
+     a hardcoded --accent so the whole pill (not just the text) reflects
+     an overridden color, e.g. the amber "pending, not yet written to
+     hardware" state. */
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
   border-radius: 999px;
   padding: 1px 7px;
+}
+.serialIcon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
 }
 .resizer {
   width: 5px;

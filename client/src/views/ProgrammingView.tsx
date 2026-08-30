@@ -7,10 +7,10 @@ import {
   TH,
   TD,
   SectionHeader,
-  PinAddr,
+  DeviceAddr,
   Badge,
 } from '../primitives.tsx';
-import { DeviceTypeIcon } from '../icons.tsx';
+import { DeviceTypeIcon, IconSerial } from '../icons.tsx';
 import { api } from '../api.ts';
 import {
   useAppData,
@@ -20,6 +20,7 @@ import {
 } from '../contexts.ts';
 import { DeviceCompareResults, displaySectionName } from './DeviceCompareResults.tsx';
 import { AddressDeviceModal } from '../AddressDeviceModal.tsx';
+import { AssignProjectAddressModal } from '../AssignProjectAddressModal.tsx';
 import styles from './ProgrammingView.module.css';
 
 export function ProgrammingView() {
@@ -401,7 +402,19 @@ export function ProgrammingView() {
     if (dev) programDevice(dev.id, dev.individual_address, mode);
   };
 
-  const [addressModalOpen, setAddressModalOpen] = useState(false);
+  // 'scan' = the page-level "Scan for New Device" button (no row context,
+  // general discovery/bulk-match workflow); a number = opened from a
+  // specific row's serial icon, pre-selecting that device but still
+  // allowing a different match if the scan turns up something else.
+  const [addressModalFor, setAddressModalFor] = useState<number | 'scan' | null>(
+    null,
+  );
+  // A device with has_address=0 needs a real project address assigned
+  // before it's eligible for AddressDeviceModal at all - see the guard in
+  // that component. Opened by clicking the "-.-.-" placeholder itself.
+  const [assignAddressFor, setAssignAddressFor] = useState<number | null>(
+    null,
+  );
 
   return (
     <div className={styles.root}>
@@ -411,10 +424,10 @@ export function ProgrammingView() {
           actions={[
             <Btn
               key="address"
-              onClick={() => setAddressModalOpen(true)}
+              onClick={() => setAddressModalFor('scan')}
               color="var(--accent)"
             >
-              + Address New Device
+              ⟲ Scan for New Device
             </Btn>,
             <div
               key="all"
@@ -511,21 +524,48 @@ export function ProgrammingView() {
                             color: COLMAP[d.device_type] || 'var(--muted)',
                           }}
                         />
-                        {d.has_address ? (
-                          <PinAddr
-                            address={d.individual_address}
-                            wtype="device"
-                            className={styles.addrBadge}
-                          />
-                        ) : (
-                          <span
-                            className={styles.addrBadge}
-                            style={{ color: 'var(--amber)' }}
-                            title="Imported with no individual address assigned - use Address New Device to give it a real one before programming or verifying"
-                          >
-                            no address
-                          </span>
-                        )}
+                        <DeviceAddr
+                          device={d}
+                          wtype="device"
+                          className={styles.addrBadge}
+                          onAssignClick={() => setAssignAddressFor(d.id)}
+                        />
+                        {/* Serial-status indicator, added 2026-08-30: a
+                            device can have a real project address and still
+                            never have been physically commissioned - ETS
+                            only ever learns a real unit's serial when its
+                            programming button is pressed during a write, or
+                            when entered by hand (see AddressDeviceModal) -
+                            it is NOT always present just because the
+                            imported project has a planned address. Disabled
+                            entirely for a has_address=0 row (nothing to
+                            commission until a real address exists). */}
+                        <span
+                          className={styles.serialIcon}
+                          style={{
+                            color: !d.has_address
+                              ? 'var(--muted)'
+                              : d.serial_number
+                                ? 'var(--green)'
+                                : 'var(--amber)',
+                            opacity: d.has_address ? 1 : 0.4,
+                            cursor: d.has_address ? 'pointer' : 'default',
+                          }}
+                          title={
+                            !d.has_address
+                              ? 'Assign a project address first'
+                              : d.serial_number
+                                ? `Serial ${d.serial_number} — click to re-address`
+                                : 'Not yet commissioned — no serial recorded. Click to address this device.'
+                          }
+                          onClick={
+                            d.has_address
+                              ? () => setAddressModalFor(d.id)
+                              : undefined
+                          }
+                        >
+                          <IconSerial size={12} />
+                        </span>
                         {d.name}
                         {d.manufacturer && (
                           <span className={styles.mfrLabel}>
@@ -587,12 +627,15 @@ export function ProgrammingView() {
                             disabled={
                               prog?.state === 'running' ||
                               verifying ||
-                              !d.has_address
+                              !d.has_address ||
+                              !d.serial_number
                             }
                             title={
                               !d.has_address
-                                ? 'No individual address assigned yet — use Address New Device first'
-                                : verifying
+                                ? 'No individual address assigned yet'
+                                : !d.serial_number
+                                  ? 'Not yet commissioned — no serial recorded for this device'
+                                  : verifying
                                   ? (liveVerifyProgress
                                       ? `${liveVerifyProgress.bytesRead}/${liveVerifyProgress.totalBytes} bytes`
                                       : 'Reading device…')
@@ -664,7 +707,7 @@ export function ProgrammingView() {
                           disabled={prog?.state === 'running' || !d.has_address}
                           title={
                             !d.has_address
-                              ? 'No individual address assigned yet — use Address New Device first'
+                              ? 'No individual address assigned yet — click the "-.-.-" badge to assign one'
                               : prog?.state === 'running'
                                 ? liveProgramProgress?.msg
                                 : undefined
@@ -889,16 +932,35 @@ export function ProgrammingView() {
           onClick={() => setSlideOverDevice(null)}
         />
       )}
-      {addressModalOpen && (
+      {addressModalFor !== null && (
         <AddressDeviceModal
           devices={devices}
-          onClose={() => setAddressModalOpen(false)}
+          initialDeviceId={
+            typeof addressModalFor === 'number' ? addressModalFor : undefined
+          }
+          onClose={() => setAddressModalFor(null)}
           addLog={(line) => {
             setLogOpen(true);
             addLog(line);
           }}
         />
       )}
+      {assignAddressFor !== null &&
+        (() => {
+          const target = devices.find((d: any) => d.id === assignAddressFor);
+          if (!target) return null;
+          return (
+            <AssignProjectAddressModal
+              device={target}
+              devices={devices}
+              onClose={() => setAssignAddressFor(null)}
+              addLog={(line) => {
+                setLogOpen(true);
+                addLog(line);
+              }}
+            />
+          );
+        })()}
       {downloadModePopoverFor !== null &&
         popoverPos &&
         createPortal(

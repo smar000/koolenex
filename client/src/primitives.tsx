@@ -286,6 +286,90 @@ export function PinAddr({
   );
 }
 
+interface DeviceAddrProps {
+  device: {
+    individual_address: string;
+    has_address?: number | boolean;
+    serial_number?: string;
+  };
+  wtype?: string;
+  style?: React.CSSProperties;
+  className?: string;
+  // Called when the "-.-.-" placeholder itself is clicked (has_address
+  // falsy only - never fires for a real address). Omit to render it as
+  // plain, non-interactive text.
+  onAssignClick?: () => void;
+}
+
+/**
+ * Address display for a device row - the one place that decides whether to
+ * show a device's real individual_address or ETS's own "-.-.-" convention
+ * for a device with no real address at all (has_address=0, a synthetic
+ * placeholder - see ets-parser.ts's synthetic-address handling, added
+ * 2026-08-30). Deliberately never renders the synthetic value itself
+ * (e.g. "99.99.256") anywhere a person would read it, and never makes it
+ * pinnable (PinAddr's click-to-pin), since pinning a fake address has no
+ * real meaning. Use this instead of PinAddr directly for any device row.
+ *
+ * A real address with no recorded serial number gets its own distinct
+ * amber "pending" color, not the normal accent - added 2026-08-30 after a
+ * real gap: assigning/changing a device's planned address (see
+ * AssignProjectAddressModal) only updates our project record, not the
+ * physical device - nothing has actually been written to hardware until a
+ * real addressing write happens (AddressDeviceModal) and records a serial
+ * against it. Without this, a freshly (re)planned address looked
+ * indistinguishable from one already confirmed on real hardware.
+ */
+export function DeviceAddr({
+  device,
+  wtype,
+  style,
+  className,
+  onAssignClick,
+}: DeviceAddrProps) {
+  if (!device.has_address) {
+    return (
+      <span
+        className={[className, onAssignClick ? `pa ${styles.pinAddrClickable}` : '']
+          .filter(Boolean)
+          .join(' ')}
+        style={{
+          color: 'var(--amber)',
+          cursor: onAssignClick ? 'pointer' : undefined,
+          ...style,
+        }}
+        title={
+          onAssignClick
+            ? 'No individual address assigned yet — click to assign one'
+            : 'No individual address assigned in the project yet - assign one before this device can be commissioned'
+        }
+        onClick={onAssignClick}
+      >
+        -.-.-
+      </span>
+    );
+  }
+  if (!device.serial_number) {
+    return (
+      <PinAddr
+        address={device.individual_address}
+        wtype={wtype}
+        className={className}
+        style={{ color: 'var(--amber)', ...style }}
+        title={`${device.individual_address} — assigned in the project, but not yet written to a physical device (no serial recorded)`}
+      />
+    );
+  }
+  return (
+    <PinAddr
+      address={device.individual_address}
+      wtype={wtype}
+      className={className}
+      style={style}
+    />
+  );
+}
+
 interface Space {
   id: string | number;
   name: string;

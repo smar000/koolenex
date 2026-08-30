@@ -39,17 +39,32 @@ import styles from './AddressDeviceModal.module.css';
  * unconfirmed read to the flow.
  */
 export function AddressDeviceModal({
-  devices,
+  devices: allDevices,
+  initialDeviceId,
   onClose,
   addLog,
 }: {
   devices: Device[];
+  // Pre-selects a specific device (the row the modal was opened from) in
+  // both tabs' "ASSIGN TO" dropdowns, instead of leaving them blank/
+  // auto-matched-by-serial only. Still changeable - opening from one row
+  // doesn't prevent addressing a different device if the scan turns up
+  // something else.
+  initialDeviceId?: number;
   onClose: () => void;
   addLog: (line: string) => void;
 }) {
   const { updateDevice } = useProjectActions();
   const [tab, setTab] = useState<'detect' | 'serial'>('detect');
   const [showAllDevices, setShowAllDevices] = useState(false);
+
+  // A device with no real project address at all (has_address=0, a
+  // synthetic placeholder - see ets-parser.ts) is never offered here.
+  // Writing that placeholder onto a physical unit via programIA/
+  // assignIndividualAddressBySerial would be as hazardous as letting
+  // Program/Verify touch it - it needs a real address assigned first
+  // (AssignProjectAddressModal), a separate, required prior step.
+  const devices = allDevices.filter((d) => d.has_address);
 
   // Candidate pool for the "assign to" dropdown. `status` here is the
   // download/program status (see server/ets-parser.ts's deriveStatus), not
@@ -96,7 +111,7 @@ export function AddressDeviceModal({
       const sel: Record<string, number | ''> = {};
       for (const d of r.devices) {
         const m = matchBySerial(d.serial);
-        sel[d.serial] = m ? m.id : '';
+        sel[d.serial] = m ? m.id : (initialDeviceId ?? '');
       }
       setDetectSelection(sel);
       addLog(
@@ -157,7 +172,9 @@ export function AddressDeviceModal({
 
   // ── Serial-entry tab ─────────────────────────────────────────────────────
   const [manualSerial, setManualSerial] = useState('');
-  const [manualDeviceId, setManualDeviceId] = useState<number | ''>('');
+  const [manualDeviceId, setManualDeviceId] = useState<number | ''>(
+    initialDeviceId ?? '',
+  );
   const [manualBusy, setManualBusy] = useState(false);
   const [manualResult, setManualResult] = useState<
     { ok: boolean; msg: string } | null

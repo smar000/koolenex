@@ -388,6 +388,49 @@ describe('Device validation', () => {
     assert.equal(data.installation_hints, 'Mount on DIN rail');
   });
 
+  it('PUT individual_address assigns a real address and sets has_address', async () => {
+    // has_address defaults to 1 for a device created via the manual POST
+    // route (always a real, human-entered address - see db.ts's column
+    // DEFAULT) - force it to 0 first to exercise the real "assign a
+    // project address to a previously-unaddressed device" path
+    // (AssignProjectAddressModal, added 2026-08-30).
+    db.run('UPDATE devices SET has_address=0 WHERE id=?', [did]);
+    const { status, data } = await req(
+      'PUT',
+      `/projects/${pid}/devices/${did}`,
+      { individual_address: '1.1.5' },
+    );
+    assert.equal(status, 200);
+    assert.equal(data.individual_address, '1.1.5');
+    assert.equal(data.has_address, 1);
+  });
+
+  it('PUT individual_address rejects an address already used by another device', async () => {
+    const { data: other } = await req('POST', `/projects/${pid}/devices`, {
+      individual_address: '1.1.9',
+      name: 'Other Device',
+      area: 1,
+      line: 1,
+    });
+    const { status, data } = await req(
+      'PUT',
+      `/projects/${pid}/devices/${did}`,
+      { individual_address: '1.1.9' },
+    );
+    assert.equal(status, 409);
+    assert.equal(data.error, 'address_in_use');
+    await req('DELETE', `/projects/${pid}/devices/${other.id}`);
+  });
+
+  it('PUT individual_address rejects a malformed address', async () => {
+    const { status } = await req(
+      'PUT',
+      `/projects/${pid}/devices/${did}`,
+      { individual_address: 'not-an-address' },
+    );
+    assert.equal(status, 400);
+  });
+
   it('PATCH status returns the updated device', async () => {
     const { status, data } = await req(
       'PATCH',

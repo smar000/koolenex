@@ -118,6 +118,18 @@ router.put(
         // baked in, which this overwrites once this villa's own device is
         // actually addressed).
         serial_number: z.string().optional(),
+        // Assigns a real project address to a device imported with none
+        // (has_address=0 - see ets-parser.ts's synthetic-address handling,
+        // added 2026-08-30) - the first step before that device can go
+        // through physical commissioning (AddressDeviceModal). Setting
+        // this always also sets has_address=1: a human explicitly picking
+        // a real X.Y.Z here is by definition no longer the synthetic
+        // placeholder case, regardless of what the value happens to look
+        // like.
+        individual_address: z
+          .string()
+          .regex(/^\d+\.\d+\.\d+$/, 'Must be in X.Y.Z format')
+          .optional(),
       }),
     );
     const old = db.get<Record<string, unknown>>(
@@ -138,6 +150,10 @@ router.put(
       track('installation_hints', b.installation_hints);
     if (b.serial_number !== undefined)
       track('serial_number', b.serial_number.trim());
+    if (b.individual_address !== undefined) {
+      track('individual_address', b.individual_address);
+      sets.push('has_address=1');
+    }
     if (b.floor_x !== undefined) {
       sets.push('floor_x=?');
       vals.push(b.floor_x);
@@ -151,7 +167,19 @@ router.put(
       return;
     }
     vals.push(did);
-    db.run(`UPDATE devices SET ${sets.join(', ')} WHERE id=?`, vals);
+    try {
+      db.run(`UPDATE devices SET ${sets.join(', ')} WHERE id=?`, vals);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('UNIQUE constraint')) {
+        res.status(409).json({
+          error: 'address_in_use',
+          message: `Address ${b.individual_address} is already used by another device in this project.`,
+        });
+        return;
+      }
+      throw e;
+    }
     db.audit(
       pid,
       'update',

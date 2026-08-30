@@ -214,6 +214,21 @@ export class KnxConnection extends EventEmitter {
     throw new Error('sendCEMI() must be implemented by transport subclass');
   }
 
+  /**
+   * Send a CEMI frame via KNXnet/IP Routing (multicast) instead of the
+   * normal Tunneling connection - used for the KNX "System Broadcast"
+   * services (checkProgrammingMode(), the serial-number addressing
+   * services below), which Tunneling cannot carry at all - see
+   * knx_routing_transport_gap memory / docs/knx-device-write-protocol.md
+   * §9. Default throws (no Routing capability) - only KnxIpConnection
+   * (knx-protocol.ts) overrides this; USB has no IP path at all.
+   */
+  sendCEMIViaRouting(_cemi: Buffer): Promise<void> {
+    throw new Error(
+      'KNXnet/IP Routing is not available on this transport - System Broadcast services (programming-mode detection, serial-number addressing) need an IP connection',
+    );
+  }
+
   /** Disconnect from the bus. Must be implemented by transport subclass. */
   disconnect(): void {
     throw new Error('disconnect() must be implemented by transport subclass');
@@ -436,24 +451,21 @@ export class KnxConnection extends EventEmitter {
    * KNX commissioning discovery service - the read-side counterpart to
    * programIA() above (which writes, this only detects/queries), and
    * complementary to (not the same mechanism as) the serial-number-based
-   * addressing below. Sent as a system broadcast (spec 3/5/2 network-
-   * management framing, same as the serial-number services) - see
-   * buildCEMI's `systemBroadcast` option.
+   * addressing below. Sent as a system broadcast (spec 3/5/2
+   * network-management framing) via sendCEMIViaRouting() - KNXnet/IP
+   * Routing (multicast), NOT the normal Tunneling connection.
    *
-   * **KNOWN NOT WORKING as of 2026-08-30 - real, understood root cause, not
-   * a bug in this function.** Tested against two different real devices
-   * (one confirmed genuinely in programming mode via its LED) - zero reply
-   * either time, with both "ordinary broadcast" and "system broadcast"
-   * framing tried. Root-caused: this codebase's KNXnet/IP transport
-   * (knx-protocol.ts) is Tunneling-only, and KNX "System Broadcast"
-   * services are a Routing(multicast)-connector-specific capability per
-   * the Falcon SDK's own class model (`IpRoutingConnectorParameters.
+   * **Root cause found and fixed 2026-08-30.** An earlier version sent via
+   * Tunneling and got zero reply from two different real devices (one
+   * confirmed genuinely in programming mode via its LED) - Tunneling
+   * structurally cannot carry KNX "System Broadcast" services at all,
+   * confirmed both from that real-hardware testing and the Falcon SDK's
+   * own class model (`IpRoutingConnectorParameters.
    * EnableIPSystemBroadcast` has no equivalent on
    * `IpTunnelingConnectorParameters`). See knx_routing_transport_gap
    * memory / docs/knx-device-write-protocol.md §9 for the full evidence
-   * trail. This function is believed correct at the application layer;
-   * it cannot work until a Routing connector exists. Diagnostic logging
-   * left in place deliberately, to make re-testing after that fix easy.
+   * trail. Diagnostic logging left in place deliberately, to ease
+   * re-verifying against real hardware now that Routing exists.
    *
    * Real KNX precondition, not enforced here: only ONE device should be in
    * programming mode on a bus at a time - if more than one is, only the
@@ -488,10 +500,10 @@ export class KnxConnection extends EventEmitter {
       const cemi = buildCEMI(this.localAddr, '0.0.0', apdu, false, {
         systemBroadcast: true,
       });
-      logger.info('knx', 'checkProgrammingMode: sending broadcast', {
+      logger.info('knx', 'checkProgrammingMode: sending broadcast via Routing', {
         cemiHex: cemi.toString('hex'),
       });
-      this.sendCEMI(cemi).catch((err: Error) => {
+      this.sendCEMIViaRouting(cemi).catch((err: Error) => {
         clearTimeout(timer);
         this.off('_mgmt', onMgmt);
         reject(err);
@@ -512,9 +524,11 @@ export class KnxConnection extends EventEmitter {
   // carry a transport-layer connection to ack/sequence against). Real standard
   // KNX procedure, sourced from Falcon SDK's own doc comments + Calimero's real
   // implementation - see knx_serial_number_addressing_research memory.
-  // **Zero real-hardware confirmation as of this writing** - every other
-  // protocol path in this codebase has a real capture behind it; this one
-  // doesn't yet.
+  // Sent via sendCEMIViaRouting() (KNXnet/IP Routing/multicast), NOT the
+  // normal Tunneling connection - see checkProgrammingMode()'s doc comment
+  // above / knx_routing_transport_gap memory for why: a real-hardware test
+  // sending this via Tunneling had no effect at all, root-caused to
+  // Tunneling structurally not carrying KNX "System Broadcast" services.
 
   /**
    * Broadcast A_IndividualAddressSerialNumber_Write - assigns `newAddr` to
@@ -532,7 +546,7 @@ export class KnxConnection extends EventEmitter {
     const cemi = buildCEMI(this.localAddr, '0.0.0', apdu, false, {
       systemBroadcast: true,
     });
-    await this.sendCEMI(cemi);
+    await this.sendCEMIViaRouting(cemi);
     return { ok: true };
   }
 
@@ -573,7 +587,7 @@ export class KnxConnection extends EventEmitter {
       const cemi = buildCEMI(this.localAddr, '0.0.0', apdu, false, {
         systemBroadcast: true,
       });
-      this.sendCEMI(cemi).catch((err: Error) => {
+      this.sendCEMIViaRouting(cemi).catch((err: Error) => {
         clearTimeout(timer);
         this.off('_mgmt', onMgmt);
         reject(err);

@@ -377,11 +377,17 @@ router.post('/bus/connect', async (req: Request, res: Response) => {
       host: z.string().min(1),
       port: z.coerce.number().int().positive().optional(),
       projectId: z.number().int().optional(),
+      // Which KNXnet/IP transport to use for Tunneling. 'auto' (default)
+      // tries TCP first, falling back to UDP - see knx-protocol.ts and
+      // knx_routing_transport_gap memory for why TCP matters here (real
+      // ETS uses it against this project's own testbed router; this app
+      // only ever spoke UDP before 2026-08-30).
+      protocol: z.enum(['udp', 'tcp', 'auto']).optional(),
     }),
   );
-  const { host, port, projectId } = body;
+  const { host, port, projectId, protocol } = body;
   try {
-    const result = await b.connect(host, port || 3671, projectId);
+    const result = await b.connect(host, port || 3671, projectId, protocol);
     db.run("INSERT OR REPLACE INTO settings VALUES ('knxip_host',?)", [host]);
     db.run("INSERT OR REPLACE INTO settings VALUES ('knxip_port',?)", [
       String(port || 3671),

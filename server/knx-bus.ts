@@ -13,7 +13,10 @@ import {
   type ScanProgress,
   type DeviceInfo,
 } from './knx-connection.ts';
-import { KnxConnection as KnxIpConnection } from './knx-protocol.ts';
+import {
+  KnxConnection as KnxIpConnection,
+  type IpTransportProtocol,
+} from './knx-protocol.ts';
 import { KnxUsbConnection } from './knx-usb.ts';
 import type { Telegram } from '../shared/types.ts';
 
@@ -31,7 +34,7 @@ class KnxBusManager extends EventEmitter {
   connected: boolean;
   host: string | null;
   port: number | null;
-  type: 'udp' | 'usb' | null;
+  type: 'udp' | 'tcp' | 'usb' | null;
   projectId: number | string | null;
   _wss: WebSocketServer | null;
   _remapFn: ((telegram: Telegram) => Telegram) | null;
@@ -96,28 +99,36 @@ class KnxBusManager extends EventEmitter {
     host: string,
     port: number,
     projectId?: number | string | null,
-  ): Promise<{ host: string; port: number }> {
+    protocol: IpTransportProtocol = 'auto',
+  ): Promise<{ host: string; port: number; type: 'udp' | 'tcp' }> {
     if (this.connection) this.disconnect();
 
     this.host = host;
     const resolvedPort = port || 3671;
     this.port = resolvedPort;
     this.projectId = projectId ?? null;
-    this.type = 'udp';
 
     const conn = new KnxIpConnection();
     this._attachEvents(conn);
 
-    return (conn.connect(host, resolvedPort) as Promise<void>).then(() => {
+    return conn.connect(host, resolvedPort, undefined, protocol).then(() => {
       this.connection = conn;
       this.connected = true;
-      logger.info('knx', `Connected to ${host}:${resolvedPort}`);
+      // Reflects what connect() actually negotiated ('auto' may have
+      // resolved to either) - see knx-protocol.ts's TCP-first/UDP-fallback
+      // logic.
+      const negotiated = conn.transport ?? 'udp';
+      this.type = negotiated;
+      logger.info(
+        'knx',
+        `Connected to ${host}:${resolvedPort} (${negotiated})`,
+      );
       this.broadcast('knx:connected', {
         host,
         port: resolvedPort,
-        type: 'udp',
+        type: negotiated,
       });
-      return { host, port: resolvedPort };
+      return { host, port: resolvedPort, type: negotiated };
     });
   }
 

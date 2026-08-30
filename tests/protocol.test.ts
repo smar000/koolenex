@@ -16,6 +16,7 @@ import {
   _pktDisconnectRes as pktDisconnectRes,
   _pktTunnelingReq as pktTunnelingReq,
   _SVC as SVC,
+  _HOST_PROTOCOL as HOST_PROTOCOL,
 } from '../server/knx-protocol.ts';
 
 describe('KNXnet/IP: hdr', () => {
@@ -47,6 +48,11 @@ describe('KNXnet/IP: hpai', () => {
     assert.deepEqual([...h.slice(2, 6)], [0, 0, 0, 0]);
     assert.equal(h.readUInt16BE(6), 0);
   });
+
+  it('encodes protocol code 0x02 for TCP - confirmed against Calimero HPAI.IPV4_TCP', () => {
+    const h = hpai('0.0.0.0', 0, HOST_PROTOCOL.TCP);
+    assert.equal(h[1], 0x02);
+  });
 });
 
 describe('KNXnet/IP: pktConnect', () => {
@@ -60,6 +66,21 @@ describe('KNXnet/IP: pktConnect', () => {
     assert.equal(pkt[22], 0x04); // CRI length
     assert.equal(pkt[23], 0x04); // tunnel connection
     assert.equal(pkt[24], 0x02); // link layer
+  });
+
+  it('embeds the real local IP/port in the HPAI for UDP (default)', () => {
+    const pkt = pktConnect('192.168.1.10', 50000);
+    // control endpoint HPAI starts at byte 6
+    assert.equal(pkt[7], 0x01); // protocol code UDP
+    assert.deepEqual([...pkt.slice(8, 12)], [192, 168, 1, 10]);
+    assert.equal(pkt.readUInt16BE(12), 50000);
+  });
+
+  it('uses the placeholder HPAI (0.0.0.0:0, protocol TCP) when hostProtocol=TCP - matches Calimero\'s HPAI.Tcp', () => {
+    const pkt = pktConnect('192.168.1.10', 50000, HOST_PROTOCOL.TCP);
+    assert.equal(pkt[7], 0x02); // protocol code TCP
+    assert.deepEqual([...pkt.slice(8, 12)], [0, 0, 0, 0]);
+    assert.equal(pkt.readUInt16BE(12), 0);
   });
 });
 

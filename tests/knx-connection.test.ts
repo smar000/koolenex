@@ -28,10 +28,24 @@ import {
 
 class TestKnxConnection extends KnxConnection {
   sent: Buffer[] = [];
+  // Separate from `sent` - real KNXnet/IP Routing (multicast) is a genuinely
+  // different channel from Tunneling, used specifically by the KNX "System
+  // Broadcast" services (checkProgrammingMode, serial-number addressing) -
+  // see knx_routing_transport_gap memory. `_routingAvailable` lets a test
+  // opt into the base class's default-throw behavior instead (simulating a
+  // connection with no Routing capability) by setting it false.
+  sentViaRouting: Buffer[] = [];
+  _routingAvailable = true;
   disconnected = false;
 
   sendCEMI(cemi: Buffer): Promise<void> {
     this.sent.push(cemi);
+    return Promise.resolve();
+  }
+
+  sendCEMIViaRouting(cemi: Buffer): Promise<void> {
+    if (!this._routingAvailable) return super.sendCEMIViaRouting(cemi);
+    this.sentViaRouting.push(cemi);
     return Promise.resolve();
   }
 
@@ -315,6 +329,23 @@ describe('KnxConnection.ping', () => {
 
 // ── KnxConnection.programIA ──────────────────────────────────────────────────
 
+// ── KnxConnection.sendCEMIViaRouting (default) ────────────────────────────────
+// The base class has no Routing capability (only KnxIpConnection in
+// knx-protocol.ts overrides this) - see knx_routing_transport_gap memory.
+
+describe('KnxConnection.sendCEMIViaRouting (base class default)', () => {
+  it('throws - no Routing capability without an IP transport override', () => {
+    // Synchronous throw, same shape as sendCEMI()'s own base-class default
+    // - not a rejected promise.
+    const conn = new TestKnxConnection();
+    conn._routingAvailable = false; // fall through to the real base-class default
+    assert.throws(
+      () => conn.sendCEMIViaRouting(Buffer.from([0x29])),
+      /Routing/,
+    );
+  });
+});
+
 describe('KnxConnection.programIA', () => {
   it('sends physical address write and returns result', async () => {
     const conn = new TestKnxConnection();
@@ -359,13 +390,15 @@ describe('KnxConnection.checkProgrammingMode', () => {
 
     const p = conn.checkProgrammingMode(50);
     await delay(10);
-    assert.equal(conn.sent.length, 1);
-    const parsed = parseCEMI(conn.sent[0]!);
+    // Sent via Routing (multicast), not Tunneling - see
+    // knx_routing_transport_gap memory.
+    assert.equal(conn.sentViaRouting.length, 1);
+    const parsed = parseCEMI(conn.sentViaRouting[0]!);
     assert.ok(parsed);
     assert.equal(parsed.dst, '0.0.0');
     assert.equal(parsed.isGroup, false);
     assert.equal(parsed.apciName, 'PhysicalAddress_Read');
-    assert.equal(conn.sent[0]![2], 0xa0); // system broadcast, System priority
+    assert.equal(conn.sentViaRouting[0]![2], 0xa0); // system broadcast, System priority
     await p; // let the timeout settle so the test doesn't leave a dangling timer
   });
 
@@ -427,15 +460,17 @@ describe('KnxConnection.writeIndividualAddressBySerial', () => {
 
     const result = await conn.writeIndividualAddressBySerial(serial, '1.1.20');
     assert.deepEqual(result, { ok: true });
-    assert.equal(conn.sent.length, 1);
+    // Sent via Routing (multicast), not Tunneling - see
+    // knx_routing_transport_gap memory.
+    assert.equal(conn.sentViaRouting.length, 1);
 
-    const parsed = parseCEMI(conn.sent[0]!);
+    const parsed = parseCEMI(conn.sentViaRouting[0]!);
     assert.ok(parsed);
     assert.equal(parsed.dst, '0.0.0');
     assert.equal(parsed.isGroup, false);
     // ctrl1 (byte 2): system broadcast + System priority, not the ordinary
     // 0xBC every other frame this codebase builds uses.
-    assert.equal(conn.sent[0]![2], 0xa0);
+    assert.equal(conn.sentViaRouting[0]![2], 0xa0);
   });
 
   it('throws when not connected', async () => {
@@ -546,7 +581,9 @@ describe('KnxConnection.assignIndividualAddressBySerial', () => {
 
     const result = await assignP;
     assert.deepEqual(result, { ok: true, verified: true, address: '1.1.20' });
-    assert.equal(conn.sent.length, 2); // Write, then Read
+    // Both via Routing (multicast), not Tunneling - see
+    // knx_routing_transport_gap memory.
+    assert.equal(conn.sentViaRouting.length, 2); // Write, then Read
   });
 });
 

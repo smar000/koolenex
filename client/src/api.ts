@@ -325,12 +325,17 @@ export const api = {
 
   // Bus
   busStatus: () => req<BusStatusResponse>('GET', '/bus/status'),
-  busConnect: (host: string, port: number, projectId: number) =>
-    req<{ ok: boolean; [key: string]: unknown }>('POST', '/bus/connect', {
-      host,
-      port,
-      projectId,
-    }),
+  busConnect: (
+    host: string,
+    port: number,
+    projectId: number,
+    protocol?: 'udp' | 'tcp' | 'auto',
+  ) =>
+    req<{ ok: boolean; type?: 'udp' | 'tcp'; [key: string]: unknown }>(
+      'POST',
+      '/bus/connect',
+      { host, port, projectId, protocol },
+    ),
   busConnectUsb: (devicePath: string, projectId: number) =>
     req<{ ok: boolean; [key: string]: unknown }>('POST', '/bus/connect-usb', {
       devicePath,

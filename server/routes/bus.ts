@@ -392,6 +392,9 @@ router.post('/bus/connect', async (req: Request, res: Response) => {
     db.run("INSERT OR REPLACE INTO settings VALUES ('knxip_port',?)", [
       String(port || 3671),
     ]);
+    db.run("INSERT OR REPLACE INTO settings VALUES ('knxip_protocol',?)", [
+      protocol || 'auto',
+    ]);
     db.scheduleSave();
     res.json({ ok: true, ...result });
   } catch (e) {

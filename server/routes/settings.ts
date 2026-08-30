@@ -318,6 +318,7 @@ router.patch('/settings', (req: Request, res: Response): void => {
   const allowed = new Set([
     'knxip_host',
     'knxip_port',
+    'knxip_protocol',
     'active_project_id',
     'demo_mode',
     'demo_addr_map',

@@ -102,7 +102,11 @@ export function useProjectActions(): ProjectActions {
 
 // ── Bus actions context ──────────────────────────────────────────────────────
 export interface BusActions {
-  connect: (host: string, port: number) => Promise<unknown>;
+  connect: (
+    host: string,
+    port: number,
+    protocol?: 'udp' | 'tcp' | 'auto',
+  ) => Promise<unknown>;
   connectUsb: (devicePath: string) => Promise<unknown>;
   disconnect: () => Promise<void>;
   deviceStatus: (deviceId: number, status: DeviceStatus) => Promise<void>;

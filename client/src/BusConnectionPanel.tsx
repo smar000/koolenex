@@ -30,6 +30,7 @@ export function BusConnectionPanel({
   const [tab, setTab] = useState(busStatus.type === 'usb' ? 'usb' : 'ip');
   const [host, setHost] = useState(busStatus.host || '');
   const [port, setPort] = useState(String(busStatus.port || '3671'));
+  const [protocol, setProtocol] = useState<'udp' | 'tcp' | 'auto'>('auto');
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,6 +46,7 @@ export function BusConnectionPanel({
       .then((s: any) => {
         if (s.knxip_host) setHost(s.knxip_host);
         if (s.knxip_port) setPort(s.knxip_port);
+        if (s.knxip_protocol) setProtocol(s.knxip_protocol);
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -54,7 +56,7 @@ export function BusConnectionPanel({
     setConnecting(true);
     setError(null);
     try {
-      await onConnect(host, parseInt(port));
+      await onConnect(host, parseInt(port), protocol);
       onConnected?.();
     } catch (e: any) {
       setError(e.message);
@@ -127,7 +129,7 @@ export function BusConnectionPanel({
           <span className={styles.connectedLabel}>
             {busStatus.type === 'usb'
               ? '● Connected via USB'
-              : `● Connected to ${busStatus.host}:${busStatus.port || 3671}`}
+              : `● Connected to ${busStatus.host}:${busStatus.port || 3671} (${(busStatus.type || 'udp').toUpperCase()})`}
           </span>
           <Btn onClick={doDisconnect} color="var(--red)" bg="#1a0a0a">
             Disconnect
@@ -151,6 +153,22 @@ export function BusConnectionPanel({
                 onChange={(e) => setPort(e.target.value)}
                 className={styles.textInput}
               />
+            </div>
+          </div>
+          <div className={styles.ipRow}>
+            <div className={styles.ipCol}>
+              <div className={styles.fieldLabel}>TRANSPORT</div>
+              <select
+                value={protocol}
+                onChange={(e) =>
+                  setProtocol(e.target.value as 'udp' | 'tcp' | 'auto')
+                }
+                className={styles.textInput}
+              >
+                <option value="auto">Auto (TCP, falls back to UDP)</option>
+                <option value="tcp">TCP</option>
+                <option value="udp">UDP</option>
+              </select>
             </div>
           </div>
           {error && <div className={styles.errorMsg}>&#x2717; {error}</div>}

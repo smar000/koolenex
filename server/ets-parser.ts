@@ -240,6 +240,7 @@ interface ParsedDevice {
   is_power_supply: boolean;
   is_coupler: boolean;
   is_rail_mounted: boolean;
+  has_address: boolean;
 }
 
 interface ResolvedParam {
@@ -716,7 +717,41 @@ export function parseKnxproj(
 
     const devInstById: Record<string, string> = {}; // DeviceInstance @Id → individual_address
 
-    for (const area of toArr(topology.Area)) {
+    // Devices dropped into a project but never placed on any Area/Line at
+    // all live in their own <UnassignedDevices> container, a direct
+    // sibling of <Area> under <Topology> - real evidence, live Test Bed
+    // project 2026-08-30 (`P-02CB-0_DI-4`, an HDL device added to the
+    // project with no topology placement whatsoever). The normal
+    // Area→Line→DeviceInstance traversal below never visits this
+    // container, so such a device was silently invisible to the parser
+    // entirely - not merely mis-addressed (see the missing-Address-
+    // attribute handling inside the loop below, a related but different
+    // real case: a device that WAS placed on a line but had its address
+    // cleared). Fixed by folding <UnassignedDevices> in as one extra
+    // synthetic "area/line" for the same traversal to process, so every
+    // other per-device rule (missing-Address handling, parameters, com
+    // objects) applies unchanged. Area/line 99 is used deliberately - real
+    // KNX area/line numbers are 4-bit (0-15), so 99 can never collide with
+    // a genuine topology entry.
+    const unassignedDevs = toArr(topology.UnassignedDevices?.DeviceInstance);
+    const areasToProcess = unassignedDevs.length
+      ? [
+          ...toArr(topology.Area),
+          {
+            '@_Address': '99',
+            '@_Name': '',
+            Line: [
+              {
+                '@_Address': '99',
+                '@_Name': 'Unassigned',
+                DeviceInstance: unassignedDevs,
+              },
+            ],
+          },
+        ]
+      : toArr(topology.Area);
+
+    for (const area of areasToProcess) {
       const areaNum = parseInt(attr(area, 'Address'), 10) || 0;
       const areaName = attr(area, 'Name');
       topologyEntries.push({
@@ -755,8 +790,30 @@ export function parseKnxproj(
           ),
         ];
 
+        // A <DeviceInstance> can genuinely have no Address attribute at all
+        // - real evidence, live Test Bed project 2026-08-30: a device newly
+        // added to the project but never placed on a line yet
+        // (`P-02CB-0_DI-4`) has none. The old logic (`parseInt(...) || 0`)
+        // silently treated a missing address exactly like a real address of
+        // 0 - which, per this same project's real convention, IS a valid,
+        // already-used address (the line's router/first device is
+        // genuinely addressed 0). Every unaddressed device collided on the
+        // same "area.line.0" individual_address, and since that column is
+        // UNIQUE per project, INSERT OR REPLACE (routes/projects.ts) meant
+        // only the last one survived - the rest never appeared anywhere,
+        // with no error. Fixed: a missing Address attribute gets a
+        // synthetic device number starting at 256 (one past the real 0-255
+        // KNX device-number range, so it can never collide with a real
+        // address), incrementing per unaddressed device on this line;
+        // has_address records which case applies so routes and the UI can
+        // tell a placeholder from a real, writable address.
+        let nextUnassignedDevNum = 256;
         for (const dev of allDevs) {
-          const devNum = parseInt(attr(dev, 'Address'), 10) || 0;
+          const rawAddr = attr(dev, 'Address');
+          const hasAddress = rawAddr !== '';
+          const devNum = hasAddress
+            ? parseInt(rawAddr, 10) || 0
+            : nextUnassignedDevNum++;
           const ia = `${areaNum}.${lineNum}.${devNum}`;
           const prodRef = attr(dev, 'ProductRefId');
           const h2pRef = attr(dev, 'Hardware2ProgramRefId');
@@ -870,6 +927,7 @@ export function parseKnxproj(
 
           devices.push({
             individual_address: ia,
+            has_address: hasAddress,
             name: devName,
             description: attr(dev, 'Description') || '',
             comment: attr(dev, 'Comment') || '',

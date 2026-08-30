@@ -302,7 +302,8 @@ export function ProgrammingView() {
   const programmAll = async (mode: 'full' | 'partial') => {
     if (programmingAll) return;
     const targets = devices.filter(
-      (d: any) => d.status === 'modified' && d.individual_address,
+      (d: any) =>
+        d.status === 'modified' && d.individual_address && d.has_address,
     );
     if (!targets.length) return;
     setProgrammingAll(true);
@@ -510,11 +511,21 @@ export function ProgrammingView() {
                             color: COLMAP[d.device_type] || 'var(--muted)',
                           }}
                         />
-                        <PinAddr
-                          address={d.individual_address}
-                          wtype="device"
-                          className={styles.addrBadge}
-                        />
+                        {d.has_address ? (
+                          <PinAddr
+                            address={d.individual_address}
+                            wtype="device"
+                            className={styles.addrBadge}
+                          />
+                        ) : (
+                          <span
+                            className={styles.addrBadge}
+                            style={{ color: 'var(--amber)' }}
+                            title="Imported with no individual address assigned - use Address New Device to give it a real one before programming or verifying"
+                          >
+                            no address
+                          </span>
+                        )}
                         {d.name}
                         {d.manufacturer && (
                           <span className={styles.mfrLabel}>
@@ -573,15 +584,21 @@ export function ProgrammingView() {
                             onClick={() =>
                               verifyDevice(d.id, d.individual_address)
                             }
-                            disabled={prog?.state === 'running' || verifying}
+                            disabled={
+                              prog?.state === 'running' ||
+                              verifying ||
+                              !d.has_address
+                            }
                             title={
-                              verifying
-                                ? (liveVerifyProgress
-                                    ? `${liveVerifyProgress.bytesRead}/${liveVerifyProgress.totalBytes} bytes`
-                                    : 'Reading device…')
-                                : verifyCache[d.id]
-                                  ? 'Read the device again and compare to the computed image — no writes'
-                                  : 'Read the device and compare to the computed image — no writes'
+                              !d.has_address
+                                ? 'No individual address assigned yet — use Address New Device first'
+                                : verifying
+                                  ? (liveVerifyProgress
+                                      ? `${liveVerifyProgress.bytesRead}/${liveVerifyProgress.totalBytes} bytes`
+                                      : 'Reading device…')
+                                  : verifyCache[d.id]
+                                    ? 'Read the device again and compare to the computed image — no writes'
+                                    : 'Read the device and compare to the computed image — no writes'
                             }
                             // Same treatment as the Program button - the
                             // button's own background becomes the progress
@@ -644,11 +661,13 @@ export function ProgrammingView() {
                               v === d.id ? null : d.id,
                             );
                           }}
-                          disabled={prog?.state === 'running'}
+                          disabled={prog?.state === 'running' || !d.has_address}
                           title={
-                            prog?.state === 'running'
-                              ? liveProgramProgress?.msg
-                              : undefined
+                            !d.has_address
+                              ? 'No individual address assigned yet — use Address New Device first'
+                              : prog?.state === 'running'
+                                ? liveProgramProgress?.msg
+                                : undefined
                           }
                           // Colored/labeled off the PERSISTENT status
                           // (d.status, stored server-side), not the

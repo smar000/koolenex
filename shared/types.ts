@@ -69,6 +69,13 @@ export interface Device {
   installation_hints: string;
   floor_x: number;
   floor_y: number;
+  // Whether this device carries a real individual address from the project
+  // file. A DeviceInstance can be imported with no Address attribute at all
+  // (dropped into the topology but not yet placed on a line) - such a
+  // device gets a synthetic, non-colliding individual_address (see
+  // ets-parser.ts) purely so it has a stable DB key and is visible in the
+  // UI; it is not a real, writable KNX address. 0 for these; 1 otherwise.
+  has_address: SqliteBool;
 }
 
 export interface GroupAddress {

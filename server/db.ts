@@ -249,6 +249,17 @@ export async function init(
   migrate('group_addresses', 'description', "TEXT DEFAULT ''");
   migrate('devices', 'floor_x', 'REAL DEFAULT -1');
   migrate('devices', 'floor_y', 'REAL DEFAULT -1');
+  // has_address - added 2026-08-30, real bug fix: a <DeviceInstance> with no
+  // Address attribute (never placed on a line in ETS) was defaulting to
+  // device number 0, which both collides with the real ETS convention of
+  // addressing a line's first/router device as 0 (confirmed against the
+  // live Test Bed project) and, since individual_address is UNIQUE per
+  // project, silently dropped every subsequent unaddressed device via
+  // INSERT OR REPLACE - it never appeared in the Devices or Programming
+  // views, with no error anywhere. Existing rows default to 1 (real
+  // address) since they were only ever inserted from devices that DID have
+  // one; only newly-imported unaddressed devices get 0.
+  migrate('devices', 'has_address', 'INTEGER DEFAULT 1');
   migrate('catalog_items', 'model', "TEXT DEFAULT ''");
   migrate('catalog_items', 'bus_current', 'INTEGER DEFAULT 0');
   migrate('catalog_items', 'width_mm', 'REAL DEFAULT 0');

@@ -1178,6 +1178,18 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
         [deviceAddress, +(projectId ?? 0)],
       );
   if (!dev) return res.status(404).json({ error: 'Device not found' });
+  // A device imported with no real address (see ets-parser.ts) carries a
+  // synthetic individual_address (device number >= 256) purely to have a
+  // stable DB key - never a real, writable KNX address. Refuse to program
+  // it rather than encoding an out-of-range device number onto the wire,
+  // where it could silently wrap into a real device's actual address.
+  if (!dev.has_address) {
+    return res.status(409).json({
+      error: 'device_unaddressed',
+      message:
+        'This device has no individual address assigned yet - use "Address New Device" to give it a real one first.',
+    });
+  }
 
   const built = buildDeviceProgramming(dev);
   if (!built.ok) return res.status(built.status).json(built.body);
@@ -1296,6 +1308,14 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
         [deviceAddress, +(projectId ?? 0)],
       );
   if (!dev) return res.status(404).json({ error: 'Device not found' });
+  // See the matching comment/guard in /bus/program-device above.
+  if (!dev.has_address) {
+    return res.status(409).json({
+      error: 'device_unaddressed',
+      message:
+        'This device has no individual address assigned yet - use "Address New Device" to give it a real one first.',
+    });
+  }
 
   // See the matching comment in /bus/program-device above -
   // KnxBusManager.addKeepAliveRef() protects the whole retry loop

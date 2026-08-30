@@ -266,10 +266,38 @@ export function ProgrammingView() {
     if (dev) setLogOpen(false);
   };
 
-  const programmAll = () =>
-    devices
-      .filter((d: any) => d.status !== 'programmed')
-      .forEach((d: any) => programDevice(d.id, d.individual_address));
+  // Real bug, flagged live 2026-08-29 (task_2abb6756): this used to fire
+  // every device's programDevice() concurrently via .forEach (no await at
+  // all) - a real risk of corrupting overlapping download sessions on the
+  // single shared bus connection, which only ever supports one in-flight
+  // transaction. Also mislabeled: "Program All Modified" was actually
+  // filtering `status !== 'programmed'`, which silently swept in
+  // 'unassigned' devices too - those have no confirmed prior write to
+  // compare against and aren't what "Modified" means. Now: a real
+  // sequential queue (await each device fully before starting the next),
+  // scoped to status === 'modified' only, skipping any device with no
+  // resolved individual address (can't be addressed at all yet - see
+  // knx_serial_number_addressing_research memory for the real fix for
+  // that case, not yet implemented).
+  const [programmingAll, setProgrammingAll] = useState(false);
+  const programmAll = async () => {
+    if (programmingAll) return;
+    const targets = devices.filter(
+      (d: any) => d.status === 'modified' && d.individual_address,
+    );
+    if (!targets.length) return;
+    setProgrammingAll(true);
+    addLog(
+      `[${new Date().toLocaleTimeString()}] Program All Modified — queued ${targets.length} device(s)`,
+    );
+    try {
+      for (const d of targets) {
+        await programDevice(d.id, d.individual_address);
+      }
+    } finally {
+      setProgrammingAll(false);
+    }
+  };
 
   return (
     <div className={styles.root}>
@@ -277,8 +305,13 @@ export function ProgrammingView() {
         <SectionHeader
           title="Programming"
           actions={[
-            <Btn key="all" onClick={programmAll} color="var(--amber)">
-              ▷ Program All Modified
+            <Btn
+              key="all"
+              onClick={programmAll}
+              color="var(--amber)"
+              disabled={programmingAll}
+            >
+              {programmingAll ? '⋯ Programming…' : '▷ Program All Modified'}
             </Btn>,
           ]}
         />

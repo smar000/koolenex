@@ -429,6 +429,76 @@ export class KnxConnection extends EventEmitter {
     return { ok: true, newAddr };
   }
 
+  /**
+   * Broadcast A_IndividualAddress_Read (APCI PhysicalAddress_Read) and wait
+   * for a device currently in physical programming mode (button held down)
+   * to answer with A_IndividualAddress_Response. This is the real standard
+   * KNX commissioning discovery service - the read-side counterpart to
+   * programIA() above (which writes, this only detects/queries), and
+   * complementary to (not the same mechanism as) the serial-number-based
+   * addressing below. Sent as a system broadcast (spec 3/5/2 network-
+   * management framing, same as the serial-number services) - see
+   * buildCEMI's `systemBroadcast` option.
+   *
+   * **KNOWN NOT WORKING as of 2026-08-30 - real, understood root cause, not
+   * a bug in this function.** Tested against two different real devices
+   * (one confirmed genuinely in programming mode via its LED) - zero reply
+   * either time, with both "ordinary broadcast" and "system broadcast"
+   * framing tried. Root-caused: this codebase's KNXnet/IP transport
+   * (knx-protocol.ts) is Tunneling-only, and KNX "System Broadcast"
+   * services are a Routing(multicast)-connector-specific capability per
+   * the Falcon SDK's own class model (`IpRoutingConnectorParameters.
+   * EnableIPSystemBroadcast` has no equivalent on
+   * `IpTunnelingConnectorParameters`). See knx_routing_transport_gap
+   * memory / docs/knx-device-write-protocol.md §9 for the full evidence
+   * trail. This function is believed correct at the application layer;
+   * it cannot work until a Routing connector exists. Diagnostic logging
+   * left in place deliberately, to make re-testing after that fix easy.
+   *
+   * Real KNX precondition, not enforced here: only ONE device should be in
+   * programming mode on a bus at a time - if more than one is, only the
+   * first response is surfaced, though every reply is a real, valid frame
+   * either way.
+   */
+  checkProgrammingMode(
+    timeoutMs: number = 3000,
+  ): Promise<{ address: string | null }> {
+    if (!this.connected) throw new Error('Not connected');
+    return new Promise((resolve, reject) => {
+      const onMgmt = (cemi: CemiFrame): void => {
+        // Diagnostic: log every incoming _mgmt frame during the wait
+        // window, not just ones that match - useful for re-verifying once
+        // a Routing connector exists (see doc comment above).
+        logger.info('knx', 'checkProgrammingMode: _mgmt frame seen', {
+          src: cemi.src,
+          apciName: cemi.apciName,
+          apduHex: cemi.apdu.toString('hex'),
+        });
+        if (cemi.apciName !== 'PhysicalAddress_Response') return;
+        clearTimeout(timer);
+        this.off('_mgmt', onMgmt);
+        resolve({ address: cemi.src });
+      };
+      const timer = setTimeout(() => {
+        this.off('_mgmt', onMgmt);
+        resolve({ address: null });
+      }, timeoutMs);
+      this.on('_mgmt', onMgmt);
+      const apdu = apduGroup('PhysicalAddress_Read');
+      const cemi = buildCEMI(this.localAddr, '0.0.0', apdu, false, {
+        systemBroadcast: true,
+      });
+      logger.info('knx', 'checkProgrammingMode: sending broadcast', {
+        cemiHex: cemi.toString('hex'),
+      });
+      this.sendCEMI(cemi).catch((err: Error) => {
+        clearTimeout(timer);
+        this.off('_mgmt', onMgmt);
+        reject(err);
+      });
+    });
+  }
+
   // ── Individual address by serial number ───────────────────────────────────────
   // A_IndividualAddressSerialNumber_Write/_Read (spec 3/5/2 §2.5/§2.4) - assigns
   // or queries a device's individual address via its 6-byte KNX serial number,

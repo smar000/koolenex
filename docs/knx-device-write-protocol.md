@@ -27,10 +27,12 @@ Every factual claim is tagged:
   in isolation.
 - 🔴 **SPECULATIVE** — a guess or open question. Not a fact.
 
-**Sample size, throughout**: all real-hardware evidence here comes from exactly two physical
-devices, both from one manufacturer (Albrecht Jung), both the same KNX "mask version" (a device
-classification explained in §1) — System B, `0x07B0`. Nothing here has been confirmed against a
-different manufacturer, a different mask version, or other hardware, unless noted.
+**Sample size, throughout §1–§8**: all real-hardware evidence there comes from exactly two
+physical devices, both from one manufacturer (Albrecht Jung), both the same KNX "mask version" (a
+device classification explained in §1) — System B, `0x07B0`. Nothing in §1–§8 has been confirmed
+against a different manufacturer, a different mask version, or other hardware, unless noted. §9
+(device addressing) additionally uses a third, brand-new device from a different manufacturer
+(HDL) — noted there specifically.
 
 ## Some KNX terms used throughout
 
@@ -475,6 +477,70 @@ anomaly is detected (whether it's graded, or always the same universal rewrite).
   intermediate results to files rather than piping between processes when mixing a Unix-style
   shell with native Windows tools.
 
+## 9. Device addressing — a separate protocol family, and a real transport gap
+
+Everything above (§1–§8) assumes the target device already has a known individual address on the
+bus. **Assigning that address in the first place is a different KNX service family — "network
+management" — and it's currently blocked in this codebase, not by a device or protocol
+misunderstanding, but by a transport-layer gap.** This section is deliberately kept separate from
+the rest of the document; it's about addressing, not configuration content.
+
+Two such services exist and are implemented in `server/knx-connection.ts`:
+
+- `checkProgrammingMode()` — `A_IndividualAddress_Read`, the standard button-press discovery
+  broadcast real ETS uses for its normal "press the button on the device you want to commission"
+  flow.
+- `assignIndividualAddressBySerial()` — `A_IndividualAddressSerialNumber_Write`/`_Read` (KNX spec
+  3/5/2 §2.5/§2.4), a no-button-press alternative that addresses a device by its 6-byte KNX serial
+  number instead. Real payload/APCI details in `server/knx-cemi.ts`, sourced from the Falcon SDK's
+  own doc comments and Calimero's real open-source implementation.
+
+### 9.1 Both get zero response through this codebase's transport 🟢
+
+Tested for real, 2026-08-30:
+
+- `checkProgrammingMode()` against a brand-new device with its button pressed (LED confirmed
+  flashing — genuinely in programming mode) and separately against a known-working device that
+  has responded correctly to every other operation all session — **zero reply either time**, with
+  the outbound broadcast frame itself confirmed correctly transmitted (checked byte-for-byte
+  against the expected wire format in both "ordinary broadcast" and "system broadcast" framing).
+- `assignIndividualAddressBySerial()` against the same brand-new device, by its real serial number
+  — the write itself had no effect (device still answering at the factory-default address
+  `15.15.255` afterward, not the target address).
+
+Getting an identical null result from two different devices (different manufacturers) rules out a
+device-specific firmware quirk.
+
+### 9.2 Root cause: this codebase's KNXnet/IP transport is Tunneling-only 🟢
+
+`server/knx-protocol.ts` implements KNXnet/IP **Tunneling** exclusively (`CONNECT_REQ`/
+`TUNNELING_REQ`/`TUNNELING_ACK` — no `ROUTING_INDICATION`, no multicast socket). Independently
+confirmed from the Falcon SDK's own official documentation (`Falcon SDK/Knx.Falcon.Sdk.chm` in
+the `knx-ets-manager` repo, extracted and read directly): `IpRoutingConnectorParameters` (the
+Routing/multicast connector class) has a real property, `EnableIPSystemBroadcast` — *"Enables
+processing of IP System broadcasts. Default value: false."* `IpTunnelingConnectorParameters` (what
+this codebase implements) has no such property anywhere in its class hierarchy.
+
+This means KNX "System Broadcast" network-management services — both of the above, and likely
+others in the same family — are a **Routing-connector-specific capability** in the official SDK's
+own model, and Tunneling structurally cannot carry them. Real ETS, which has successfully
+commissioned every device on this project's physical interface before, almost certainly uses
+Routing (multicast) locally for exactly this reason — fully consistent with the interface itself
+being capable, only this codebase's chosen transport not being.
+
+### 9.3 What fixing it requires 🔴 (not started)
+
+A real KNXnet/IP Routing (multicast) connector in `server/knx-protocol.ts`, alongside (not
+replacing) the existing Tunneling connector — everything in §1–§8 is point-to-point or group
+communication over Tunneling and is fully proven; none of it needs to change. Concretely: a UDP
+multicast socket on `224.0.23.12:3671` (Falcon's documented default), sending/receiving
+`ROUTING_INDICATION` frames — connectionless, unlike Tunneling's `CONNECT_REQ`/`CONNSTATE_REQ`
+handshake/keepalive. Not yet investigated: whether the two System-Broadcast services above would
+run over a Routing connection kept alongside the existing Tunneling one, or need something more
+involved; whether `EnableIPSystemBroadcast` implies client-side filtering beyond just joining the
+multicast group; whether the resort's real router hardware has Routing enabled by default (the
+user's evidence that ETS works today suggests yes, but unconfirmed directly).
+
 ## Sources
 
 Real capture files backing every 🟢-tagged claim above live in this project's `docs/data/
@@ -482,6 +548,9 @@ captures/` directory, organized by date and topic — session bootstrap and the 
 Partial Download walkthrough (§1–§5), memory-service/mask-version gating (§4.1), group-address
 and association table formats (§6.2–§6.3), the per-communication-object flags table's full
 bit-mapping (§6.4), the content-status/checksum mechanism and its safety-net rewrite trigger
-(§7), and the tshark address-mis-display gotcha (§8). The dated files under `docs/follow-ups/
-*.md` consolidate the full investigation narrative, including dead ends and exact chronology, for
-anyone who wants the "how this was found" story rather than just the current facts above.
+(§7), and the tshark address-mis-display gotcha (§8). §9's 🟢 claims are sourced differently -
+live tests against real hardware via this app's own routes (not a packet capture) plus the Falcon
+SDK's official `.chm` documentation (`Falcon SDK/` in the `knx-ets-manager` repo) - cited inline.
+The dated files under `docs/follow-ups/*.md` consolidate the full investigation narrative,
+including dead ends and exact chronology, for anyone who wants the "how this was found" story
+rather than just the current facts above.

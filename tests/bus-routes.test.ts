@@ -130,6 +130,14 @@ class MockBus extends EventEmitter {
     return { ok: true, newAddr };
   }
 
+  async checkProgrammingMode(
+    timeoutMs?: number,
+  ): Promise<{ address: string | null }> {
+    this.calls.push({ method: 'checkProgrammingMode', args: [timeoutMs] });
+    if (!this.connected) throw new Error('Not connected to KNX bus');
+    return { address: '1.1.20' };
+  }
+
   async assignIndividualAddressBySerial(
     serial: Buffer,
     newAddr: string,
@@ -619,6 +627,37 @@ describe('POST /bus/program-ia', () => {
 
   it('rejects missing newAddr', async () => {
     const r = await req(ts.baseUrl, 'POST', '/bus/program-ia', {});
+    assert.equal(r.status, 400);
+  });
+});
+
+// ── POST /bus/check-programming-mode ────────────────────────────────────────
+// A_IndividualAddress_Read broadcast discovery - see knx_routing_transport_gap
+// memory / docs/knx-device-write-protocol.md §9: known NOT to get a real
+// reply through this app's Tunneling-only transport yet (root-caused,
+// requires a Routing connector). Route-level coverage only, same as every
+// other bus route in this file.
+
+describe('POST /bus/check-programming-mode', () => {
+  it('returns the responding address', async () => {
+    mockBus.connected = true;
+    const r = await req(ts.baseUrl, 'POST', '/bus/check-programming-mode', {});
+    assert.equal(r.status, 200);
+    const data = r.data as any;
+    assert.deepEqual(data, { address: '1.1.20' });
+  });
+
+  it('returns 409 when not connected', async () => {
+    mockBus.connected = false;
+    const r = await req(ts.baseUrl, 'POST', '/bus/check-programming-mode', {});
+    assert.equal(r.status, 409);
+  });
+
+  it('rejects an out-of-range timeoutMs', async () => {
+    mockBus.connected = true;
+    const r = await req(ts.baseUrl, 'POST', '/bus/check-programming-mode', {
+      timeoutMs: 999999,
+    });
     assert.equal(r.status, 400);
   });
 });

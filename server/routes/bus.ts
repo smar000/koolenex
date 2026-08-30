@@ -826,6 +826,31 @@ router.post('/bus/program-ia', async (req: Request, res: Response) => {
   }
 });
 
+// Detect a device currently in physical programming mode (button held
+// down) - broadcasts A_IndividualAddress_Read and reports whether/what
+// answered. Read-side counterpart to /bus/program-ia above; independent of
+// (not the same mechanism as) /bus/assign-address-by-serial below.
+router.post(
+  '/bus/check-programming-mode',
+  async (req: Request, res: Response) => {
+    const b = requireBus(res);
+    if (!b) return;
+    const body = validateBody(
+      req,
+      z.object({ timeoutMs: z.number().int().min(100).max(30000).optional() }),
+    );
+    if (!b.connected) return res.status(409).json({ error: 'Bus not connected' });
+    try {
+      const result = await b.checkProgrammingMode(body.timeoutMs);
+      res.json(result);
+    } catch (e) {
+      res
+        .status(502)
+        .json({ error: safeError('bus', 'Check programming mode failed', e) });
+    }
+  },
+);
+
 // Assign an individual address via the device's own serial number
 // (NM_IndividualAddress_SerialNumber_Write/_Read, spec 3/5/2 §2.5/§2.4) -
 // unlike /bus/program-ia above, this needs no physical programming-button

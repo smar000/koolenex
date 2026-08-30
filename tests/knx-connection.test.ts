@@ -9,6 +9,7 @@ import {
   KnxConnection,
   parseCEMI,
   buildCEMI,
+  apduGroup,
   encodePhysical,
   encodeGroup,
   delay,
@@ -338,6 +339,75 @@ describe('KnxConnection.programIA', () => {
     await assert.rejects(() => conn.programIA('1.1.5'), {
       message: 'Not connected',
     });
+  });
+});
+
+// ── KnxConnection.checkProgrammingMode ────────────────────────────────────────
+// A_IndividualAddress_Read broadcast discovery - see knx_routing_transport_gap
+// memory / docs/knx-device-write-protocol.md §9: known NOT to elicit a real
+// reply through this codebase's Tunneling-only transport, root-caused to a
+// missing Routing connector, not a bug in this function. These tests cover
+// the application-layer behavior only (frame shape, response matching,
+// timeout) - the same protocol-shape-only coverage every other broadcast
+// service in this file gets.
+
+describe('KnxConnection.checkProgrammingMode', () => {
+  it('sends a system-broadcast A_IndividualAddress_Read to 0.0.0', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const p = conn.checkProgrammingMode(50);
+    await delay(10);
+    assert.equal(conn.sent.length, 1);
+    const parsed = parseCEMI(conn.sent[0]!);
+    assert.ok(parsed);
+    assert.equal(parsed.dst, '0.0.0');
+    assert.equal(parsed.isGroup, false);
+    assert.equal(parsed.apciName, 'PhysicalAddress_Read');
+    assert.equal(conn.sent[0]![2], 0xa0); // system broadcast, System priority
+    await p; // let the timeout settle so the test doesn't leave a dangling timer
+  });
+
+  it('resolves with the responding device address on a real reply', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const p = conn.checkProgrammingMode(500);
+    const raw = buildCEMI('1.1.20', '0.0.0', apduGroup('PhysicalAddress_Response'), false);
+    conn.simulateMgmtFrame(parseCEMI(raw)!);
+
+    const result = await p;
+    assert.deepEqual(result, { address: '1.1.20' });
+  });
+
+  it('resolves with null address on timeout when nothing answers', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const result = await conn.checkProgrammingMode(50);
+    assert.deepEqual(result, { address: null });
+  });
+
+  it('ignores unrelated _mgmt frames and keeps waiting', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const p = conn.checkProgrammingMode(200);
+    const unrelated = buildCEMI('1.1.5', '1.0.1', apduGroupRead(), false);
+    conn.simulateMgmtFrame(parseCEMI(unrelated)!);
+
+    const result = await p;
+    assert.deepEqual(result, { address: null });
+  });
+
+  it('throws when not connected', () => {
+    const conn = new TestKnxConnection();
+    conn.connected = false;
+    assert.throws(() => conn.checkProgrammingMode(), /Not connected/);
   });
 });
 

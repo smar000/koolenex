@@ -477,69 +477,72 @@ anomaly is detected (whether it's graded, or always the same universal rewrite).
   intermediate results to files rather than piping between processes when mixing a Unix-style
   shell with native Windows tools.
 
-## 9. Device addressing — a separate protocol family, and a real transport gap
+## 9. Device addressing — a separate protocol family
 
 Everything above (§1–§8) assumes the target device already has a known individual address on the
 bus. **Assigning that address in the first place is a different KNX service family — "network
-management" — and it's currently blocked in this codebase, not by a device or protocol
-misunderstanding, but by a transport-layer gap.** This section is deliberately kept separate from
-the rest of the document; it's about addressing, not configuration content.
+management".** This section is deliberately kept separate from the rest of the document; it's
+about addressing, not configuration content.
 
-Two such services exist and are implemented in `server/knx-connection.ts`:
+Three such services are implemented in `server/knx-connection.ts`:
 
 - `checkProgrammingMode()` — `A_IndividualAddress_Read`, the standard button-press discovery
   broadcast real ETS uses for its normal "press the button on the device you want to commission"
   flow.
-- `assignIndividualAddressBySerial()` — `A_IndividualAddressSerialNumber_Write`/`_Read` (KNX spec
-  3/5/2 §2.5/§2.4), a no-button-press alternative that addresses a device by its 6-byte KNX serial
-  number instead. Real payload/APCI details in `server/knx-cemi.ts`, sourced from the Falcon SDK's
-  own doc comments and Calimero's real open-source implementation.
+- `readSerialNumbersInProgrammingMode()` — `A_SystemNetworkParameter_Read`/`_Response` for
+  `PID_SERIAL_NUMBER` (object type 0 = Device): `NM_Read_SerialNumber_By_ProgrammingMode`, reading
+  the serial number of whichever device(s) are in programming mode, no address needed at all.
+  Collects every reply within the timeout window rather than stopping at the first, since multiple
+  simultaneous devices reply cleanly with no collision (🟢 confirmed) — the real way to
+  disambiguate multiple *blank* devices, whose addresses would otherwise be identical (shared
+  factory default).
+- `writeIndividualAddressBySerial()`/`readIndividualAddressBySerial()` — `A_
+  IndividualAddressSerialNumber_Write`/`_Read` (spec 3/5/2 §2.5/§2.4), a no-button-press
+  alternative that addresses a device by its 6-byte KNX serial number instead.
 
-### 9.1 Both get zero response through this codebase's transport 🟢
+### 9.1 Real wire format, confirmed byte-for-byte against a real ETS capture 🟢
 
-Tested for real, 2026-08-30:
+An earlier round of this investigation (individual-type framing, then a Routing/multicast
+transport) got zero device reply and wrongly concluded Tunneling structurally couldn't carry these
+services at all. **That conclusion was wrong** — corrected 2026-08-30 by capturing real ETS
+traffic (tshark) during an actual factory-reset + full-download commissioning cycle (button press,
+address assignment, serial-number verify) against this project's own testbed router. The real
+cause was wrong cEMI framing on two counts, both fixed:
 
-- `checkProgrammingMode()` against a brand-new device with its button pressed (LED confirmed
-  flashing — genuinely in programming mode) and separately against a known-working device that
-  has responded correctly to every other operation all session — **zero reply either time**, with
-  the outbound broadcast frame itself confirmed correctly transmitted (checked byte-for-byte
-  against the expected wire format in both "ordinary broadcast" and "system broadcast" framing).
-- `assignIndividualAddressBySerial()` against the same brand-new device, by its real serial number
-  — the write itself had no effect (device still answering at the factory-default address
-  `15.15.255` afterward, not the target address).
+- **All four services above are sent as GROUP-type cEMI frames to address `0/0/0`** (KNX's
+  "default broadcast" address) — not an individual-type frame to `0.0.0` the way an earlier
+  version assumed, and not KNX's separate "system broadcast" ctrl1 bit either.
+- **All four use ctrl1 `0xB0`** — the *ordinary* broadcast bit (bit4=1) at **System priority**
+  (bits3-2=`00`) — not the plain `0xBC` (Low priority) every other frame in this codebase uses,
+  and not the "system broadcast" ctrl1 (bit4=0) an earlier reading of Calimero's source had
+  suggested (`TransportLayer.broadcast(system, ...)`'s `system` boolean turned out to select
+  GROUP-vs-individual addressing, not the ctrl1 bit its name suggests — real ETS traffic is the
+  authority here, not a source-reading inference).
+- `A_IndividualAddressSerialNumber_Response`'s payload is `[serial(6)][4 reserved zero bytes]` —
+  **no address field at all**; the device's address is carried by *which device replies*
+  (cEMI `src`), the same convention `A_IndividualAddress_Response` uses.
+- `A_SystemNetworkParameter_Response`'s payload echoes the request's operand byte before the
+  actual value: `[objectType(2)][pid<<4 (2)][echoedOperand(1)][...value]`.
+- Response APCI `0x3DD` (`A_IndividualAddressSerialNumber_Response`), previously "inferred by
+  pattern, not independently confirmed", is now directly confirmed real.
 
-Getting an identical null result from two different devices (different manufacturers) rules out a
-device-specific firmware quirk.
+All four services are sent over the **normal Tunneling connection** — Routing/multicast is not
+needed for any of this. (A real Routing/multicast connector and TCP Tunneling support were built
+while chasing the earlier wrong hypothesis; TCP Tunneling turned out to be a genuine, separate,
+correctly-diagnosed fix in its own right — real ETS traffic on this router is TCP, this codebase
+was UDP-only before — but Routing itself was not the answer to the addressing question. See
+`knx_routing_transport_gap` and `knx_serial_number_addressing_research` memories for the full,
+warts-and-all trail of both the wrong turn and the correction.)
 
-### 9.2 Root cause: this codebase's KNXnet/IP transport is Tunneling-only 🟢
+### 9.2 Confirmed working end-to-end on real hardware 🟢
 
-`server/knx-protocol.ts` implements KNXnet/IP **Tunneling** exclusively (`CONNECT_REQ`/
-`TUNNELING_REQ`/`TUNNELING_ACK` — no `ROUTING_INDICATION`, no multicast socket). Independently
-confirmed from the Falcon SDK's own official documentation (`Falcon SDK/Knx.Falcon.Sdk.chm` in
-the `knx-ets-manager` repo, extracted and read directly): `IpRoutingConnectorParameters` (the
-Routing/multicast connector class) has a real property, `EnableIPSystemBroadcast` — *"Enables
-processing of IP System broadcasts. Default value: false."* `IpTunnelingConnectorParameters` (what
-this codebase implements) has no such property anywhere in its class hierarchy.
-
-This means KNX "System Broadcast" network-management services — both of the above, and likely
-others in the same family — are a **Routing-connector-specific capability** in the official SDK's
-own model, and Tunneling structurally cannot carry them. Real ETS, which has successfully
-commissioned every device on this project's physical interface before, almost certainly uses
-Routing (multicast) locally for exactly this reason — fully consistent with the interface itself
-being capable, only this codebase's chosen transport not being.
-
-### 9.3 What fixing it requires 🔴 (not started)
-
-A real KNXnet/IP Routing (multicast) connector in `server/knx-protocol.ts`, alongside (not
-replacing) the existing Tunneling connector — everything in §1–§8 is point-to-point or group
-communication over Tunneling and is fully proven; none of it needs to change. Concretely: a UDP
-multicast socket on `224.0.23.12:3671` (Falcon's documented default), sending/receiving
-`ROUTING_INDICATION` frames — connectionless, unlike Tunneling's `CONNECT_REQ`/`CONNSTATE_REQ`
-handshake/keepalive. Not yet investigated: whether the two System-Broadcast services above would
-run over a Routing connection kept alongside the existing Tunneling one, or need something more
-involved; whether `EnableIPSystemBroadcast` implies client-side filtering beyond just joining the
-multicast group; whether the resort's real router hardware has Routing enabled by default (the
-user's evidence that ETS works today suggests yes, but unconfirmed directly).
+`checkProgrammingMode()` correctly returns a pressed device's real current address; the new
+`readSerialNumbersInProgrammingMode()` correctly returns that same device's real serial number
+(independently cross-checked against the value decoded from the ETS capture itself) with the
+correct current address. `writeIndividualAddressBySerial()`'s write was independently confirmed to
+take effect on real hardware (a device moved from its factory-default address to a real target
+address) even before this correction; the correction fixes its own read-verify step, which had
+been silently failing due to the wrong response-payload decode above.
 
 ## Sources
 
@@ -548,9 +551,10 @@ captures/` directory, organized by date and topic — session bootstrap and the 
 Partial Download walkthrough (§1–§5), memory-service/mask-version gating (§4.1), group-address
 and association table formats (§6.2–§6.3), the per-communication-object flags table's full
 bit-mapping (§6.4), the content-status/checksum mechanism and its safety-net rewrite trigger
-(§7), and the tshark address-mis-display gotcha (§8). §9's 🟢 claims are sourced differently -
-live tests against real hardware via this app's own routes (not a packet capture) plus the Falcon
-SDK's official `.chm` documentation (`Falcon SDK/` in the `knx-ets-manager` repo) - cited inline.
-The dated files under `docs/follow-ups/*.md` consolidate the full investigation narrative,
+(§7), and the tshark address-mis-display gotcha (§8). §9's 🟢 claims are sourced from live tests
+against real hardware via this app's own routes, plus a real tshark capture of ETS's own
+commissioning traffic (factory reset + full download, 2026-08-30) that settled the exact wire
+format after an earlier, incorrect hypothesis - see `knx_serial_number_addressing_research` memory
+for the full trail. The dated files under `docs/follow-ups/*.md` consolidate the full investigation narrative,
 including dead ends and exact chronology, for anyone who wants the "how this was found" story
 rather than just the current facts above.

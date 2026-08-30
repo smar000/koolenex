@@ -17,6 +17,22 @@ export const APCI_EXT = {
   MemoryExtended_Write_Response: 0x01fc,
   MemoryExtended_Read: 0x01fd,
   MemoryExtended_Read_Response: 0x01fe,
+  // A_IndividualAddressSerialNumber_{Write,Read,Response} - the standard KNX
+  // network-management procedures NM_IndividualAddress_SerialNumber_Write/
+  // _Read (spec 3/5/2 §2.5/§2.4): assign or query a device's individual
+  // address via its 6-byte KNX serial number, no physical programming-
+  // button press needed. Sent as a SYSTEM broadcast (see buildCEMI's
+  // `systemBroadcast` option), never point-to-point. Codes confirmed from
+  // two independent sources (Falcon SDK's own doc comments + Calimero's
+  // real open-source implementation, IND_ADDR_SN_WRITE/READ in
+  // ManagementClientImpl.java) - see knx_serial_number_addressing_research
+  // memory. _Response (0x3DD) is INFERRED by the same one-below-Write
+  // numbering pattern seen elsewhere (e.g. Authorize_Request/_Response),
+  // not independently confirmed from a second source, and has never been
+  // captured against real hardware in this project.
+  IndividualAddressSerialNumber_Read: 0x03dc,
+  IndividualAddressSerialNumber_Response: 0x03dd,
+  IndividualAddressSerialNumber_Write: 0x03de,
 } as const;
 
 // 10-bit extended APCIs that need exact-match decoding (name by full code).
@@ -247,6 +263,82 @@ export function apduMemoryExtendedWrite(
   return apduConnectedFull(seq, APCI_EXT.MemoryExtended_Write, extra);
 }
 
+/**
+ * Build an APDU carrying a 10-bit extended APCI with UNNUMBERED transport
+ * (TPCI_DATA_GROUP, no sequence number) - the shape used for broadcast
+ * destinations, which don't carry a transport-layer connection the way a
+ * point-to-point managementSession() does. `apduConnectedFull` is the
+ * numbered/connected equivalent used by every other extended-APCI service
+ * in this module.
+ */
+export function apduExtUnnumbered(
+  fullApci: number,
+  extraBuf: Buffer | null = null,
+): Buffer {
+  const word = ((TPCI.DATA_GROUP << 10) | (fullApci & 0x3ff)) & 0xffff;
+  const header = Buffer.alloc(2);
+  header.writeUInt16BE(word);
+  return extraBuf ? Buffer.concat([header, extraBuf]) : header;
+}
+
+/**
+ * A_IndividualAddressSerialNumber_Write (0x3DE). Payload: 6-byte serial
+ * number + 2-byte new individual address + 4 reserved/zero bytes -
+ * confirmed against Calimero's real implementation. Sent as a system
+ * broadcast (see buildCEMI's `systemBroadcast` option) - the caller is
+ * responsible for that, this only builds the APDU.
+ */
+export function apduIndividualAddressSerialNumberWrite(
+  serial: Buffer,
+  newAddr: string,
+): Buffer {
+  if (serial.length !== 6) {
+    throw new Error(
+      `KNX serial number must be 6 bytes, got ${serial.length}`,
+    );
+  }
+  const extra = Buffer.concat([
+    serial,
+    encodePhysical(newAddr),
+    Buffer.alloc(4),
+  ]);
+  return apduExtUnnumbered(APCI_EXT.IndividualAddressSerialNumber_Write, extra);
+}
+
+/**
+ * A_IndividualAddressSerialNumber_Read (0x3DC). Payload: just the 6-byte
+ * serial number. Sent as a system broadcast; only the device whose own
+ * serial number matches is expected to answer with
+ * A_IndividualAddressSerialNumber_Response.
+ */
+export function apduIndividualAddressSerialNumberRead(serial: Buffer): Buffer {
+  if (serial.length !== 6) {
+    throw new Error(
+      `KNX serial number must be 6 bytes, got ${serial.length}`,
+    );
+  }
+  return apduExtUnnumbered(APCI_EXT.IndividualAddressSerialNumber_Read, serial);
+}
+
+export interface IndividualAddressSerialNumberResponse {
+  serial: Buffer;
+  address: string;
+}
+
+/**
+ * Decode an A_IndividualAddressSerialNumber_Response payload: 6-byte
+ * serial number + 2-byte individual address. Caller should verify the
+ * serial matches the one it queried before trusting `address` - a
+ * broadcast reply isn't otherwise correlated to the request the way a
+ * point-to-point managementSession() response is.
+ */
+export function parseIndividualAddressSerialNumberResponse(
+  frame: CemiFrame,
+): IndividualAddressSerialNumberResponse {
+  const d = frame.apduData;
+  return { serial: d.slice(0, 6), address: decodePhysical(d, 6) };
+}
+
 export function apduControl(tpciCode: number, seq: number = 0): Buffer {
   // Control PDU octet: T_Connect=0x80, T_Disconnect=0x81,
   // T_Ack=0b11 SSSS 10, T_Nak=0b11 SSSS 11 (the low 2 bits mark the PDU type).
@@ -266,14 +358,27 @@ export function buildCEMI(
   dstAddr: string,
   apdu: Buffer,
   isGroup: boolean,
+  opts?: { systemBroadcast?: boolean },
 ): Buffer {
   const src = encodePhysical(srcAddr || '0.0.0');
   const dst = isGroup ? encodeGroup(dstAddr) : encodePhysical(dstAddr);
   const cf2 = isGroup ? 0xe0 : 0x60;
+  // Control Field 1: every other frame this module builds uses the fixed
+  // ctrl1 = 0xBC (std frame / don't-repeat / "ordinary" broadcast type /
+  // Low priority) - fine for point-to-point and group traffic, and for the
+  // existing programIA() button-flow broadcast (A_PhysicalAddress_Write to
+  // 0.0.0). A_IndividualAddressSerialNumber_Write/_Read (spec 3/5/2
+  // §2.4/2.5) is the first service in this codebase that needs the OTHER
+  // broadcast type - "System Broadcast" (ctrl1 bit4=0) at System priority
+  // (bits3-2=00) - per Calimero's real reference implementation
+  // (`Priority.SYSTEM`) - see knx_serial_number_addressing_research memory.
+  // Opt-in so every existing call site's frame stays byte-for-byte
+  // unchanged.
+  const ctrl1 = opts?.systemBroadcast ? 0xa0 : 0xbc;
   const buf = Buffer.alloc(9 + apdu.length);
   buf[0] = MC.REQ;
   buf[1] = 0x00;
-  buf[2] = 0xbc;
+  buf[2] = ctrl1;
   buf[3] = cf2;
   src.copy(buf, 4);
   dst.copy(buf, 6);

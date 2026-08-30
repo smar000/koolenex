@@ -826,6 +826,44 @@ router.post('/bus/program-ia', async (req: Request, res: Response) => {
   }
 });
 
+// Assign an individual address via the device's own serial number
+// (NM_IndividualAddress_SerialNumber_Write/_Read, spec 3/5/2 §2.5/§2.4) -
+// unlike /bus/program-ia above, this needs no physical programming-button
+// press and no programming-mode precondition. See
+// knx_serial_number_addressing_research memory: sourced from the Falcon
+// SDK's own doc comments + Calimero's real implementation, but has NO
+// real-hardware confirmation in this project yet - every other write path
+// this app exposes has a real capture behind it, this one doesn't.
+router.post(
+  '/bus/assign-address-by-serial',
+  async (req: Request, res: Response) => {
+    const b = requireBus(res);
+    if (!b) return;
+    const body = validateBody(
+      req,
+      z.object({
+        serial: z
+          .string()
+          .regex(/^[0-9a-fA-F]{12}$/, 'serial must be 12 hex chars (6 bytes)'),
+        newAddress: z.string().min(1),
+      }),
+    );
+    const { serial, newAddress } = body;
+    if (!b.connected) return res.status(409).json({ error: 'Bus not connected' });
+    try {
+      const result = await b.assignIndividualAddressBySerial(
+        Buffer.from(serial, 'hex'),
+        newAddress,
+      );
+      res.json(result);
+    } catch (e) {
+      res
+        .status(502)
+        .json({ error: safeError('bus', 'Assign address by serial failed', e) });
+    }
+  },
+);
+
 interface DeviceModel {
   appId?: string;
   loadProcedures?: Array<{

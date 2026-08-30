@@ -130,6 +130,19 @@ class MockBus extends EventEmitter {
     return { ok: true, newAddr };
   }
 
+  async assignIndividualAddressBySerial(
+    serial: Buffer,
+    newAddr: string,
+    timeoutMs?: number,
+  ): Promise<{ ok: boolean; verified: boolean; address: string | null }> {
+    this.calls.push({
+      method: 'assignIndividualAddressBySerial',
+      args: [serial, newAddr, timeoutMs],
+    });
+    if (!this.connected) throw new Error('Not connected to KNX bus');
+    return { ok: true, verified: true, address: newAddr };
+  }
+
   async downloadDevice(): Promise<void> {
     this.calls.push({ method: 'downloadDevice', args: [...arguments] });
     if (!this.connected) throw new Error('Not connected to KNX bus');
@@ -606,6 +619,50 @@ describe('POST /bus/program-ia', () => {
 
   it('rejects missing newAddr', async () => {
     const r = await req(ts.baseUrl, 'POST', '/bus/program-ia', {});
+    assert.equal(r.status, 400);
+  });
+});
+
+// ── POST /bus/assign-address-by-serial ──────────────────────────────────────
+// NM_IndividualAddress_SerialNumber_Write/_Read (spec 3/5/2 §2.5/§2.4) - see
+// knx_serial_number_addressing_research memory. No real-hardware
+// confirmation for this service yet.
+
+describe('POST /bus/assign-address-by-serial', () => {
+  it('assigns an address by serial number', async () => {
+    mockBus.connected = true;
+    const r = await req(ts.baseUrl, 'POST', '/bus/assign-address-by-serial', {
+      serial: '00a625401d94',
+      newAddress: '1.1.20',
+    });
+    assert.equal(r.status, 200);
+    const data = r.data as any;
+    assert.deepEqual(data, { ok: true, verified: true, address: '1.1.20' });
+  });
+
+  it('returns 409 when not connected', async () => {
+    mockBus.connected = false;
+    const r = await req(ts.baseUrl, 'POST', '/bus/assign-address-by-serial', {
+      serial: '00a625401d94',
+      newAddress: '1.1.20',
+    });
+    assert.equal(r.status, 409);
+  });
+
+  it('rejects a serial that is not 12 hex chars', async () => {
+    mockBus.connected = true;
+    const r = await req(ts.baseUrl, 'POST', '/bus/assign-address-by-serial', {
+      serial: 'not-hex',
+      newAddress: '1.1.20',
+    });
+    assert.equal(r.status, 400);
+  });
+
+  it('rejects missing newAddress', async () => {
+    mockBus.connected = true;
+    const r = await req(ts.baseUrl, 'POST', '/bus/assign-address-by-serial', {
+      serial: '00a625401d94',
+    });
     assert.equal(r.status, 400);
   });
 });

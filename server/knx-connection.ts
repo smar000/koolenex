@@ -10,6 +10,7 @@ import { decodeDptBuffer } from './knx-dpt.ts';
 import {
   buildCEMI,
   TPCI,
+  APCI_EXT,
   apduGroup,
   apduGroupRead,
   apduGroupWrite,
@@ -23,6 +24,9 @@ import {
   apduPropertyValueWrite,
   apduPropertyValueRead,
   apduAuthorizeRequest,
+  apduIndividualAddressSerialNumberWrite,
+  apduIndividualAddressSerialNumberRead,
+  parseIndividualAddressSerialNumberResponse,
   encodePhysical,
   eventType,
   type CemiFrame,
@@ -53,9 +57,15 @@ export {
   apduPropertyValueWrite,
   apduPropertyValueRead,
   apduControl,
+  apduIndividualAddressSerialNumberWrite,
+  apduIndividualAddressSerialNumberRead,
+  parseIndividualAddressSerialNumberResponse,
   eventType,
 } from './knx-cemi.ts';
-export type { CemiFrame } from './knx-cemi.ts';
+export type {
+  CemiFrame,
+  IndividualAddressSerialNumberResponse,
+} from './knx-cemi.ts';
 export {
   _apduGroupRead,
   _apduGroupWrite,
@@ -417,6 +427,108 @@ export class KnxConnection extends EventEmitter {
     const cemi = buildCEMI(this.localAddr, '0.0.0', apdu, false);
     await this.sendCEMI(cemi);
     return { ok: true, newAddr };
+  }
+
+  // ── Individual address by serial number ───────────────────────────────────────
+  // A_IndividualAddressSerialNumber_Write/_Read (spec 3/5/2 §2.5/§2.4) - assigns
+  // or queries a device's individual address via its 6-byte KNX serial number,
+  // with no physical programming-button press needed (unlike programIA() above,
+  // which relies on the device being in programming mode and only one device
+  // responding). Sent as a SYSTEM broadcast (destination 0.0.0, ctrl1 "system
+  // broadcast" bit clear, System priority - see buildCEMI's `systemBroadcast`
+  // option) - genuinely different framing from every other write this class
+  // does, all of which are point-to-point tunneling. UNNUMBERED (no TPCI
+  // sequence, no managementSession()/T_Connect - broadcast destinations don't
+  // carry a transport-layer connection to ack/sequence against). Real standard
+  // KNX procedure, sourced from Falcon SDK's own doc comments + Calimero's real
+  // implementation - see knx_serial_number_addressing_research memory.
+  // **Zero real-hardware confirmation as of this writing** - every other
+  // protocol path in this codebase has a real capture behind it; this one
+  // doesn't yet.
+
+  /**
+   * Broadcast A_IndividualAddressSerialNumber_Write - assigns `newAddr` to
+   * whichever device on the bus matches `serial` (6 bytes). Fire-and-forget
+   * at the protocol level (the service itself has no response) - call
+   * `readIndividualAddressBySerial()` afterward to verify, or use
+   * `assignIndividualAddressBySerial()` which does both.
+   */
+  async writeIndividualAddressBySerial(
+    serial: Buffer,
+    newAddr: string,
+  ): Promise<{ ok: boolean }> {
+    if (!this.connected) throw new Error('Not connected');
+    const apdu = apduIndividualAddressSerialNumberWrite(serial, newAddr);
+    const cemi = buildCEMI(this.localAddr, '0.0.0', apdu, false, {
+      systemBroadcast: true,
+    });
+    await this.sendCEMI(cemi);
+    return { ok: true };
+  }
+
+  /**
+   * Broadcast A_IndividualAddressSerialNumber_Read and wait for the one
+   * device whose own serial number matches to answer. Not correlated by
+   * source address (unknown ahead of time - that's the whole point of
+   * addressing by serial) - matched instead by the serial number embedded
+   * in the reply payload, and by the exact 10-bit response APCI (not just
+   * the generic 'OTHER' bucket several extended services share) to avoid
+   * mistaking an unrelated concurrent exchange for our response. Returns
+   * null on timeout (no matching device answered).
+   */
+  readIndividualAddressBySerial(
+    serial: Buffer,
+    timeoutMs: number = 3000,
+  ): Promise<{ address: string } | null> {
+    if (!this.connected) throw new Error('Not connected');
+    return new Promise((resolve, reject) => {
+      const onMgmt = (cemi: CemiFrame): void => {
+        if (cemi.apdu.length < 2) return;
+        const fullApci = ((cemi.apdu[0]! & 0x03) << 8) | cemi.apdu[1]!;
+        if (fullApci !== APCI_EXT.IndividualAddressSerialNumber_Response)
+          return;
+        const resp = parseIndividualAddressSerialNumberResponse(cemi);
+        if (resp.serial.equals(serial)) {
+          clearTimeout(timer);
+          this.off('_mgmt', onMgmt);
+          resolve({ address: resp.address });
+        }
+      };
+      const timer = setTimeout(() => {
+        this.off('_mgmt', onMgmt);
+        resolve(null);
+      }, timeoutMs);
+      this.on('_mgmt', onMgmt);
+      const apdu = apduIndividualAddressSerialNumberRead(serial);
+      const cemi = buildCEMI(this.localAddr, '0.0.0', apdu, false, {
+        systemBroadcast: true,
+      });
+      this.sendCEMI(cemi).catch((err: Error) => {
+        clearTimeout(timer);
+        this.off('_mgmt', onMgmt);
+        reject(err);
+      });
+    });
+  }
+
+  /**
+   * Write-then-read-verify, mirroring Calimero's real
+   * ManagementProceduresImpl.writeAddress() procedure: broadcast the
+   * Write, then broadcast a Read as verification and compare. Deliberately
+   * no precondition check that the device isn't already addressed - per
+   * Calimero's real implementation this can re-address an already-
+   * configured device too, not just commission a blank one. No Restart
+   * afterward - this is standalone address assignment, simpler than and
+   * separate from downloadDevice()'s RelSegment content-write flow.
+   */
+  async assignIndividualAddressBySerial(
+    serial: Buffer,
+    newAddr: string,
+    timeoutMs: number = 3000,
+  ): Promise<{ ok: boolean; verified: boolean; address: string | null }> {
+    await this.writeIndividualAddressBySerial(serial, newAddr);
+    const chk = await this.readIndividualAddressBySerial(serial, timeoutMs);
+    return { ok: true, verified: chk?.address === newAddr, address: chk?.address ?? null };
   }
 
   // ── Application download ──────────────────────────────────────────────────────

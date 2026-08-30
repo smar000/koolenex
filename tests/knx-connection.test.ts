@@ -341,6 +341,145 @@ describe('KnxConnection.programIA', () => {
   });
 });
 
+// ── KnxConnection: individual address by serial number ───────────────────────
+// NM_IndividualAddress_SerialNumber_Write/_Read (spec 3/5/2 §2.5/§2.4) - see
+// knx_serial_number_addressing_research memory. No real-hardware capture
+// backs this yet - these tests only cover the protocol-level shape (frame
+// addressing, system-broadcast priority bit, response matching by serial,
+// not by source address).
+
+describe('KnxConnection.writeIndividualAddressBySerial', () => {
+  it('sends a system-broadcast frame addressed to 0.0.0', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+    const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
+
+    const result = await conn.writeIndividualAddressBySerial(serial, '1.1.20');
+    assert.deepEqual(result, { ok: true });
+    assert.equal(conn.sent.length, 1);
+
+    const parsed = parseCEMI(conn.sent[0]!);
+    assert.ok(parsed);
+    assert.equal(parsed.dst, '0.0.0');
+    assert.equal(parsed.isGroup, false);
+    // ctrl1 (byte 2): system broadcast + System priority, not the ordinary
+    // 0xBC every other frame this codebase builds uses.
+    assert.equal(conn.sent[0]![2], 0xa0);
+  });
+
+  it('throws when not connected', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = false;
+    await assert.rejects(
+      () =>
+        conn.writeIndividualAddressBySerial(Buffer.alloc(6), '1.1.20'),
+      { message: 'Not connected' },
+    );
+  });
+});
+
+describe('KnxConnection.readIndividualAddressBySerial', () => {
+  it('resolves with the address from a matching broadcast reply', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+    const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
+
+    const p = conn.readIndividualAddressBySerial(serial, 500);
+    // Simulate the device's real broadcast reply, matched by serial rather
+    // than by a known source address (unknown ahead of time).
+    const apduData = Buffer.concat([serial, encodePhysical('1.1.20')]);
+    const apdu = Buffer.concat([
+      Buffer.from([0x03, 0xdd & 0xff]), // TPCI=DATA_GROUP + full APCI 0x3DD
+      apduData,
+    ]);
+    conn.simulateMgmtFrame({
+      msgCode: 0x29,
+      src: '15.15.255',
+      dst: '0.0.0',
+      isGroup: false,
+      apciIdx: null,
+      apciName: 'OTHER',
+      apduData,
+      apdu,
+      tpciType: 'DATA_GROUP',
+    });
+
+    const result = await p;
+    assert.deepEqual(result, { address: '1.1.20' });
+  });
+
+  it('ignores a reply for a different serial number and eventually times out', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+    const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
+    const otherSerial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x95]);
+
+    const p = conn.readIndividualAddressBySerial(serial, 50);
+    const apduData = Buffer.concat([otherSerial, encodePhysical('1.1.21')]);
+    const apdu = Buffer.concat([Buffer.from([0x03, 0xdd]), apduData]);
+    conn.simulateMgmtFrame({
+      msgCode: 0x29,
+      src: '15.15.255',
+      dst: '0.0.0',
+      isGroup: false,
+      apciIdx: null,
+      apciName: 'OTHER',
+      apduData,
+      apdu,
+      tpciType: 'DATA_GROUP',
+    });
+
+    const result = await p;
+    assert.equal(result, null);
+  });
+
+  it('throws when not connected', () => {
+    // Synchronous throw, same shape as read()/write() above - the
+    // connected-check runs before the `new Promise(...)` is even
+    // constructed, so it's a plain thrown error, not a rejected promise.
+    const conn = new TestKnxConnection();
+    conn.connected = false;
+    assert.throws(
+      () => conn.readIndividualAddressBySerial(Buffer.alloc(6)),
+      /Not connected/,
+    );
+  });
+});
+
+describe('KnxConnection.assignIndividualAddressBySerial', () => {
+  it('writes then reads back to verify', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+    const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
+
+    const assignP = conn.assignIndividualAddressBySerial(serial, '1.1.20', 500);
+    // Let the Write's sendCEMI (a resolved promise) settle before the Read
+    // is issued, then answer the Read.
+    await delay(10);
+    const apduData = Buffer.concat([serial, encodePhysical('1.1.20')]);
+    const apdu = Buffer.concat([Buffer.from([0x03, 0xdd]), apduData]);
+    conn.simulateMgmtFrame({
+      msgCode: 0x29,
+      src: '1.1.20',
+      dst: '0.0.0',
+      isGroup: false,
+      apciIdx: null,
+      apciName: 'OTHER',
+      apduData,
+      apdu,
+      tpciType: 'DATA_GROUP',
+    });
+
+    const result = await assignP;
+    assert.deepEqual(result, { ok: true, verified: true, address: '1.1.20' });
+    assert.equal(conn.sent.length, 2); // Write, then Read
+  });
+});
+
 // ── KnxConnection.scan ───────────────────────────────────────────────────────
 
 describe('KnxConnection.scan', () => {

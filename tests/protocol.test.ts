@@ -379,6 +379,77 @@ describe('APDU: apduPropertyValueWrite', () => {
   });
 });
 
+// ── Serial-number individual-address addressing ─────────────────────────────
+// NM_IndividualAddress_SerialNumber_Write/_Read (spec 3/5/2 §2.5/§2.4) - see
+// knx_serial_number_addressing_research memory for the real sourcing (Falcon
+// SDK doc comments + Calimero's real implementation). No real-hardware
+// capture exists for this service yet - these tests only pin down the wire
+// format against the two independent sources it was derived from.
+
+import {
+  APCI_EXT,
+  apduIndividualAddressSerialNumberWrite,
+  apduIndividualAddressSerialNumberRead,
+  parseIndividualAddressSerialNumberResponse,
+} from '../server/knx-connection.ts';
+
+describe('APDU: apduIndividualAddressSerialNumberWrite', () => {
+  it('builds a 14-byte APDU: 2 header + 6 serial + 2 address + 4 reserved', () => {
+    const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
+    const apdu = apduIndividualAddressSerialNumberWrite(serial, '1.1.20');
+    assert.equal(apdu.length, 14);
+    // TPCI=DATA_GROUP (unnumbered) + full APCI 0x3DE
+    const fullApci = ((apdu[0]! & 0x03) << 8) | apdu[1]!;
+    assert.equal(fullApci, APCI_EXT.IndividualAddressSerialNumber_Write);
+    assert.deepEqual([...apdu.slice(2, 8)], [...serial]);
+    assert.equal(apdu[8], (1 << 4) | 1); // area.line
+    assert.equal(apdu[9], 20); // device
+    assert.deepEqual([...apdu.slice(10, 14)], [0, 0, 0, 0]); // reserved
+  });
+
+  it('rejects a serial number that is not 6 bytes', () => {
+    assert.throws(() =>
+      apduIndividualAddressSerialNumberWrite(Buffer.from([1, 2, 3]), '1.1.1'),
+    );
+  });
+});
+
+describe('APDU: apduIndividualAddressSerialNumberRead', () => {
+  it('builds an 8-byte APDU: 2 header + 6 serial, no address/reserved', () => {
+    const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
+    const apdu = apduIndividualAddressSerialNumberRead(serial);
+    assert.equal(apdu.length, 8);
+    const fullApci = ((apdu[0]! & 0x03) << 8) | apdu[1]!;
+    assert.equal(fullApci, APCI_EXT.IndividualAddressSerialNumber_Read);
+    assert.deepEqual([...apdu.slice(2, 8)], [...serial]);
+  });
+});
+
+describe('parseIndividualAddressSerialNumberResponse', () => {
+  it('decodes a 6-byte serial + 2-byte address payload', () => {
+    const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
+    const apduData = Buffer.concat([serial, Buffer.from([0x11, 0x14])]); // 1.1.20
+    const frame = { apduData } as any;
+    const resp = parseIndividualAddressSerialNumberResponse(frame);
+    assert.deepEqual([...resp.serial], [...serial]);
+    assert.equal(resp.address, '1.1.20');
+  });
+});
+
+describe('buildCEMI: systemBroadcast option', () => {
+  it('leaves every existing call site byte-for-byte unchanged (default ctrl1)', () => {
+    const cemi = buildCEMI('1.1.1', '1/0/0', apduGroupRead(), true);
+    assert.equal(cemi[2], 0xbc);
+  });
+
+  it('sets ctrl1 = 0xA0 (system broadcast, System priority) when opted in', () => {
+    const cemi = buildCEMI('1.1.1', '0.0.0', apduGroupRead(), false, {
+      systemBroadcast: true,
+    });
+    assert.equal(cemi[2], 0xa0);
+  });
+});
+
 // ── GA and association table builders ───────────────────────────────────────
 
 import { buildGATable, buildAssocTable } from '../server/routes/index.ts';

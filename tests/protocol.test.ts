@@ -99,6 +99,14 @@ describe('KNXnet/IP: pktDisconnect', () => {
     assert.equal(pkt.length, 16);
     assert.equal(pkt.readUInt16BE(2), SVC.DISCONNECT_REQ);
     assert.equal(pkt[6], 0x42);
+    assert.equal(pkt[9], 0x01); // HPAI protocol code defaults to UDP
+  });
+
+  it('uses the placeholder HPAI (0.0.0.0:0, protocol TCP) when hostProtocol=TCP', () => {
+    const pkt = pktDisconnect(0x42, '0.0.0.0', 0, HOST_PROTOCOL.TCP);
+    assert.equal(pkt[9], 0x02); // HPAI protocol code
+    assert.deepEqual([...pkt.slice(10, 14)], [0, 0, 0, 0]);
+    assert.equal(pkt.readUInt16BE(14), 0);
   });
 });
 
@@ -412,6 +420,8 @@ import {
   apduIndividualAddressSerialNumberWrite,
   apduIndividualAddressSerialNumberRead,
   parseIndividualAddressSerialNumberResponse,
+  apduSystemNetworkParamRead,
+  parseSystemNetworkParamResponse,
 } from '../server/knx-connection.ts';
 
 describe('APDU: apduIndividualAddressSerialNumberWrite', () => {
@@ -447,24 +457,82 @@ describe('APDU: apduIndividualAddressSerialNumberRead', () => {
 });
 
 describe('parseIndividualAddressSerialNumberResponse', () => {
-  it('decodes a 6-byte serial + 2-byte address payload', () => {
+  it('decodes the serial from payload bytes 0-6, address from frame.src', () => {
+    // Real payload shape confirmed against ETS traffic (tshark capture,
+    // 2026-08-30): [serial(6)][4 reserved zero bytes] - there is no
+    // address field in the payload, the device's address is carried by
+    // frame.src instead. See knx_serial_number_addressing_research memory.
     const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
-    const apduData = Buffer.concat([serial, Buffer.from([0x11, 0x14])]); // 1.1.20
-    const frame = { apduData } as any;
+    const apduData = Buffer.concat([serial, Buffer.alloc(4)]);
+    const frame = { apduData, src: '1.1.20' } as any;
     const resp = parseIndividualAddressSerialNumberResponse(frame);
     assert.deepEqual([...resp.serial], [...serial]);
     assert.equal(resp.address, '1.1.20');
   });
 });
 
-describe('buildCEMI: systemBroadcast option', () => {
+describe('APDU: apduSystemNetworkParamRead', () => {
+  it('builds the exact APDU real ETS sends for NM_Read_SerialNumber_By_ProgrammingMode', () => {
+    // Confirmed byte-for-byte against a real tshark capture of ETS's own
+    // commissioning flow, 2026-08-30 - see
+    // knx_serial_number_addressing_research memory.
+    const apdu = apduSystemNetworkParamRead(0, 11, 1);
+    assert.deepEqual(
+      [...apdu],
+      [0x01, 0xc8, 0x00, 0x00, 0x00, 0xb0, 0x01],
+    );
+    const fullApci = ((apdu[0]! & 0x03) << 8) | apdu[1]!;
+    assert.equal(fullApci, APCI_EXT.SystemNetworkParam_Read);
+  });
+
+  it('appends additionalTestInfo after the operand byte', () => {
+    const apdu = apduSystemNetworkParamRead(0, 11, 1, Buffer.from([0xaa]));
+    assert.equal(apdu.length, 8);
+    assert.equal(apdu[7], 0xaa);
+  });
+});
+
+describe('parseSystemNetworkParamResponse', () => {
+  it('skips the echoed operand byte before the value - real captured shape', () => {
+    // Real captured response payload:
+    // [objType(2)=0000][pidField(2)=00b0][echoedOperand=01][serial(6)]
+    const apduData = Buffer.from([
+      0x00, 0x00, 0x00, 0xb0, 0x01, 0x00, 0x0a, 0x57, 0x82, 0x04, 0x19,
+    ]);
+    const frame = { apduData } as any;
+    const resp = parseSystemNetworkParamResponse(frame);
+    assert.equal(resp.objectType, 0);
+    assert.equal(resp.pid, 11);
+    assert.deepEqual(
+      [...resp.value],
+      [0x00, 0x0a, 0x57, 0x82, 0x04, 0x19],
+    );
+  });
+
+  it('returns an empty value when the payload is too short (unsupported)', () => {
+    const apduData = Buffer.from([0x00, 0x00, 0x00, 0xb0]);
+    const frame = { apduData } as any;
+    const resp = parseSystemNetworkParamResponse(frame);
+    assert.equal(resp.value.length, 0);
+  });
+});
+
+describe('buildCEMI: priority and systemBroadcast options', () => {
   it('leaves every existing call site byte-for-byte unchanged (default ctrl1)', () => {
     const cemi = buildCEMI('1.1.1', '1/0/0', apduGroupRead(), true);
     assert.equal(cemi[2], 0xbc);
   });
 
-  it('sets ctrl1 = 0xA0 (system broadcast, System priority) when opted in', () => {
+  it('sets ctrl1 = 0xB0 (ordinary broadcast, System priority) for priority: "system" - confirmed against real ETS traffic', () => {
+    const cemi = buildCEMI('1.1.1', '0/0/0', apduGroupRead(), true, {
+      priority: 'system',
+    });
+    assert.equal(cemi[2], 0xb0);
+  });
+
+  it('sets ctrl1 = 0xA0 (system broadcast, System priority) when both options combined', () => {
     const cemi = buildCEMI('1.1.1', '0.0.0', apduGroupRead(), false, {
+      priority: 'system',
       systemBroadcast: true,
     });
     assert.equal(cemi[2], 0xa0);

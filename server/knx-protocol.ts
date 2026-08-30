@@ -66,11 +66,12 @@ function pktDisconnect(
   channelId: number,
   localIp: string,
   localPort: number,
+  hostProtocol: number = HOST_PROTOCOL.UDP,
 ): Buffer {
   return Buffer.concat([
     hdr(SVC.DISCONNECT_REQ, 16),
     Buffer.from([channelId, 0x00]),
-    hpai(localIp, localPort),
+    hpai(localIp, localPort, hostProtocol),
   ]);
 }
 
@@ -289,6 +290,17 @@ class KnxIpConnection extends (KnxConnection as new () => InstanceType<
         clearTimeout(connectTimer);
         this.tcpSocket = socket;
         this.transport = 'tcp';
+        // Real bug found via real-hardware testing, 2026-08-30: dropping
+        // the KNXnet/IP-level CONNSTATE heartbeat for TCP is correct (see
+        // the doc comment on it below - Calimero never sends one either),
+        // but Node's plain net.Socket does NOT enable OS-level TCP
+        // keepalive by default. Without either, an idle connection (a few
+        // minutes with no traffic - completely normal between real
+        // commissioning actions) got silently dropped by the router/
+        // network path with zero signal on either side, only discovered on
+        // the next send attempt. TCP keepalive is the real fix - it's what
+        // the (correctly skipped) KNXnet/IP heartbeat was standing in for.
+        socket.setKeepAlive(true, 30000);
         // TCP's CONNECT_REQ uses the placeholder HPAI (0.0.0.0:0, protocol
         // TCP) - the socket itself is the real endpoint. localIp/localPort
         // are kept at their defaults; CONNSTATE/DISCONNECT over TCP reuse
@@ -386,15 +398,22 @@ class KnxIpConnection extends (KnxConnection as new () => InstanceType<
     if (msg.length >= 20) this.localAddr = decodePhysicalRaw(msg, 18);
 
     this.connected = true;
-    this._hbTimer = setInterval(() => {
-      this._sendRaw(
-        pktConnState(
-          this.channelId,
-          this.transport === 'tcp' ? '0.0.0.0' : this.localIp,
-          this.transport === 'tcp' ? 0 : this.localPort,
-        ),
-      );
-    }, 60000);
+    // Real, confirmed 2026-08-30 (same session as the TCP ACK fix above):
+    // the CONNSTATE heartbeat is UDP-only too - confirmed against
+    // Calimero's real client (ClientConnection.java: `if (!stream)
+    // Executor.execute(heartbeat, ...)` - the heartbeat monitor is never
+    // even started for a stream/TCP connection). TCP's own connection
+    // liveness (the 'close'/'error' handlers in _connectTcp) already
+    // covers what the heartbeat exists for over UDP. Sending it anyway
+    // over TCP was a real bug found via real-hardware testing: the
+    // CONNSTATE_REQ's HPAI was still built with the UDP protocol code
+    // (pktConnState wasn't updated the way pktConnect was), and the real
+    // connection dropped shortly after the first one fired.
+    if (this.transport !== 'tcp') {
+      this._hbTimer = setInterval(() => {
+        this._sendRaw(pktConnState(this.channelId, this.localIp, this.localPort));
+      }, 60000);
+    }
 
     this.emit('connected');
     this.emit('_connected');
@@ -515,11 +534,25 @@ class KnxIpConnection extends (KnxConnection as new () => InstanceType<
   }
 
   _sendCEMIOnce(cemi: Buffer, timeoutMs: number): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const seq = this.seqOut;
-      this.seqOut = (this.seqOut + 1) & 0xff;
-      const pkt = pktTunnelingReq(this.channelId, seq, cemi);
+    const seq = this.seqOut;
+    this.seqOut = (this.seqOut + 1) & 0xff;
+    const pkt = pktTunnelingReq(this.channelId, seq, cemi);
 
+    // Real, confirmed 2026-08-30: over TCP, KNXnet/IP servers don't send a
+    // TUNNELING_ACK at all - TCP's own delivery guarantee makes the ack
+    // redundant, and real ETS traffic against this project's own testbed
+    // router never carries one either. Confirmed against Calimero's real
+    // client (ClientConnection.java): "with tcp, service acks are not
+    // required and just ignored". Waiting for one over TCP (as this
+    // function still does for UDP, where the ack is real and required)
+    // caused every TCP-tunneled call after the first to hang until
+    // timeout - found via real-hardware testing, not by inspection.
+    if (this.transport === 'tcp') {
+      this._sendRaw(pkt);
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this._pendingAck = null;
         reject(new Error('Tunneling ACK timeout'));
@@ -541,11 +574,9 @@ class KnxIpConnection extends (KnxConnection as new () => InstanceType<
     if (this.connected) {
       try {
         this._sendRaw(
-          pktDisconnect(
-            this.channelId,
-            this.transport === 'tcp' ? '0.0.0.0' : this.localIp,
-            this.transport === 'tcp' ? 0 : this.localPort,
-          ),
+          this.transport === 'tcp'
+            ? pktDisconnect(this.channelId, '0.0.0.0', 0, HOST_PROTOCOL.TCP)
+            : pktDisconnect(this.channelId, this.localIp, this.localPort),
         );
       } catch (_) {}
     }

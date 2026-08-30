@@ -857,6 +857,38 @@ router.post(
   },
 );
 
+// Real KNX network-management procedure NM_Read_SerialNumber_By_
+// ProgrammingMode: query the serial number of whichever device(s) are
+// currently in physical programming mode - no prior knowledge of the
+// device needed. Unlike /bus/check-programming-mode above, collects every
+// reply within the timeout window rather than stopping at the first -
+// real-hardware confirmed (2026-08-30) that multiple devices reply cleanly
+// with no collision, which matters specifically for genuinely blank
+// devices, whose *addresses* would be indistinguishable (same factory
+// default) but whose serials are always unique.
+router.post(
+  '/bus/read-serials-in-programming-mode',
+  async (req: Request, res: Response) => {
+    const b = requireBus(res);
+    if (!b) return;
+    const body = validateBody(
+      req,
+      z.object({ timeoutMs: z.number().int().min(100).max(30000).optional() }),
+    );
+    if (!b.connected) return res.status(409).json({ error: 'Bus not connected' });
+    try {
+      const devices = await b.readSerialNumbersInProgrammingMode(body.timeoutMs);
+      res.json({ devices });
+    } catch (e) {
+      res
+        .status(502)
+        .json({
+          error: safeError('bus', 'Read serials in programming mode failed', e),
+        });
+    }
+  },
+);
+
 // Assign an individual address via the device's own serial number
 // (NM_IndividualAddress_SerialNumber_Write/_Read, spec 3/5/2 §2.5/§2.4) -
 // unlike /bus/program-ia above, this needs no physical programming-button

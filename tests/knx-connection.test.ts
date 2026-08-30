@@ -10,7 +10,6 @@ import {
   parseCEMI,
   buildCEMI,
   apduGroup,
-  encodePhysical,
   encodeGroup,
   delay,
   type DownloadStep,
@@ -383,22 +382,25 @@ describe('KnxConnection.programIA', () => {
 // service in this file gets.
 
 describe('KnxConnection.checkProgrammingMode', () => {
-  it('sends a system-broadcast A_IndividualAddress_Read to 0.0.0', async () => {
+  it('sends a GROUP-type A_IndividualAddress_Read to 0/0/0 at System priority', async () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
 
     const p = conn.checkProgrammingMode(50);
     await delay(10);
-    // Sent via Routing (multicast), not Tunneling - see
-    // knx_routing_transport_gap memory.
-    assert.equal(conn.sentViaRouting.length, 1);
-    const parsed = parseCEMI(conn.sentViaRouting[0]!);
+    // Sent via the normal Tunneling connection, GROUP-type to 0/0/0 -
+    // confirmed byte-for-byte against real ETS traffic, 2026-08-30 (see
+    // knx_serial_number_addressing_research memory) - NOT Routing, NOT
+    // an individual-type frame, both earlier (wrong) guesses this session
+    // made before the real capture settled it.
+    assert.equal(conn.sent.length, 1);
+    const parsed = parseCEMI(conn.sent[0]!);
     assert.ok(parsed);
-    assert.equal(parsed.dst, '0.0.0');
-    assert.equal(parsed.isGroup, false);
+    assert.equal(parsed.dst, '0/0/0');
+    assert.equal(parsed.isGroup, true);
     assert.equal(parsed.apciName, 'PhysicalAddress_Read');
-    assert.equal(conn.sentViaRouting[0]![2], 0xa0); // system broadcast, System priority
+    assert.equal(conn.sent[0]![2], 0xb0); // ordinary broadcast, System priority
     await p; // let the timeout settle so the test doesn't leave a dangling timer
   });
 
@@ -444,6 +446,149 @@ describe('KnxConnection.checkProgrammingMode', () => {
   });
 });
 
+// ── KnxConnection.readSerialNumbersInProgrammingMode ──────────────────────────
+// NM_Read_SerialNumber_By_ProgrammingMode - confirmed byte-for-byte against
+// real ETS traffic (tshark capture, 2026-08-30, see
+// knx_serial_number_addressing_research memory): A_SystemNetworkParameter_
+// Read/Response for PID_SERIAL_NUMBER (11) on object type 0 (Device),
+// GROUP-type frame to 0/0/0 at System priority, response payload
+// [objectType(2)][pidField(2)][echoedOperand(1)][serial(6)].
+
+describe('KnxConnection.readSerialNumbersInProgrammingMode', () => {
+  it('sends a GROUP-type A_SystemNetworkParameter_Read to 0/0/0 at System priority', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const p = conn.readSerialNumbersInProgrammingMode(50);
+    await delay(10);
+    assert.equal(conn.sent.length, 1);
+    const parsed = parseCEMI(conn.sent[0]!);
+    assert.ok(parsed);
+    assert.equal(parsed.dst, '0/0/0');
+    assert.equal(parsed.isGroup, true);
+    assert.equal(conn.sent[0]![2], 0xb0); // ordinary broadcast, System priority
+    // fullApci 0x1C8 (SystemNetworkParam_Read), objType=0, pid=11<<4=0xB0, operand=1
+    assert.deepEqual(
+      [...parsed.apdu.slice(0, 7)],
+      [0x01, 0xc8, 0x00, 0x00, 0x00, 0xb0, 0x01],
+    );
+    await p;
+  });
+
+  it('collects a real device reply, using the byte after the echoed operand as the serial', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const p = conn.readSerialNumbersInProgrammingMode(50);
+    // Real captured shape: [objType(2)=0000][pidField(2)=00b0][echoedOperand=01][serial(6)]
+    const apduData = Buffer.from([
+      0x00, 0x00, 0x00, 0xb0, 0x01, 0x00, 0x0a, 0x57, 0x82, 0x04, 0x19,
+    ]);
+    const apdu = Buffer.concat([Buffer.from([0x01, 0xc9]), apduData]);
+    conn.simulateMgmtFrame({
+      msgCode: 0x29,
+      src: '15.15.255',
+      dst: '0/0/0',
+      isGroup: true,
+      apciIdx: null,
+      apciName: 'OTHER',
+      apduData,
+      apdu,
+      tpciType: 'DATA_GROUP',
+    });
+
+    const result = await p;
+    assert.deepEqual(result, [{ serial: '000a57820419', src: '15.15.255' }]);
+  });
+
+  it('collects multiple distinct devices within the window (no collision, per real testing)', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const p = conn.readSerialNumbersInProgrammingMode(50);
+    const makeApdu = (serial: number[]): { apdu: Buffer; apduData: Buffer } => {
+      const apduData = Buffer.from([0x00, 0x00, 0x00, 0xb0, 0x01, ...serial]);
+      return { apduData, apdu: Buffer.concat([Buffer.from([0x01, 0xc9]), apduData]) };
+    };
+    const a = makeApdu([0x00, 0x0a, 0x57, 0x82, 0x04, 0x19]);
+    const b = makeApdu([0x00, 0x73, 0x3c, 0x00, 0x5b, 0x42]);
+    conn.simulateMgmtFrame({
+      msgCode: 0x29,
+      src: '15.15.255',
+      dst: '0/0/0',
+      isGroup: true,
+      apciIdx: null,
+      apciName: 'OTHER',
+      apduData: a.apduData,
+      apdu: a.apdu,
+      tpciType: 'DATA_GROUP',
+    });
+    conn.simulateMgmtFrame({
+      msgCode: 0x29,
+      src: '15.15.255',
+      dst: '0/0/0',
+      isGroup: true,
+      apciIdx: null,
+      apciName: 'OTHER',
+      apduData: b.apduData,
+      apdu: b.apdu,
+      tpciType: 'DATA_GROUP',
+    });
+
+    const result = await p;
+    const serials = result.map((r) => r.serial).sort();
+    assert.deepEqual(serials, ['000a57820419', '00733c005b42'].sort());
+  });
+
+  it('de-duplicates repeated replies from the same device (normal KNX frame repetition)', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const p = conn.readSerialNumbersInProgrammingMode(50);
+    const apduData = Buffer.from([
+      0x00, 0x00, 0x00, 0xb0, 0x01, 0x00, 0x0a, 0x57, 0x82, 0x04, 0x19,
+    ]);
+    const apdu = Buffer.concat([Buffer.from([0x01, 0xc9]), apduData]);
+    for (let i = 0; i < 2; i++) {
+      conn.simulateMgmtFrame({
+        msgCode: 0x29,
+        src: '15.15.255',
+        dst: '0/0/0',
+        isGroup: true,
+        apciIdx: null,
+        apciName: 'OTHER',
+        apduData,
+        apdu,
+        tpciType: 'DATA_GROUP',
+      });
+    }
+
+    const result = await p;
+    assert.equal(result.length, 1);
+  });
+
+  it('resolves with an empty array on timeout when nothing answers', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+    const result = await conn.readSerialNumbersInProgrammingMode(50);
+    assert.deepEqual(result, []);
+  });
+
+  it('throws when not connected', () => {
+    const conn = new TestKnxConnection();
+    conn.connected = false;
+    assert.throws(
+      () => conn.readSerialNumbersInProgrammingMode(),
+      /Not connected/,
+    );
+  });
+});
+
 // ── KnxConnection: individual address by serial number ───────────────────────
 // NM_IndividualAddress_SerialNumber_Write/_Read (spec 3/5/2 §2.5/§2.4) - see
 // knx_serial_number_addressing_research memory. No real-hardware capture
@@ -452,7 +597,7 @@ describe('KnxConnection.checkProgrammingMode', () => {
 // not by source address).
 
 describe('KnxConnection.writeIndividualAddressBySerial', () => {
-  it('sends a system-broadcast frame addressed to 0.0.0', async () => {
+  it('sends a GROUP-type frame to 0/0/0 at System priority', async () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
@@ -460,17 +605,18 @@ describe('KnxConnection.writeIndividualAddressBySerial', () => {
 
     const result = await conn.writeIndividualAddressBySerial(serial, '1.1.20');
     assert.deepEqual(result, { ok: true });
-    // Sent via Routing (multicast), not Tunneling - see
-    // knx_routing_transport_gap memory.
-    assert.equal(conn.sentViaRouting.length, 1);
+    // Sent via the normal Tunneling connection, GROUP-type to 0/0/0 -
+    // confirmed byte-for-byte against real ETS traffic, 2026-08-30 (see
+    // knx_serial_number_addressing_research memory).
+    assert.equal(conn.sent.length, 1);
 
-    const parsed = parseCEMI(conn.sentViaRouting[0]!);
+    const parsed = parseCEMI(conn.sent[0]!);
     assert.ok(parsed);
-    assert.equal(parsed.dst, '0.0.0');
-    assert.equal(parsed.isGroup, false);
-    // ctrl1 (byte 2): system broadcast + System priority, not the ordinary
-    // 0xBC every other frame this codebase builds uses.
-    assert.equal(conn.sentViaRouting[0]![2], 0xa0);
+    assert.equal(parsed.dst, '0/0/0');
+    assert.equal(parsed.isGroup, true);
+    // ctrl1 (byte 2): ordinary broadcast + System priority (0xB0), not
+    // the plain 0xBC every other frame this codebase builds uses.
+    assert.equal(conn.sent[0]![2], 0xb0);
   });
 
   it('throws when not connected', async () => {
@@ -492,18 +638,21 @@ describe('KnxConnection.readIndividualAddressBySerial', () => {
     const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
 
     const p = conn.readIndividualAddressBySerial(serial, 500);
-    // Simulate the device's real broadcast reply, matched by serial rather
-    // than by a known source address (unknown ahead of time).
-    const apduData = Buffer.concat([serial, encodePhysical('1.1.20')]);
+    // Simulate the device's real broadcast reply: [serial(6)][4 reserved
+    // zero bytes] - confirmed real payload shape (no address field at
+    // all), src carries the device's address instead. Matched by serial
+    // rather than by a known source address (unknown ahead of time) -
+    // see knx_serial_number_addressing_research memory.
+    const apduData = Buffer.concat([serial, Buffer.alloc(4)]);
     const apdu = Buffer.concat([
       Buffer.from([0x03, 0xdd & 0xff]), // TPCI=DATA_GROUP + full APCI 0x3DD
       apduData,
     ]);
     conn.simulateMgmtFrame({
       msgCode: 0x29,
-      src: '15.15.255',
-      dst: '0.0.0',
-      isGroup: false,
+      src: '1.1.20',
+      dst: '0/0/0',
+      isGroup: true,
       apciIdx: null,
       apciName: 'OTHER',
       apduData,
@@ -523,13 +672,13 @@ describe('KnxConnection.readIndividualAddressBySerial', () => {
     const otherSerial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x95]);
 
     const p = conn.readIndividualAddressBySerial(serial, 50);
-    const apduData = Buffer.concat([otherSerial, encodePhysical('1.1.21')]);
+    const apduData = Buffer.concat([otherSerial, Buffer.alloc(4)]);
     const apdu = Buffer.concat([Buffer.from([0x03, 0xdd]), apduData]);
     conn.simulateMgmtFrame({
       msgCode: 0x29,
-      src: '15.15.255',
-      dst: '0.0.0',
-      isGroup: false,
+      src: '1.1.21',
+      dst: '0/0/0',
+      isGroup: true,
       apciIdx: null,
       apciName: 'OTHER',
       apduData,
@@ -565,13 +714,16 @@ describe('KnxConnection.assignIndividualAddressBySerial', () => {
     // Let the Write's sendCEMI (a resolved promise) settle before the Read
     // is issued, then answer the Read.
     await delay(10);
-    const apduData = Buffer.concat([serial, encodePhysical('1.1.20')]);
+    // [serial(6)][4 reserved zero bytes] - confirmed real payload shape,
+    // src carries the device's (newly-assigned) address instead - see
+    // knx_serial_number_addressing_research memory.
+    const apduData = Buffer.concat([serial, Buffer.alloc(4)]);
     const apdu = Buffer.concat([Buffer.from([0x03, 0xdd]), apduData]);
     conn.simulateMgmtFrame({
       msgCode: 0x29,
       src: '1.1.20',
-      dst: '0.0.0',
-      isGroup: false,
+      dst: '0/0/0',
+      isGroup: true,
       apciIdx: null,
       apciName: 'OTHER',
       apduData,
@@ -581,9 +733,9 @@ describe('KnxConnection.assignIndividualAddressBySerial', () => {
 
     const result = await assignP;
     assert.deepEqual(result, { ok: true, verified: true, address: '1.1.20' });
-    // Both via Routing (multicast), not Tunneling - see
-    // knx_routing_transport_gap memory.
-    assert.equal(conn.sentViaRouting.length, 2); // Write, then Read
+    // Both via the normal Tunneling connection, GROUP-type to 0/0/0 -
+    // confirmed byte-for-byte against real ETS traffic, 2026-08-30.
+    assert.equal(conn.sent.length, 2); // Write, then Read
   });
 });
 

@@ -87,6 +87,70 @@ describe('KnxIpConnection._onTcpData (TCP stream reassembly)', () => {
   });
 });
 
+// ── KnxIpConnection._sendCEMIOnce: TCP skips the TUNNELING_ACK wait ──────────
+// Real, confirmed 2026-08-30: over TCP, KNXnet/IP servers don't send a
+// TUNNELING_ACK at all - matches Calimero's real client
+// ("with tcp, service acks are not required and just ignored"). Found via
+// real-hardware testing: waiting for one over TCP (as this codebase
+// previously did unconditionally) caused every call after the first in a
+// session to hang until timeout.
+
+describe('KnxIpConnection._sendCEMIOnce: TCP ACK skip', () => {
+  it('resolves immediately over TCP without waiting for a TUNNELING_ACK', async () => {
+    const conn = new (KnxIpConnection as any)();
+    conn.transport = 'tcp';
+    conn.tcpSocket = { write: () => {} };
+    const cemi = Buffer.from([0x29, 0x00, 0xbc, 0x60]);
+    await conn._sendCEMIOnce(cemi, 1000); // would hang/reject on timeout if this waited for an ack
+    assert.equal(conn._pendingAck, null);
+  });
+
+  it('still waits for a real TUNNELING_ACK over UDP (unchanged)', async () => {
+    const conn = new (KnxIpConnection as any)();
+    conn.transport = 'udp';
+    conn.udpSocket = { send: () => {} };
+    conn.host = '10.0.0.1';
+    const cemi = Buffer.from([0x29, 0x00, 0xbc, 0x60]);
+    const p = conn._sendCEMIOnce(cemi, 1000);
+    assert.ok(conn._pendingAck !== null);
+    conn._pendingAck.resolve();
+    await p;
+  });
+});
+
+// ── KnxIpConnection._onConnectRes: TCP skips the CONNSTATE heartbeat ─────────
+// Real, confirmed 2026-08-30: TCP's own connection liveness (close/error
+// events) already covers what the heartbeat exists for over UDP - matches
+// Calimero's real client, which never even starts its heartbeat monitor for
+// a stream/TCP connection. Sending it anyway was a real bug found via
+// real-hardware testing (the connection dropped shortly after the first
+// one fired, sent with a mismatched HPAI protocol-code byte).
+
+function makeConnectRes(channelId: number): Buffer {
+  // header(6) + channelId(1) + reserved(1) + status(1) = 8 bytes minimum
+  return Buffer.concat([
+    hdr(SVC.CONNECT_RES, 8),
+    Buffer.from([channelId, 0x00, 0x00]),
+  ]);
+}
+
+describe('KnxIpConnection._onConnectRes: heartbeat', () => {
+  it('starts the CONNSTATE heartbeat for UDP', () => {
+    const conn = new (KnxIpConnection as any)();
+    conn.transport = 'udp';
+    conn._onConnectRes(makeConnectRes(0x01));
+    assert.ok(conn._hbTimer !== null);
+    clearInterval(conn._hbTimer);
+  });
+
+  it('does NOT start the CONNSTATE heartbeat for TCP', () => {
+    const conn = new (KnxIpConnection as any)();
+    conn.transport = 'tcp';
+    conn._onConnectRes(makeConnectRes(0x01));
+    assert.equal(conn._hbTimer, null);
+  });
+});
+
 // ── KnxIpConnection.sendCEMIViaRouting ────────────────────────────────────────
 // Overrides the base class's default-throw (knx-connection.test.ts) when a
 // Routing channel came up during connect(). See knx_routing_transport_gap

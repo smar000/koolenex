@@ -27,6 +27,8 @@ import {
   apduIndividualAddressSerialNumberWrite,
   apduIndividualAddressSerialNumberRead,
   parseIndividualAddressSerialNumberResponse,
+  apduSystemNetworkParamRead,
+  parseSystemNetworkParamResponse,
   encodePhysical,
   eventType,
   type CemiFrame,
@@ -60,11 +62,14 @@ export {
   apduIndividualAddressSerialNumberWrite,
   apduIndividualAddressSerialNumberRead,
   parseIndividualAddressSerialNumberResponse,
+  apduSystemNetworkParamRead,
+  parseSystemNetworkParamResponse,
   eventType,
 } from './knx-cemi.ts';
 export type {
   CemiFrame,
   IndividualAddressSerialNumberResponse,
+  SystemNetworkParamResponse,
 } from './knx-cemi.ts';
 export {
   _apduGroupRead,
@@ -236,7 +241,23 @@ export class KnxConnection extends EventEmitter {
 
   /** Called by transport subclass when a CEMI frame is received from the bus. */
   _onCEMI(cemi: CemiFrame): void {
-    if (cemi.isGroup && cemi.apciName) {
+    // Real, confirmed 2026-08-30: KNX network-management "broadcast"
+    // services (individual-address discovery, serial-number addressing)
+    // use the GROUP address space's reserved broadcast address 0/0/0, not
+    // an individual-type frame to 0.0.0 - confirmed against Calimero's
+    // real TransportLayer.broadcast(): its `system` flag ("true for system
+    // broadcast, false for default (domain) broadcast") is false for
+    // writeAddress()/readAddress() (both plain and serial-number
+    // variants), which routes to `GroupAddress.Broadcast` (0/0/0), a real
+    // GROUP-type cEMI frame - not the individual-broadcast framing this
+    // codebase built and tested first. See knx_routing_transport_gap
+    // memory. 0/0/0 is never a legitimate application group address, so a
+    // reply here is routed to '_mgmt' (where checkProgrammingMode()/the
+    // serial-number services listen), not 'telegram', even though it's a
+    // GROUP-type frame.
+    if (cemi.isGroup && cemi.dst === '0/0/0') {
+      this.emit('_mgmt', cemi);
+    } else if (cemi.isGroup && cemi.apciName) {
       const raw = cemi.apduData.toString('hex');
       const decoded = decodeDptBuffer(cemi.apduData);
       const telegram: Telegram = {
@@ -451,26 +472,35 @@ export class KnxConnection extends EventEmitter {
    * KNX commissioning discovery service - the read-side counterpart to
    * programIA() above (which writes, this only detects/queries), and
    * complementary to (not the same mechanism as) the serial-number-based
-   * addressing below. Sent as a system broadcast (spec 3/5/2
-   * network-management framing) via sendCEMIViaRouting() - KNXnet/IP
-   * Routing (multicast), NOT the normal Tunneling connection.
+   * addressing below.
    *
-   * **Root cause found and fixed 2026-08-30.** An earlier version sent via
-   * Tunneling and got zero reply from two different real devices (one
-   * confirmed genuinely in programming mode via its LED) - Tunneling
-   * structurally cannot carry KNX "System Broadcast" services at all,
-   * confirmed both from that real-hardware testing and the Falcon SDK's
-   * own class model (`IpRoutingConnectorParameters.
-   * EnableIPSystemBroadcast` has no equivalent on
-   * `IpTunnelingConnectorParameters`). See knx_routing_transport_gap
-   * memory / docs/knx-device-write-protocol.md §9 for the full evidence
-   * trail. Diagnostic logging left in place deliberately, to ease
-   * re-verifying against real hardware now that Routing exists.
+   * **Real root cause found 2026-08-30 (second pass) - this was never a
+   * Tunneling-vs-Routing transport problem at all.** Two earlier framing
+   * attempts (individual-type frame to 0.0.0, both "ordinary" and "system"
+   * broadcast ctrl1) got zero reply via both Tunneling and Routing.
+   * Confirmed against Calimero's real reference implementation
+   * (`TransportLayer.broadcast(system, ...)`, doc comment: *"system: true
+   * for system broadcast, false for default (domain) broadcast"*) -
+   * `writeAddress()`/`readAddress()` (both the plain and serial-number
+   * variants) pass `system=false`, which sends to `GroupAddress.Broadcast`
+   * (group address `0/0/0`) - a real **GROUP-type** cEMI frame, not an
+   * individual-type one, and not "system broadcast" ctrl1 framing either.
+   * Calimero's own test suite for this exact procedure
+   * (`ManagementProceduresImplTest`) uses a plain `newTunnelingLink()` -
+   * confirming Tunneling was never the problem. See
+   * knx_routing_transport_gap memory for the fuller trail (kept for
+   * the real, separately-useful TCP Tunneling work that came out of that
+   * investigation).
    *
    * Real KNX precondition, not enforced here: only ONE device should be in
    * programming mode on a bus at a time - if more than one is, only the
-   * first response is surfaced, though every reply is a real, valid frame
-   * either way.
+   * first response is surfaced. Confirmed on real hardware, 2026-08-30:
+   * with two devices (different manufacturers) simultaneously in
+   * programming mode, BOTH replied cleanly with no collision/corruption -
+   * this function simply returns whichever arrives first and stops
+   * listening, silently not surfacing that a second device was also
+   * active. Real UX consideration for a future rollout tool, not
+   * addressed here.
    */
   checkProgrammingMode(
     timeoutMs: number = 3000,
@@ -479,8 +509,8 @@ export class KnxConnection extends EventEmitter {
     return new Promise((resolve, reject) => {
       const onMgmt = (cemi: CemiFrame): void => {
         // Diagnostic: log every incoming _mgmt frame during the wait
-        // window, not just ones that match - useful for re-verifying once
-        // a Routing connector exists (see doc comment above).
+        // window, not just ones that match - cheap to keep, useful if
+        // this ever needs re-verifying against different hardware.
         logger.info('knx', 'checkProgrammingMode: _mgmt frame seen', {
           src: cemi.src,
           apciName: cemi.apciName,
@@ -497,13 +527,77 @@ export class KnxConnection extends EventEmitter {
       }, timeoutMs);
       this.on('_mgmt', onMgmt);
       const apdu = apduGroup('PhysicalAddress_Read');
-      const cemi = buildCEMI(this.localAddr, '0.0.0', apdu, false, {
-        systemBroadcast: true,
+      // GROUP-type frame to 0/0/0 (KNX's "default broadcast" address) at
+      // System priority (ctrl1 0xB0) - confirmed byte-for-byte against
+      // real ETS traffic, 2026-08-30 (see this function's doc comment
+      // above).
+      const cemi = buildCEMI(this.localAddr, '0/0/0', apdu, true, {
+        priority: 'system',
       });
-      logger.info('knx', 'checkProgrammingMode: sending broadcast via Routing', {
+      logger.info('knx', 'checkProgrammingMode: sending broadcast', {
         cemiHex: cemi.toString('hex'),
       });
-      this.sendCEMIViaRouting(cemi).catch((err: Error) => {
+      this.sendCEMI(cemi).catch((err: Error) => {
+        clearTimeout(timer);
+        this.off('_mgmt', onMgmt);
+        reject(err);
+      });
+    });
+  }
+
+  /**
+   * Broadcast A_SystemNetworkParameter_Read for PID_SERIAL_NUMBER (object
+   * type 0 = Device) and collect every device's response for the full
+   * `timeoutMs` window - the real KNX network-management procedure
+   * NM_Read_SerialNumber_By_ProgrammingMode: query the serial number of
+   * whichever device(s) are currently in physical programming mode, no
+   * prior knowledge of any device needed at all. Unlike
+   * checkProgrammingMode() above, this deliberately does NOT stop on the
+   * first match - confirmed real-hardware evidence (2026-08-30, two
+   * different manufacturers simultaneously in programming mode) is that
+   * multiple devices reply cleanly with no collision, so collecting all of
+   * them is the whole point: for genuinely blank devices,
+   * checkProgrammingMode()'s address-based response can't tell two blank
+   * devices apart (both report the same factory-default address), but
+   * their serial numbers are always unique. Duplicates from normal KNX
+   * frame repetition are de-duplicated by serial.
+   *
+   * **Confirmed byte-for-byte against real ETS traffic** (tshark capture
+   * of ETS's own commissioning flow, 2026-08-30 - see
+   * knx_serial_number_addressing_research memory): sent as a GROUP-type
+   * frame to `0/0/0` at System priority (ctrl1 `0xB0`) - the same framing
+   * as checkProgrammingMode() and the address-assignment services below,
+   * NOT the individual-type "system broadcast" framing an earlier version
+   * of this function used (based on a since-corrected reading of
+   * Calimero's source that didn't match real ETS behavior).
+   */
+  readSerialNumbersInProgrammingMode(
+    timeoutMs: number = 3000,
+  ): Promise<Array<{ serial: string; src: string }>> {
+    if (!this.connected) throw new Error('Not connected');
+    return new Promise((resolve, reject) => {
+      const found = new Map<string, string>(); // serial hex -> src
+      const onMgmt = (cemi: CemiFrame): void => {
+        if (cemi.apdu.length < 2) return;
+        const fullApci = ((cemi.apdu[0]! & 0x03) << 8) | cemi.apdu[1]!;
+        if (fullApci !== APCI_EXT.SystemNetworkParam_Response) return;
+        const resp = parseSystemNetworkParamResponse(cemi);
+        if (resp.objectType !== 0 || resp.pid !== 11 || resp.value.length < 6)
+          return;
+        found.set(resp.value.slice(0, 6).toString('hex'), cemi.src);
+      };
+      const timer = setTimeout(() => {
+        this.off('_mgmt', onMgmt);
+        resolve(
+          [...found.entries()].map(([serial, src]) => ({ serial, src })),
+        );
+      }, timeoutMs);
+      this.on('_mgmt', onMgmt);
+      const apdu = apduSystemNetworkParamRead(0, 11, 1);
+      const cemi = buildCEMI(this.localAddr, '0/0/0', apdu, true, {
+        priority: 'system',
+      });
+      this.sendCEMI(cemi).catch((err: Error) => {
         clearTimeout(timer);
         this.off('_mgmt', onMgmt);
         reject(err);
@@ -516,19 +610,18 @@ export class KnxConnection extends EventEmitter {
   // or queries a device's individual address via its 6-byte KNX serial number,
   // with no physical programming-button press needed (unlike programIA() above,
   // which relies on the device being in programming mode and only one device
-  // responding). Sent as a SYSTEM broadcast (destination 0.0.0, ctrl1 "system
-  // broadcast" bit clear, System priority - see buildCEMI's `systemBroadcast`
-  // option) - genuinely different framing from every other write this class
-  // does, all of which are point-to-point tunneling. UNNUMBERED (no TPCI
-  // sequence, no managementSession()/T_Connect - broadcast destinations don't
-  // carry a transport-layer connection to ack/sequence against). Real standard
-  // KNX procedure, sourced from Falcon SDK's own doc comments + Calimero's real
+  // responding). GROUP-type frame to 0/0/0 (KNX's "default broadcast" address),
+  // ordinary ctrl1 framing, sent via the normal Tunneling connection - see
+  // checkProgrammingMode()'s doc comment above for the full real-hardware
+  // correction (2026-08-30, second pass): this is NOT "system broadcast"
+  // ctrl1 framing and NOT an individual-type frame, confirmed against
+  // Calimero's real reference implementation
+  // (`TransportLayer.broadcast(system=false, ...)` → `GroupAddress.
+  // Broadcast`). UNNUMBERED (no TPCI sequence, no managementSession()/
+  // T_Connect - broadcast destinations don't carry a transport-layer
+  // connection to ack/sequence against). Real standard KNX procedure,
+  // sourced from Falcon SDK's own doc comments + Calimero's real
   // implementation - see knx_serial_number_addressing_research memory.
-  // Sent via sendCEMIViaRouting() (KNXnet/IP Routing/multicast), NOT the
-  // normal Tunneling connection - see checkProgrammingMode()'s doc comment
-  // above / knx_routing_transport_gap memory for why: a real-hardware test
-  // sending this via Tunneling had no effect at all, root-caused to
-  // Tunneling structurally not carrying KNX "System Broadcast" services.
 
   /**
    * Broadcast A_IndividualAddressSerialNumber_Write - assigns `newAddr` to
@@ -543,10 +636,10 @@ export class KnxConnection extends EventEmitter {
   ): Promise<{ ok: boolean }> {
     if (!this.connected) throw new Error('Not connected');
     const apdu = apduIndividualAddressSerialNumberWrite(serial, newAddr);
-    const cemi = buildCEMI(this.localAddr, '0.0.0', apdu, false, {
-      systemBroadcast: true,
+    const cemi = buildCEMI(this.localAddr, '0/0/0', apdu, true, {
+      priority: 'system',
     });
-    await this.sendCEMIViaRouting(cemi);
+    await this.sendCEMI(cemi);
     return { ok: true };
   }
 
@@ -584,10 +677,10 @@ export class KnxConnection extends EventEmitter {
       }, timeoutMs);
       this.on('_mgmt', onMgmt);
       const apdu = apduIndividualAddressSerialNumberRead(serial);
-      const cemi = buildCEMI(this.localAddr, '0.0.0', apdu, false, {
-        systemBroadcast: true,
+      const cemi = buildCEMI(this.localAddr, '0/0/0', apdu, true, {
+        priority: 'system',
       });
-      this.sendCEMIViaRouting(cemi).catch((err: Error) => {
+      this.sendCEMI(cemi).catch((err: Error) => {
         clearTimeout(timer);
         this.off('_mgmt', onMgmt);
         reject(err);

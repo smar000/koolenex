@@ -33,6 +33,23 @@ export const APCI_EXT = {
   IndividualAddressSerialNumber_Read: 0x03dc,
   IndividualAddressSerialNumber_Response: 0x03dd,
   IndividualAddressSerialNumber_Write: 0x03de,
+  // A_SystemNetworkParameter_{Read,Response,Write} - reads/writes a
+  // network-wide interface-object property, e.g. PID_SERIAL_NUMBER
+  // (11) on object type 0 (Device) to implement
+  // NM_Read_SerialNumber_By_ProgrammingMode: query the serial number of
+  // whichever device(s) are currently in physical programming mode, no
+  // prior knowledge of the device needed at all. Real codes confirmed
+  // against Calimero's ManagementClientImpl.java
+  // (SystemNetworkParamRead/Response/Write = 0b0111001000/1/2). Unlike
+  // the individual-address services above, this one uses `system=true`
+  // in Calimero's own terms - an individual-type broadcast (dst 0.0.0,
+  // ctrl1 "system broadcast" bit clear), not the group-address 0/0/0
+  // "default broadcast" the address-assignment services use - confirmed
+  // by reading `sendSystemNetworkParameter()`'s own
+  // `tl.broadcast(true, ...)` call.
+  SystemNetworkParam_Read: 0x01c8,
+  SystemNetworkParam_Response: 0x01c9,
+  SystemNetworkParam_Write: 0x01ca,
 } as const;
 
 // 10-bit extended APCIs that need exact-match decoding (name by full code).
@@ -327,16 +344,87 @@ export interface IndividualAddressSerialNumberResponse {
 
 /**
  * Decode an A_IndividualAddressSerialNumber_Response payload: 6-byte
- * serial number + 2-byte individual address. Caller should verify the
- * serial matches the one it queried before trusting `address` - a
- * broadcast reply isn't otherwise correlated to the request the way a
+ * serial number + 4 reserved/zero bytes - there is NO address field in
+ * the payload at all. Real ETS traffic (tshark capture of ETS's own
+ * button-press + serial-number commissioning flow, 2026-08-30 - see
+ * knx_serial_number_addressing_research memory) confirms the device's
+ * address is instead communicated by *which device replies*
+ * (`frame.src`) - the same convention A_IndividualAddress_Response (the
+ * button-press discovery service) uses. An earlier version of this
+ * function wrongly decoded a 2-byte address from payload bytes 6-8,
+ * which don't exist for this purpose (real captures show them as zero) -
+ * this silently broke `readIndividualAddressBySerial()`'s verify step
+ * even when the underlying write demonstrably worked. Caller should
+ * verify `serial` matches the one it queried before trusting `address` -
+ * a broadcast reply isn't otherwise correlated to the request the way a
  * point-to-point managementSession() response is.
  */
 export function parseIndividualAddressSerialNumberResponse(
   frame: CemiFrame,
 ): IndividualAddressSerialNumberResponse {
   const d = frame.apduData;
-  return { serial: d.slice(0, 6), address: decodePhysical(d, 6) };
+  return { serial: d.slice(0, 6), address: frame.src };
+}
+
+/**
+ * A_SystemNetworkParameter_Read (0x1C8). Payload: [objectType(2, BE)]
+ * [pid<<4 (2, BE)][operand(1)][...additionalTestInfo]. Used here for
+ * NM_Read_SerialNumber_By_ProgrammingMode: objectType=0 (Device), pid=11
+ * (PID_SERIAL_NUMBER), operand=1. **Confirmed byte-for-byte against real
+ * ETS traffic** (tshark capture of ETS's own commissioning flow,
+ * 2026-08-30 - see knx_serial_number_addressing_research memory) - real
+ * ETS sends this exact APDU, repeated roughly every 3s while waiting for
+ * a device to enter programming mode. Sent as a GROUP-type frame to
+ * `0/0/0` with `{ priority: 'system' }` (ctrl1 `0xB0`), NOT the
+ * individual-type "system broadcast" framing an earlier version of this
+ * codebase used (see buildCEMI's doc comment).
+ */
+export function apduSystemNetworkParamRead(
+  objectType: number,
+  pid: number,
+  operand: number,
+  additionalTestInfo: Buffer = Buffer.alloc(0),
+): Buffer {
+  const asdu = Buffer.concat([
+    Buffer.from([
+      (objectType >> 8) & 0xff,
+      objectType & 0xff,
+      ((pid << 4) >> 8) & 0xff,
+      (pid << 4) & 0xff,
+    ]),
+    Buffer.from([operand & 0xff]),
+    additionalTestInfo,
+  ]);
+  return apduExtUnnumbered(APCI_EXT.SystemNetworkParam_Read, asdu);
+}
+
+export interface SystemNetworkParamResponse {
+  objectType: number;
+  pid: number;
+  value: Buffer;
+}
+
+/**
+ * Decode an A_SystemNetworkParameter_Response payload: [objectType(2,
+ * BE)][pid<<4 (2, BE)][echoedOperand(1)][...value]. Real ETS traffic
+ * (tshark capture, 2026-08-30 - see knx_serial_number_addressing_research
+ * memory) confirms a real device's response echoes the request's operand
+ * byte before the actual value - an earlier version of this parser missed
+ * that byte, reading `value` one byte too early (which happened to still
+ * "work" by accident for a 6-byte serial number read as 7 bytes with a
+ * leading operand byte, but was wrong). `value` is empty when the
+ * responding device reports the object type/PID/response as unsupported
+ * (per Calimero's own real decode logic) - callers should treat an empty
+ * `value` as "no data", not assume a fixed length.
+ */
+export function parseSystemNetworkParamResponse(
+  frame: CemiFrame,
+): SystemNetworkParamResponse {
+  const d = frame.apduData;
+  const objectType = (d[0]! << 8) | d[1]!;
+  const pid = ((d[2]! << 8) | d[3]!) >> 4;
+  const value = d.length > 5 ? d.slice(5) : Buffer.alloc(0);
+  return { objectType, pid, value };
 }
 
 export function apduControl(tpciCode: number, seq: number = 0): Buffer {
@@ -358,23 +446,30 @@ export function buildCEMI(
   dstAddr: string,
   apdu: Buffer,
   isGroup: boolean,
-  opts?: { systemBroadcast?: boolean },
+  opts?: { priority?: 'low' | 'system'; systemBroadcast?: boolean },
 ): Buffer {
   const src = encodePhysical(srcAddr || '0.0.0');
   const dst = isGroup ? encodeGroup(dstAddr) : encodePhysical(dstAddr);
   const cf2 = isGroup ? 0xe0 : 0x60;
   // Control Field 1: every other frame this module builds uses the fixed
   // ctrl1 = 0xBC (std frame / don't-repeat / "ordinary" broadcast type /
-  // Low priority) - fine for point-to-point and group traffic, and for the
-  // existing programIA() button-flow broadcast (A_PhysicalAddress_Write to
-  // 0.0.0). A_IndividualAddressSerialNumber_Write/_Read (spec 3/5/2
-  // §2.4/2.5) is the first service in this codebase that needs the OTHER
-  // broadcast type - "System Broadcast" (ctrl1 bit4=0) at System priority
-  // (bits3-2=00) - per Calimero's real reference implementation
-  // (`Priority.SYSTEM`) - see knx_serial_number_addressing_research memory.
+  // Low priority) - fine for point-to-point and group traffic. KNX
+  // network-management broadcast services (individual-address discovery,
+  // serial-number addressing, system-network-parameter reads) need System
+  // priority (bits3-2=00) - real ETS traffic confirms ctrl1=0xB0 for all
+  // of these (a real tshark capture of ETS's own button-press + serial-
+  // number commissioning flow, 2026-08-30 - see
+  // knx_serial_number_addressing_research memory), i.e. the *ordinary*
+  // broadcast bit (bit4=1) with System priority, not the "system
+  // broadcast" ctrl1 bit (bit4=0) an earlier guess this session had
+  // assumed. `systemBroadcast` is kept as a separate, still-available
+  // option (real, spec-defined value) for any future service that
+  // genuinely needs bit4=0, but nothing in this codebase currently does.
   // Opt-in so every existing call site's frame stays byte-for-byte
   // unchanged.
-  const ctrl1 = opts?.systemBroadcast ? 0xa0 : 0xbc;
+  let ctrl1 = 0xbc;
+  if (opts?.priority === 'system') ctrl1 &= ~0x0c; // bits3-2 -> 00 (System)
+  if (opts?.systemBroadcast) ctrl1 &= ~0x10; // bit4 -> 0 (system broadcast)
   const buf = Buffer.alloc(9 + apdu.length);
   buf[0] = MC.REQ;
   buf[1] = 0x00;

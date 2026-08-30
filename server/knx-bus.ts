@@ -251,6 +251,14 @@ class KnxBusManager extends EventEmitter {
     return this.connection.checkProgrammingMode(timeoutMs);
   }
 
+  readSerialNumbersInProgrammingMode(
+    timeoutMs?: number,
+  ): Promise<Array<{ serial: string; src: string }>> {
+    if (!this.connection || !this.connected)
+      return Promise.reject(new Error('Not connected to KNX bus'));
+    return this.connection.readSerialNumbersInProgrammingMode(timeoutMs);
+  }
+
   assignIndividualAddressBySerial(
     serial: Buffer,
     newAddr: string,

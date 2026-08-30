@@ -585,7 +585,6 @@ router.post('/bus/scan', async (req: Request, res: Response) => {
     }),
   );
   const { area, line, timeout } = body;
-  if (!b.connected) return res.status(409).json({ error: 'Not connected' });
   if (_activeScan) {
     b.abortScan();
     try {
@@ -624,13 +623,13 @@ router.post('/bus/device-info', async (req: Request, res: Response) => {
     z.object({ deviceAddress: z.string().min(1) }),
   );
   const { deviceAddress } = body;
-  if (!b.connected) return res.status(409).json({ error: 'Not connected' });
   try {
     const info = await b.readDeviceInfo(deviceAddress);
     res.json(info);
   } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
     res
-      .status(500)
+      .status(msg.includes('Not connected') ? 409 : 500)
       .json({ error: safeError('bus', 'Failed to read device info', e) });
   }
 });
@@ -651,6 +650,14 @@ router.post('/bus/read-memory', async (req: Request, res: Response) => {
         // already handles correctly.
         address: z.number().int().min(0).max(0xffffff),
         length: z.number().int().min(1).max(4096),
+        // Debug-only knob, added 2026-08-30 to bisect the real max safe
+        // MemoryExtended_Read chunk size on real hardware directly (a
+        // guessed value of 228, by analogy to the confirmed-safe write
+        // chunk size, was rejected by a real device with rc=252 - see
+        // readMemory()'s own comment in knx-connection.ts) - not exposed
+        // in the normal read path (readMemory()'s own default, 12,
+        // covers that).
+        chunkSize: z.number().int().min(1).max(255).optional(),
       })
       // Reads must not run past the top of the 24-bit extended address
       // space, or `address + off` would wrap.
@@ -659,10 +666,9 @@ router.post('/bus/read-memory', async (req: Request, res: Response) => {
         path: ['length'],
       }),
   );
-  const { deviceAddress, address, length } = body;
-  if (!b.connected) return res.status(409).json({ error: 'Not connected' });
+  const { deviceAddress, address, length, chunkSize } = body;
   try {
-    const data = await b.readMemory(deviceAddress, address, length);
+    const data = await b.readMemory(deviceAddress, address, length, chunkSize);
     res.json({
       deviceAddress,
       address,
@@ -670,7 +676,10 @@ router.post('/bus/read-memory', async (req: Request, res: Response) => {
       hex: data.toString('hex'),
     });
   } catch (e) {
-    res.status(502).json({ error: safeError('bus', 'Memory read failed', e) });
+    const msg = e instanceof Error ? e.message : String(e);
+    res
+      .status(msg.includes('Not connected') ? 409 : 502)
+      .json({ error: safeError('bus', 'Memory read failed', e) });
   }
 });
 
@@ -715,7 +724,6 @@ router.post('/bus/write-memory', async (req: Request, res: Response) => {
     }),
   );
   const { deviceAddress, address, hex, relSegment } = body;
-  if (!b.connected) return res.status(409).json({ error: 'Not connected' });
   const data = Buffer.from(hex, 'hex');
   const objIdx = relSegment?.objIdx ?? 0;
   const steps = relSegment
@@ -751,7 +759,10 @@ router.post('/bus/write-memory', async (req: Request, res: Response) => {
     });
     res.json({ deviceAddress, address, hex, byteCount: data.length, loadSequence: !!relSegment });
   } catch (e) {
-    res.status(502).json({ error: safeError('bus', 'Memory write failed', e) });
+    const msg = e instanceof Error ? e.message : String(e);
+    res
+      .status(msg.includes('Not connected') ? 409 : 502)
+      .json({ error: safeError('bus', 'Memory write failed', e) });
   }
 });
 
@@ -775,7 +786,6 @@ router.post('/bus/replay-frames', async (req: Request, res: Response) => {
     }),
   );
   const { deviceAddress, frames, delayMs } = body;
-  if (!b.connected) return res.status(409).json({ error: 'Not connected' });
   try {
     const buffers = frames.map((h) => Buffer.from(h, 'hex'));
     await b.replayFrames(deviceAddress, buffers, delayMs);
@@ -802,7 +812,6 @@ router.post('/bus/read-property', async (req: Request, res: Response) => {
     }),
   );
   const { deviceAddress, objIdx, propId } = body;
-  if (!b.connected) return res.status(409).json({ error: 'Not connected' });
   try {
     const [data] = await b.readPropertyMany(deviceAddress, [
       { objIdx, propId },
@@ -814,7 +823,10 @@ router.post('/bus/read-property', async (req: Request, res: Response) => {
       hex: (data ?? Buffer.alloc(0)).toString('hex'),
     });
   } catch (e) {
-    res.status(502).json({ error: safeError('bus', 'Property read failed', e) });
+    const msg = e instanceof Error ? e.message : String(e);
+    res
+      .status(msg.includes('Not connected') ? 409 : 502)
+      .json({ error: safeError('bus', 'Property read failed', e) });
   }
 });
 
@@ -826,12 +838,14 @@ router.post('/bus/program-ia', async (req: Request, res: Response) => {
   if (!b) return;
   const body = validateBody(req, z.object({ newAddr: z.string().min(1) }));
   const { newAddr } = body;
-  if (!b.connected) return res.status(409).json({ error: 'Bus not connected' });
   try {
     const result = await b.programIA(newAddr);
     res.json(result);
   } catch (e) {
-    res.status(502).json({ error: safeError('bus', 'Program IA failed', e) });
+    const msg = e instanceof Error ? e.message : String(e);
+    res
+      .status(msg.includes('Not connected') ? 409 : 502)
+      .json({ error: safeError('bus', 'Program IA failed', e) });
   }
 });
 
@@ -848,13 +862,13 @@ router.post(
       req,
       z.object({ timeoutMs: z.number().int().min(100).max(30000).optional() }),
     );
-    if (!b.connected) return res.status(409).json({ error: 'Bus not connected' });
     try {
       const result = await b.checkProgrammingMode(body.timeoutMs);
       res.json(result);
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
       res
-        .status(502)
+        .status(msg.includes('Not connected') ? 409 : 502)
         .json({ error: safeError('bus', 'Check programming mode failed', e) });
     }
   },
@@ -878,13 +892,13 @@ router.post(
       req,
       z.object({ timeoutMs: z.number().int().min(100).max(30000).optional() }),
     );
-    if (!b.connected) return res.status(409).json({ error: 'Bus not connected' });
     try {
       const devices = await b.readSerialNumbersInProgrammingMode(body.timeoutMs);
       res.json({ devices });
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
       res
-        .status(502)
+        .status(msg.includes('Not connected') ? 409 : 502)
         .json({
           error: safeError('bus', 'Read serials in programming mode failed', e),
         });
@@ -915,7 +929,6 @@ router.post(
       }),
     );
     const { serial, newAddress } = body;
-    if (!b.connected) return res.status(409).json({ error: 'Bus not connected' });
     try {
       const result = await b.assignIndividualAddressBySerial(
         Buffer.from(serial, 'hex'),
@@ -923,8 +936,9 @@ router.post(
       );
       res.json(result);
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
       res
-        .status(502)
+        .status(msg.includes('Not connected') ? 409 : 502)
         .json({ error: safeError('bus', 'Assign address by serial failed', e) });
     }
   },
@@ -1155,7 +1169,6 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     }),
   );
   const { deviceAddress, projectId, deviceId, mode } = body;
-  if (!b.connected) return res.status(409).json({ error: 'Bus not connected' });
 
   // Load device data
   const dev = deviceId
@@ -1179,20 +1192,20 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     appId,
   } = built;
 
-  // Resolve device-resident relmem bases (PID 7) and refuse to write to an
-  // unallocated segment — a zero base would target near-zero addresses and
-  // fail (the observed ETS first-attempt failure mode).
-  const { bases, unallocated } = await resolveRelmemBases(
-    b,
-    deviceAddress,
-    steps as Array<{ type: string; objIdx?: number }>,
-  );
-  if (unallocated.length) {
-    return res.status(409).json({
-      error: 'segment_unallocated',
-      message: `Interface object(s) ${unallocated.join(', ')} report an unallocated segment (PID 7 = 0); refusing to write.`,
-    });
-  }
+  // Real device-resident relmem bases (PID 7) are no longer pre-resolved
+  // (and no longer gate the download with a 409) here - downloadDevice()
+  // itself now resolves each relevant interface object's base AFTER that
+  // object's own Unload/StartLoading/LoadData cycle, matching real ETS's
+  // actual behavior. Real bug, found live 2026-08-30: this upfront check
+  // used to reject the whole request outright ("segment_unallocated")
+  // whenever the parameter object's PID 7 hadn't been allocated yet -
+  // correct for re-programming an already-provisioned device (its base
+  // genuinely doesn't change across a reload), but wrong for a device's
+  // very first-ever download, where PID 7 legitimately starts at 0 and
+  // only becomes valid once Unload/StartLoading/LoadData actually runs -
+  // exactly the scenario a genuinely blank/factory-reset device is in.
+  // Confirmed against a real ETS Full Download capture (2026-08-30): ETS
+  // never pre-checks PID 7 before attempting a device's first load either.
 
   // Stream progress via WebSocket
   const onProgress = (p: DownloadProgress): void =>
@@ -1217,7 +1230,6 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
         paramBase,
         absSegData,
         appId,
-        resolvedBases: bases,
         mode,
         groupObjectTable,
       },
@@ -1234,7 +1246,7 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       error: true,
     });
     res
-      .status(502)
+      .status(errMsg.includes('Not connected') ? 409 : 502)
       .json({ error: safeError('bus', 'Device programming failed', e) });
   } finally {
     releaseKeepAlive();
@@ -1276,7 +1288,6 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
     }),
   );
   const { deviceAddress, projectId, deviceId } = body;
-  if (!b.connected) return res.status(409).json({ error: 'Bus not connected' });
 
   const dev = deviceId
     ? db.get<Device>('SELECT * FROM devices WHERE id=?', [+deviceId])
@@ -1312,7 +1323,10 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
           await sleep(VERIFY_TRANSIENT_RETRY_DELAY_MS);
           continue;
         }
-        res.status(502).json({ error: safeError('bus', 'Device verify failed', e) });
+        const msg = e instanceof Error ? e.message : String(e);
+        res
+          .status(msg.includes('Not connected') ? 409 : 502)
+          .json({ error: safeError('bus', 'Device verify failed', e) });
         return;
       }
     }

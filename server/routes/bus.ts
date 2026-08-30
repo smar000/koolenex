@@ -1199,6 +1199,12 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     b.broadcast('program:progress', { deviceAddress, ...p });
   onProgress({ msg: `Starting download to ${deviceAddress}`, pct: 0 });
 
+  // A download can run long enough for the gateway's own idle timeout to
+  // never actually apply mid-write (real traffic is flowing throughout),
+  // but hold a keep-alive ref regardless for the duration - protects any
+  // real pause between steps against an unexpected drop interrupting the
+  // download partway through. See KnxBusManager.addKeepAliveRef().
+  const releaseKeepAlive = b.addKeepAliveRef();
   try {
     await b.downloadDevice(
       deviceAddress,
@@ -1230,6 +1236,8 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     res
       .status(502)
       .json({ error: safeError('bus', 'Device programming failed', e) });
+  } finally {
+    releaseKeepAlive();
   }
 });
 
@@ -1278,29 +1286,38 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
       );
   if (!dev) return res.status(404).json({ error: 'Device not found' });
 
-  for (
-    let attempt = 1;
-    attempt <= VERIFY_TRANSIENT_MAX_ATTEMPTS;
-    attempt++
-  ) {
-    try {
-      await runVerifyDevice(b, dev, deviceAddress, res);
-      return;
-    } catch (e) {
-      if (
-        isTransientBusTimeout(e) &&
-        attempt < VERIFY_TRANSIENT_MAX_ATTEMPTS
-      ) {
-        logger.warn('bus', 'verify-device: transient timeout, retrying', {
-          deviceAddress,
-          attempt,
-        });
-        await sleep(VERIFY_TRANSIENT_RETRY_DELAY_MS);
-        continue;
+  // See the matching comment in /bus/program-device above -
+  // KnxBusManager.addKeepAliveRef() protects the whole retry loop
+  // (including the real multi-second waits between transient-timeout
+  // retries) against an idle-timeout drop interrupting verification.
+  const releaseKeepAlive = b.addKeepAliveRef();
+  try {
+    for (
+      let attempt = 1;
+      attempt <= VERIFY_TRANSIENT_MAX_ATTEMPTS;
+      attempt++
+    ) {
+      try {
+        await runVerifyDevice(b, dev, deviceAddress, res);
+        return;
+      } catch (e) {
+        if (
+          isTransientBusTimeout(e) &&
+          attempt < VERIFY_TRANSIENT_MAX_ATTEMPTS
+        ) {
+          logger.warn('bus', 'verify-device: transient timeout, retrying', {
+            deviceAddress,
+            attempt,
+          });
+          await sleep(VERIFY_TRANSIENT_RETRY_DELAY_MS);
+          continue;
+        }
+        res.status(502).json({ error: safeError('bus', 'Device verify failed', e) });
+        return;
       }
-      res.status(502).json({ error: safeError('bus', 'Device verify failed', e) });
-      return;
     }
+  } finally {
+    releaseKeepAlive();
   }
 });
 

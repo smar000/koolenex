@@ -89,7 +89,10 @@ export default function App() {
   useEffect(() => {
     saveVerifyCache(state.verifyCache);
   }, [state.verifyCache]);
-  const wsRef = useRef<{ close: () => void } | null>(null);
+  const wsRef = useRef<{
+    close: () => void;
+    send: (data: Record<string, unknown>) => void;
+  } | null>(null);
   // Live verify-read progress, keyed by device address. Transient/high-
   // frequency (one WS message per bus chunk, up to ~900 per relmem verify) -
   // kept out of the main reducer deliberately so it doesn't churn state
@@ -211,7 +214,12 @@ export default function App() {
           type: 'SET_BUS',
           status: {
             connected: true,
-            type: msg.connectionType === 'usb' ? 'usb' : 'udp',
+            type:
+              msg.connectionType === 'usb'
+                ? 'usb'
+                : msg.connectionType === 'tcp'
+                  ? 'tcp'
+                  : 'udp',
             host: (msg.host as string | null) ?? null,
             port: msg.port as number | undefined,
             path: msg.path as string | undefined,
@@ -386,6 +394,8 @@ export default function App() {
       deviceStatus: busHandlers.handleDeviceStatus,
       write: busHandlers.handleWrite,
       clearTelegrams: busHandlers.handleClearTelegrams,
+      watchStart: () => wsRef.current?.send({ type: 'watch:start' }),
+      watchStop: () => wsRef.current?.send({ type: 'watch:stop' }),
     }),
     [busHandlers],
   );

@@ -428,6 +428,7 @@ export function createWS(
   onOpen?: () => void,
 ): {
   close: () => void;
+  send: (data: Record<string, unknown>) => void;
 } {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   // In dev (Vite dev server) connect directly to backend on :4000; in prod use same host
@@ -470,6 +471,18 @@ export function createWS(
       closed = true;
       if (retryTimer) clearTimeout(retryTimer);
       ws?.close();
+    },
+    // Best-effort: silently dropped if the socket isn't open (e.g. between
+    // reconnect attempts). Used for lightweight signals like the Monitor
+    // view's watch:start/watch:stop (see KnxBusManager.addKeepAliveRef())
+    // - not a queue, and does not currently survive a WS reconnect while
+    // the caller expects the signal to still apply.
+    send(data: Record<string, unknown>) {
+      if (ws?.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify(data));
+        } catch (_) {}
+      }
     },
   };
 }

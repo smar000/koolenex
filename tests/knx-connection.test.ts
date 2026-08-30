@@ -1821,6 +1821,223 @@ describe('KnxBusManager._ensureConnected', () => {
   });
 });
 
+describe('KnxBusManager._autoReconnect', () => {
+  it('reconnects immediately on first attempt while a keep-alive ref is held', async () => {
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = false;
+    bus.addKeepAliveRef();
+
+    let connectCalls = 0;
+    bus.connect = (async (host: string, port: number) => {
+      connectCalls++;
+      bus.connected = true;
+      bus.connection = {} as any;
+      return { host, port, type: 'tcp' as const };
+    }) as any;
+
+    bus._autoReconnect();
+    // _autoReconnect is fire-and-forget; let its promise chain settle.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(connectCalls, 1);
+    assert.equal(bus.connected, true);
+  });
+
+  it('does nothing when no keep-alive ref is held, even with a known host', async () => {
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = false;
+    // No addKeepAliveRef() call - nothing has registered interest in a
+    // proactive reconnect (e.g. no Monitor view open, no download running).
+
+    let connectCalls = 0;
+    bus.connect = (async () => {
+      connectCalls++;
+      return { host: '', port: 0, type: 'tcp' as const };
+    }) as any;
+
+    bus._autoReconnect();
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(connectCalls, 0);
+  });
+
+  it('stops retrying once the last keep-alive ref is released mid-backoff', async () => {
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = false;
+    const release = bus.addKeepAliveRef();
+
+    let connectCalls = 0;
+    bus.connect = (async () => {
+      connectCalls++;
+      throw new Error('gateway unreachable');
+    }) as any;
+
+    const realSetTimeout = globalThis.setTimeout;
+    const scheduled: Array<() => void> = [];
+    (globalThis as any).setTimeout = ((fn: () => void, _ms: number) => {
+      scheduled.push(fn);
+      return 0 as any;
+    }) as any;
+    try {
+      bus._autoReconnect();
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      assert.equal(connectCalls, 1);
+      assert.equal(scheduled.length, 1);
+
+      // e.g. the Monitor view unmounted before the scheduled retry fires.
+      release();
+      const next = scheduled.shift()!;
+      next();
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+
+    assert.equal(connectCalls, 1);
+    assert.equal(scheduled.length, 0);
+  });
+
+  it('does nothing for USB connections', async () => {
+    const bus = new KnxBusManager();
+    bus.host = null;
+    bus.type = 'usb';
+    bus.connected = false;
+    bus.addKeepAliveRef();
+
+    let connectCalls = 0;
+    bus.connect = (async () => {
+      connectCalls++;
+      return { host: '', port: 0, type: 'tcp' as const };
+    }) as any;
+
+    bus._autoReconnect();
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(connectCalls, 0);
+  });
+
+  it('retries with backoff on failure, up to a bounded number of attempts', async () => {
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = false;
+    bus.addKeepAliveRef();
+
+    let connectCalls = 0;
+    bus.connect = (async () => {
+      connectCalls++;
+      throw new Error('gateway unreachable');
+    }) as any;
+
+    // Intercept setTimeout so the retry schedule advances instantly
+    // instead of waiting through real backoff delays.
+    const realSetTimeout = globalThis.setTimeout;
+    const scheduled: Array<() => void> = [];
+    (globalThis as any).setTimeout = ((fn: () => void, _ms: number) => {
+      scheduled.push(fn);
+      return 0 as any;
+    }) as any;
+    try {
+      bus._autoReconnect();
+      // Drain the retry chain: each failed attempt schedules exactly one
+      // more retry via the stubbed setTimeout, up to maxAttempts (5).
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+        const next = scheduled.shift();
+        if (next) next();
+      }
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+
+    assert.equal(connectCalls, 5);
+    assert.equal(scheduled.length, 0);
+  });
+
+  it('stops retrying once an explicit disconnect clears the host', async () => {
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = false;
+    bus.addKeepAliveRef();
+
+    let connectCalls = 0;
+    bus.connect = (async () => {
+      connectCalls++;
+      throw new Error('gateway unreachable');
+    }) as any;
+
+    const realSetTimeout = globalThis.setTimeout;
+    const scheduled: Array<() => void> = [];
+    (globalThis as any).setTimeout = ((fn: () => void, _ms: number) => {
+      scheduled.push(fn);
+      return 0 as any;
+    }) as any;
+    try {
+      bus._autoReconnect();
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      assert.equal(connectCalls, 1);
+      assert.equal(scheduled.length, 1);
+
+      // Simulate the user disconnecting before the scheduled retry fires.
+      bus.host = null;
+      const next = scheduled.shift()!;
+      next();
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+
+    // The retry re-checks host/type before calling connect() again.
+    assert.equal(connectCalls, 1);
+    assert.equal(scheduled.length, 0);
+  });
+});
+
+describe('KnxBusManager.addKeepAliveRef', () => {
+  it('ref-counts and only reaches zero once every release() is called', () => {
+    const bus = new KnxBusManager();
+    assert.equal(bus._keepAliveRefs, 0);
+
+    const releaseA = bus.addKeepAliveRef();
+    const releaseB = bus.addKeepAliveRef();
+    assert.equal(bus._keepAliveRefs, 2);
+
+    releaseA();
+    assert.equal(bus._keepAliveRefs, 1);
+
+    releaseB();
+    assert.equal(bus._keepAliveRefs, 0);
+  });
+
+  it('is idempotent - calling the same release() twice does not underflow', () => {
+    const bus = new KnxBusManager();
+    const release = bus.addKeepAliveRef();
+    release();
+    release();
+    assert.equal(bus._keepAliveRefs, 0);
+  });
+});
+
 describe('KnxBusManager.disconnect', () => {
   it('clears state', () => {
     const bus = new KnxBusManager();
@@ -1924,6 +2141,48 @@ describe('KnxBusManager event forwarding', () => {
     assert.ok(broadcasted.includes('knx:disconnected'));
   });
 
+  it('does not proactively reconnect on disconnect without a keep-alive ref', async () => {
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.type = 'tcp';
+    bus.broadcast = () => {};
+    let connectCalls = 0;
+    bus.connect = (async () => {
+      connectCalls++;
+      return { host: '', port: 0, type: 'tcp' as const };
+    }) as any;
+
+    const conn = new TestKnxConnection();
+    bus._attachEvents(conn);
+    conn.emit('disconnected');
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(connectCalls, 0);
+  });
+
+  it('proactively reconnects on disconnect while a keep-alive ref is held', async () => {
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.type = 'tcp';
+    bus.broadcast = () => {};
+    bus.addKeepAliveRef();
+    let connectCalls = 0;
+    bus.connect = (async (host: string, port: number) => {
+      connectCalls++;
+      bus.connected = true;
+      bus.connection = {} as any;
+      return { host, port, type: 'tcp' as const };
+    }) as any;
+
+    const conn = new TestKnxConnection();
+    bus._attachEvents(conn);
+    conn.emit('disconnected');
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(connectCalls, 1);
+  });
+
   it('forwards error events', () => {
     const bus = new KnxBusManager();
     const broadcasted: Array<{
@@ -1942,6 +2201,68 @@ describe('KnxBusManager event forwarding', () => {
     assert.equal(broadcasted.length, 1);
     assert.equal(broadcasted[0].type, 'knx:error');
     assert.equal(broadcasted[0].payload.error, 'Error: socket died');
+  });
+});
+
+describe('KnxBusManager.broadcast', () => {
+  it('preserves the message-kind discriminator even when the payload has its own `type` field', () => {
+    const bus = new KnxBusManager();
+    const sent: Array<{ readyState: number; data?: string }> = [];
+    const client = {
+      readyState: 1,
+      send(data: string) {
+        sent.push({ readyState: 1, data });
+      },
+    };
+    bus.attachWSS({ clients: new Set([client]) } as any);
+
+    // A payload field literally named `type` (e.g. a connection's
+    // transport, 'tcp') must not collide with and overwrite the outer
+    // message-kind discriminator the client dispatches on.
+    bus.broadcast('knx:connected', { host: '10.0.0.5', type: 'tcp' });
+
+    assert.equal(sent.length, 1);
+    const parsed = JSON.parse(sent[0]!.data!);
+    assert.equal(parsed.type, 'knx:connected');
+  });
+
+  it("connect()'s knx:connected broadcast carries the transport under connectionType, not type", async () => {
+    const bus = new KnxBusManager();
+    const sent: string[] = [];
+    bus.attachWSS({
+      clients: new Set([
+        {
+          readyState: 1,
+          send(data: string) {
+            sent.push(data);
+          },
+        },
+      ]),
+    } as any);
+
+    // KnxBusManager.connect() constructs its own KnxIpConnection instance
+    // internally (no dependency injection) - patch the shared prototype's
+    // connect() so that instance resolves to a fake, network-free
+    // implementation instead of attempting a real socket connection.
+    const knxProtocol = await import('../server/knx-protocol.ts');
+    const proto = (knxProtocol.KnxConnection as any).prototype;
+    const realConnect = proto.connect;
+    proto.connect = async function (this: any) {
+      this.transport = 'tcp';
+    };
+
+    try {
+      await bus.connect('10.0.0.5', 3671, 1, 'tcp');
+    } finally {
+      proto.connect = realConnect;
+    }
+
+    const connectedMsg = sent
+      .map((s) => JSON.parse(s))
+      .find((m) => m.type === 'knx:connected');
+    assert.ok(connectedMsg, 'a knx:connected message was broadcast');
+    assert.equal(connectedMsg.connectionType, 'tcp');
+    assert.equal(connectedMsg.host, '10.0.0.5');
   });
 });
 

@@ -36,6 +36,21 @@ class MockBus extends EventEmitter {
   // Track calls for assertions
   calls: Array<{ method: string; args: unknown[] }> = [];
 
+  // Mirrors the real KnxBusManager.addKeepAliveRef() shape (see
+  // server/knx-bus.ts) - routes that hold a keep-alive ref for the
+  // duration of an operation (program-device, verify-device) call this
+  // on the bus, real or fake.
+  _keepAliveRefs = 0;
+  addKeepAliveRef(): () => void {
+    this._keepAliveRefs++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
+    };
+  }
+
   setRemapper(fn: (tg: any) => any): void {
     this._remapFn = fn;
   }

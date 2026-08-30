@@ -112,6 +112,13 @@ export interface BusActions {
   deviceStatus: (deviceId: number, status: DeviceStatus) => Promise<void>;
   write: (ga: string, value: unknown, dpt: unknown) => Promise<void>;
   clearTelegrams: () => Promise<void>;
+  // Tells the backend this client is actively watching live telegrams, so
+  // it should proactively reconnect the bus across a gateway idle-timeout
+  // drop rather than leaving recovery to the next bus operation - see
+  // KnxBusManager.addKeepAliveRef(). Call watchStart() on mount and
+  // watchStop() on unmount (BusMonitorView does this).
+  watchStart: () => void;
+  watchStop: () => void;
 }
 
 export const BusActionsCtx = createContext<BusActions | null>(null);

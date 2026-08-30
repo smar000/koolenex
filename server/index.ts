@@ -78,6 +78,33 @@ async function start(): Promise<void> {
     try {
       ws.send(JSON.stringify({ type: 'connected', ts: Date.now() }));
     } catch (_) {}
+
+    // A client (the Monitor view, specifically) can ask the bus to
+    // proactively keep the KNX connection alive across a gateway idle
+    // timeout for as long as it's actively watching - see
+    // KnxBusManager.addKeepAliveRef()'s doc comment for why this is opt-in
+    // rather than unconditional. The ref is released automatically if the
+    // client disconnects without an explicit watch:stop (tab closed,
+    // navigated away, network drop), so it can never leak.
+    let releaseKeepAlive: (() => void) | null = null;
+    ws.on('message', (raw) => {
+      let msg: { type?: string };
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch (_) {
+        return;
+      }
+      if (msg.type === 'watch:start') {
+        if (!releaseKeepAlive) releaseKeepAlive = bus.addKeepAliveRef();
+      } else if (msg.type === 'watch:stop') {
+        releaseKeepAlive?.();
+        releaseKeepAlive = null;
+      }
+    });
+    ws.on('close', () => {
+      releaseKeepAlive?.();
+      releaseKeepAlive = null;
+    });
   });
 
   server.listen(PORT, () => {

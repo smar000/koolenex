@@ -39,6 +39,7 @@ class KnxBusManager extends EventEmitter {
   _wss: WebSocketServer | null;
   _remapFn: ((telegram: Telegram) => Telegram) | null;
   _reconnecting: Promise<{ host: string; port: number; type: 'udp' | 'tcp' }> | null;
+  _keepAliveRefs: number;
 
   constructor() {
     super();
@@ -51,6 +52,7 @@ class KnxBusManager extends EventEmitter {
     this._wss = null;
     this._remapFn = null;
     this._reconnecting = null;
+    this._keepAliveRefs = 0;
   }
 
   /** Set a function that remaps telegram src/dst addresses (for demo mode) */
@@ -62,9 +64,44 @@ class KnxBusManager extends EventEmitter {
     this._wss = wss;
   }
 
+  /**
+   * Acquires an interest in proactively keeping the bus connection alive
+   * across a gateway idle-timeout drop (see the 'disconnected' handler in
+   * _attachEvents() and _autoReconnect() below). Reconnect-on-demand
+   * (_ensureConnected(), used by every bus operation) already recovers a
+   * dropped connection the moment something real needs it, at zero
+   * ongoing cost - proactive reconnection exists only for callers with no
+   * operation of their own to trigger that (passively watching live
+   * telegrams) or where a drop mid-operation would otherwise interrupt a
+   * long-running one (a device download/verify).
+   *
+   * Deliberately ref-counted and not global: most KNXnet/IP gateways
+   * support only a small number of concurrent tunneling channels, so
+   * reconnecting indefinitely whenever the app merely happens to be
+   * connected - with nobody watching and nothing running - would
+   * needlessly occupy one of those slots and could block ETS or another
+   * tool from connecting on-site. Returns a release function; safe to
+   * call more than once (idempotent).
+   */
+  addKeepAliveRef(): () => void {
+    this._keepAliveRefs++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
+    };
+  }
+
   broadcast(type: string, payload: Record<string, unknown>): void {
     if (!this._wss) return;
-    const msg = JSON.stringify({ type, ...payload });
+    // Spread payload first so `type` (the message-kind discriminator
+    // clients dispatch on, e.g. 'knx:connected') always wins even if the
+    // payload itself happens to have its own field called `type` - it
+    // previously came last, so a payload field named `type` silently
+    // replaced the message kind and the message went undelivered to any
+    // handler.
+    const msg = JSON.stringify({ ...payload, type });
     this._wss.clients.forEach((client) => {
       if (client.readyState === 1) {
         try {
@@ -89,6 +126,18 @@ class KnxBusManager extends EventEmitter {
     conn.on('disconnected', () => {
       this.connected = false;
       this.broadcast('knx:disconnected', {});
+      // This event only ever fires for an unexpected drop - an explicit
+      // disconnect() call sets `connected = false` itself beforehand, which
+      // suppresses the underlying connection's own 'disconnected' emit (see
+      // knx-protocol.ts). Only reconnect proactively while something has
+      // registered real interest via addKeepAliveRef() - see its doc
+      // comment above for why this is scoped rather than unconditional.
+      // Without an active ref, a drop is left for reconnect-on-demand
+      // (_ensureConnected(), used by every bus operation) to recover the
+      // next time something actually needs the bus.
+      if (this._keepAliveRefs > 0) {
+        this._autoReconnect();
+      }
     });
 
     conn.on('error', (...args: unknown[]) => {
@@ -128,7 +177,7 @@ class KnxBusManager extends EventEmitter {
       this.broadcast('knx:connected', {
         host,
         port: resolvedPort,
-        type: negotiated,
+        connectionType: negotiated,
       });
       return { host, port: resolvedPort, type: negotiated };
     });
@@ -153,7 +202,10 @@ class KnxBusManager extends EventEmitter {
         this.connection = conn;
         this.connected = true;
         logger.info('knx', `Connected via USB: ${devicePath}`);
-        this.broadcast('knx:connected', { type: 'usb', path: devicePath });
+        this.broadcast('knx:connected', {
+          connectionType: 'usb',
+          path: devicePath,
+        });
         return info;
       },
     );
@@ -207,6 +259,37 @@ class KnxBusManager extends EventEmitter {
       });
     }
     await this._reconnecting;
+  }
+
+  /**
+   * Proactively reconnects after an unexpected disconnect (see the
+   * 'disconnected' handler in _attachEvents() above), independent of
+   * whether any bus operation happens to run. Only called while at least
+   * one addKeepAliveRef() is held. Retries with backoff up to a bounded
+   * number of attempts, re-checking host/type/keep-alive-interest on
+   * every attempt so a real, explicit disconnect() call (which clears
+   * host) or the last keep-alive ref being released during the retry
+   * window stops the cycle immediately rather than continuing to retry
+   * against a host nothing is interested in any more.
+   */
+  _autoReconnect(attempt: number = 1): void {
+    if (!this.host || this.type === 'usb' || this._keepAliveRefs <= 0) return;
+    const maxAttempts = 5;
+    this._ensureConnected()
+      .then(() => {
+        logger.info('knx', 'Bus auto-reconnected after an unexpected disconnect');
+      })
+      .catch((err: Error) => {
+        if (!this.host || this.type === 'usb' || this._keepAliveRefs <= 0) return;
+        logger.warn('knx', 'Bus auto-reconnect attempt failed', {
+          attempt,
+          message: err.message,
+        });
+        if (attempt < maxAttempts) {
+          const delay = Math.min(30000, 2000 * 2 ** (attempt - 1));
+          setTimeout(() => this._autoReconnect(attempt + 1), delay);
+        }
+      });
   }
 
   async write(

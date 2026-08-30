@@ -212,6 +212,20 @@ export function buildGATable(gaLinks: GaLink[]): Buffer {
 // §2.6/§1.1: `00020001000500020008` decodes as
 // `[count=2][gaIndex=1,coNumber=5][gaIndex=2,coNumber=8]`, all 2-byte BE
 // fields, gaIndex before coNumber).
+//
+// Entry ORDER is not incidental - it's the only encoding of which link a
+// communication object actively sends on (docs/knx-device-write-protocol.md
+// §6.3: "the first entry in table order... is the one it actively
+// transmits on"). Real bug, found live 2026-08-30 via a byte-for-byte
+// replay of koolenex's own write against a real ETS capture of the same
+// device: this function used to re-sort `entries` by GA index (ascending),
+// discarding the real declared order entirely - a real captured ETS table
+// for 1.1.9 (`0003 0002 0003 0003 0004 0004 0001 0005`, CO order 3,4,5)
+// came back reordered by koolenex as CO order 5,3,4 (GA-index order
+// instead). `coRows` is already fetched `ORDER BY object_number` (see this
+// function's caller in routes/bus.ts), which already matches the real ETS
+// order directly - the extra sort was pure, unnecessary damage. Removed;
+// entries now keep the push order they're built in.
 export function buildAssocTable(coRows: CoRow[], gaLinks: GaLink[]): Buffer {
   const gaIndexMap: Record<string, number> = {};
   gaLinks.forEach((ga, i) => {
@@ -228,7 +242,6 @@ export function buildAssocTable(coRows: CoRow[], gaLinks: GaLink[]): Buffer {
     }
   }
 
-  entries.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   const buf = Buffer.alloc(2 + entries.length * 4);
   buf.writeUInt16BE(entries.length & 0xffff, 0);
   entries.forEach(([gaIdx, co], i) => {

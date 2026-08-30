@@ -587,7 +587,16 @@ describe('buildAssocTable', () => {
   // decode of a real captured Full Download - see
   // docs/knx-device-write-protocol.md §2.6/§1.1 (`00020001000500020008`
   // decodes as `[count=2][gaIndex=1,coNumber=5][gaIndex=2,coNumber=8]`).
-  it('builds sorted association entries', () => {
+  it('preserves the real declared entry order (coRows order, then a com object\'s own GA list order) - does NOT re-sort by GA index', () => {
+    // Real bug, found live 2026-08-30: this used to sort entries by GA
+    // index then CO number, discarding the real declared order entirely -
+    // a real captured ETS association table for a live device came back
+    // reordered by koolenex. Entry order is not incidental: it's the only
+    // encoding of which link a communication object actively sends on
+    // (docs/knx-device-write-protocol.md §6.3). `coRows` is already
+    // fetched `ORDER BY object_number` by the real caller (routes/bus.ts),
+    // which already matches real ETS's own order directly - this function
+    // must preserve that push order, not re-sort it.
     const gaLinks: any[] = [
       { address: '1/0/0', main_g: 1, middle_g: 0, sub_g: 0 },
       { address: '1/0/1', main_g: 1, middle_g: 0, sub_g: 1 },
@@ -597,17 +606,16 @@ describe('buildAssocTable', () => {
       { object_number: 8, ga_address: '1/0/0' },
     ];
     const buf = buildAssocTable(coRows, gaLinks);
-    assert.equal(buf.readUInt16BE(0), 3); // 3 entries: GA1→CO7, GA1→CO8, GA2→CO7
+    assert.equal(buf.readUInt16BE(0), 3); // 3 entries: GA1→CO7, GA2→CO7, GA1→CO8
     assert.equal(buf.length, 2 + 3 * 4);
-    // Sorted by GA index (1-based) then CO number.
-    // GA index 1 (1/0/0): CO 7 and CO 8
-    assert.equal(buf.readUInt16BE(2), 1); // gaIndex 1
+    // Declared order: CO 7's own two links first (in the order its own
+    // ga_address list lists them), then CO 8's one link.
+    assert.equal(buf.readUInt16BE(2), 1); // gaIndex 1 (1/0/0)
     assert.equal(buf.readUInt16BE(4), 7); // coNumber 7
-    assert.equal(buf.readUInt16BE(6), 1); // gaIndex 1
-    assert.equal(buf.readUInt16BE(8), 8); // coNumber 8
-    // GA index 2 (1/0/1): CO 7
-    assert.equal(buf.readUInt16BE(10), 2); // gaIndex 2
-    assert.equal(buf.readUInt16BE(12), 7); // coNumber 7
+    assert.equal(buf.readUInt16BE(6), 2); // gaIndex 2 (1/0/1)
+    assert.equal(buf.readUInt16BE(8), 7); // coNumber 7
+    assert.equal(buf.readUInt16BE(10), 1); // gaIndex 1 (1/0/0)
+    assert.equal(buf.readUInt16BE(12), 8); // coNumber 8
   });
 
   it('handles empty inputs', () => {

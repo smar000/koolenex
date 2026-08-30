@@ -577,10 +577,19 @@ describe('POST /bus/scan', () => {
     assert.deepEqual(mockBus.calls[0].args, [1, 1, 200]);
   });
 
-  it('returns 409 when not connected', async () => {
+  // /bus/scan is fire-and-forget by design: it responds {ok:true}
+  // immediately (line 594 in the route) and runs the actual scan
+  // afterward, reporting success/failure only via scan:progress/scan:done/
+  // scan:error WebSocket broadcasts - never via the HTTP response itself.
+  // A disconnected bus at request time is no exception: b.scan() goes
+  // through the same lazy-reconnect path as every other bus operation, so
+  // the request still returns 200 even when not connected - whether the
+  // scan itself then succeeds (via a reconnect) or fails (a scan:error
+  // broadcast) happens after this response, not observable from it.
+  it('still returns 200 immediately even when not connected (fire-and-forget)', async () => {
     mockBus.connected = false;
     const r = await req(ts.baseUrl, 'POST', '/bus/scan', {});
-    assert.equal(r.status, 409);
+    assert.equal(r.status, 200);
   });
 });
 
@@ -742,12 +751,17 @@ describe('GET /bus/usb-devices/all', () => {
 // ── POST /bus/program-device ────────────────────────────────────────────────
 
 describe('POST /bus/program-device', () => {
-  it('returns 409 when not connected', async () => {
+  // Same ordering as /bus/verify-device: the device lookup runs before any
+  // bus operation, so with no device seeded for this address that's what
+  // fails first regardless of connection state - real "not connected"
+  // coverage lives in the relmem-fixture describe block below, where a
+  // real device exists to get past this check.
+  it('returns 404 for a non-existent device even when not connected', async () => {
     mockBus.connected = false;
     const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
       deviceAddress: '1.1.1',
     });
-    assert.equal(r.status, 409);
+    assert.equal(r.status, 404);
   });
 
   it('returns 404 for non-existent device', async () => {
@@ -940,12 +954,17 @@ describe('POST /bus/write-memory', () => {
 // ── POST /bus/verify-device ─────────────────────────────────────────────────
 
 describe('POST /bus/verify-device', () => {
-  it('returns 409 when not connected', async () => {
+  // The device lookup runs before any bus operation - with no device
+  // seeded for this address, that's what fails first regardless of
+  // connection state (real "not connected" coverage for this route lives
+  // in the fixture-backed describe blocks below, where a real device
+  // exists to get past this check).
+  it('returns 404 for a non-existent device even when not connected', async () => {
     mockBus.connected = false;
     const r = await req(ts.baseUrl, 'POST', '/bus/verify-device', {
       deviceAddress: '1.1.1',
     });
-    assert.equal(r.status, 409);
+    assert.equal(r.status, 404);
   });
 
   it('returns 404 for non-existent device', async () => {
@@ -1165,6 +1184,15 @@ describe('POST /bus/verify-device — AbsSegment read-back diff', () => {
     assert.ok(mockBus.calls.some((c) => c.method === 'readMemory'));
   });
 
+  it('returns 409 when not connected (real device, past the lookup)', async () => {
+    mockBus.connected = false;
+    const r = await req(ts.baseUrl, 'POST', '/bus/verify-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    assert.equal(r.status, 409);
+  });
+
   it('reports match=false when a single config byte differs', async () => {
     mockBus.connected = true;
     const map = expectedMemMap();
@@ -1259,7 +1287,7 @@ const RELMEM_MODEL = {
   dynTree: { main: { items: [] } },
 };
 
-describe('POST /bus/program-device — relmem zero-pointer guard', () => {
+describe('POST /bus/program-device — no longer gates on PID 7 upfront', () => {
   let projectId: number;
   const deviceAddr = '1.1.31';
 
@@ -1272,20 +1300,39 @@ describe('POST /bus/program-device — relmem zero-pointer guard', () => {
     seedDevice(ts.db, projectId, deviceAddr, RELMEM_APP, [], []);
   });
 
-  it('aborts with 409 segment_unallocated when PID 7 is zero, and never downloads', async () => {
+  it('returns 409 when not connected (real device, past the lookup)', async () => {
+    mockBus.connected = false;
+    const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    assert.equal(r.status, 409);
+  });
+
+  // Real bug, fixed 2026-08-30: this route used to pre-resolve PID 7
+  // (PID_TABLE_REFERENCE) and reject the whole request with 409
+  // "segment_unallocated" before ever attempting a download - correct for
+  // re-programming an already-provisioned device, but wrong for a
+  // device's very first-ever download, where PID 7 legitimately starts
+  // unallocated and only becomes valid once downloadDevice()'s own
+  // Unload/StartLoading/LoadData cycle actually runs (confirmed against a
+  // real ETS Full Download capture against a freshly-reset device).
+  // downloadDevice() itself (see knx-connection.test.ts) now resolves and
+  // handles this per-object internally - this route no longer pre-checks
+  // it at all, so even PID 7 reporting unallocated here proceeds straight
+  // through to a real downloadDevice() call.
+  it('proceeds to downloadDevice() even when PID 7 currently reports unallocated', async () => {
     mockBus.connected = true;
-    // obj 4 / PID 7 reports an unallocated segment.
     mockBus.propImage = new Map([['4/7', Buffer.from('00000000', 'hex')]]);
     const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
       deviceAddress: deviceAddr,
       projectId,
     });
     mockBus.propImage = null;
-    assert.equal(r.status, 409);
-    assert.equal((r.data as { error: string }).error, 'segment_unallocated');
+    assert.equal(r.status, 200);
     assert.equal(
       mockBus.calls.some((c) => c.method === 'downloadDevice'),
-      false,
+      true,
     );
   });
 });
@@ -1360,11 +1407,12 @@ describe('POST /bus/verify-device — GA/Association table fallback for an app t
     assert.equal(co0.actualValue, '2/1/2');
     assert.equal(co0.match, true);
     const co12 = byCO.get('co-12-ga') as any;
-    // buildAssocTable sorts by gaIndex ascending - 2/1/2 (GA_LINKS[2]) has a
-    // lower table index than 2/1/3 (GA_LINKS[3]), so it decodes first
-    // regardless of the order in CO_ROWS's own ga_address string.
-    assert.equal(co12.expectedValue, '2/1/2 2/1/3');
-    assert.equal(co12.actualValue, '2/1/2 2/1/3');
+    // buildAssocTable() preserves the real declared entry order (fixed
+    // 2026-08-30 - it used to sort by gaIndex ascending, discarding the
+    // order in CO_ROWS's own ga_address string; see its own doc comment).
+    // '2/1/3 2/1/2' is CO_ROWS's own declared order for object 12.
+    assert.equal(co12.expectedValue, '2/1/3 2/1/2');
+    assert.equal(co12.actualValue, '2/1/3 2/1/2');
     assert.equal(co12.match, true);
     const co48 = byCO.get('co-48-ga') as any;
     assert.equal(co48.expectedValue, '0/0/1 0/0/2');
@@ -1458,7 +1506,10 @@ describe('POST /bus/verify-device — GA/Association table fallback for an app t
     // dropped to null by a truncated read.
     const co12 = byCO.get('co-12-ga') as any;
     assert.equal(co12.expectedValue, '(none)');
-    assert.equal(co12.actualValue, '2/1/2 2/1/3');
+    // '2/1/3 2/1/2' - the real declared order (see buildAssocTable()'s own
+    // fix, 2026-08-30): `assocTable` above is built from CO_ROWS's own
+    // declared ga_address order, not re-sorted by gaIndex.
+    assert.equal(co12.actualValue, '2/1/3 2/1/2');
     assert.equal(co12.match, false);
     const co48 = byCO.get('co-48-ga') as any;
     assert.equal(co48.expectedValue, '(none)');

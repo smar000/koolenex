@@ -974,6 +974,31 @@ export function parseKnxproj(
               }
             }
 
+            // Real bug, found live 2026-08-30 via a byte-for-byte replay of
+            // koolenex's own Object 3 write against a real ETS capture of
+            // the same device: `cor` here is the DEVICE-INSTANCE-level
+            // `ComObjectInstanceRef` (from `dev.ComObjectInstanceRefs`),
+            // which can carry its own `ReadOnInitFlag`/`Priority`
+            // attributes overriding whatever the app-level `ComObjectRef`
+            // declares - the same per-instance override mechanism `Text`/
+            // `DatapointType` already get above (`attr(cor, 'Text') || ...`
+            // falls back to the instance value). `readOnInit`/`priority`
+            // were never checked against `cor` at all, only ever resolved
+            // from the app level - a real device's own instance data
+            // (`<ComObjectInstanceRef ... ReadOnInitFlag="Enabled" />`)
+            // silently never took effect. Confirmed: 1.1.9's real
+            // instance-level ReadOnInitFlag="Enabled" was computed as
+            // "No" by koolenex, verified via a real ETS capture of the
+            // same device showing the correct flag bit set.
+            const instanceReadOnInit = attr(cor, 'ReadOnInitFlag');
+            if (instanceReadOnInit) readOnInit = instanceReadOnInit === 'Enabled';
+            const instancePriority = attr(cor, 'Priority');
+            if (instancePriority) {
+              const p = instancePriority.toLowerCase();
+              if (p === 'low' || p === 'alarm' || p === 'high' || p === 'system')
+                priority = p;
+            }
+
             // `update` above is now resolved the same way as read/write/
             // comm/tx (base ComObject + ComObjectRef-override merge, via
             // resolveCoRef()/resolveCoRefById() - see ets-app.ts's CoDef/

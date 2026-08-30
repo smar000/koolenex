@@ -809,18 +809,36 @@ export function ProgrammingView() {
               {log.length === 0 ? (
                 <span className={styles.logEmpty}>No operations yet</span>
               ) : (
-                log.map((l, i) => (
-                  <div
-                    key={i}
-                    className={
-                      l.includes('✓')
-                        ? styles.logEntrySuccess
-                        : styles.logEntryNormal
-                    }
-                  >
-                    {l}
-                  </div>
-                ))
+                log.map((l, i) => {
+                  // Every entry is logged as "[HH:MM:SS] message" (see
+                  // addLog() call sites throughout this file/
+                  // AddressDeviceModal/AssignProjectAddressModal) - split
+                  // that back apart at render time rather than changing
+                  // every call site to pass a structured {time, text},
+                  // added 2026-08-30: the timestamp gets its own line
+                  // (dim/grey) with the message indented below it (normal
+                  // text), instead of one long wrapped line mixing both,
+                  // which read as cluttered once a message wrapped to a
+                  // second line with no visual break from the timestamp.
+                  const m = l.match(/^\[([^\]]+)\]\s*([\s\S]*)$/);
+                  const time = m?.[1];
+                  const text = m ? m[2] : l;
+                  return (
+                    <div
+                      key={i}
+                      className={
+                        l.includes('✓')
+                          ? styles.logEntrySuccess
+                          : styles.logEntryNormal
+                      }
+                    >
+                      {time && (
+                        <div className={styles.logEntryTime}>{time}</div>
+                      )}
+                      <div className={styles.logEntryText}>{text}</div>
+                    </div>
+                  );
+                })
               )}
             </div>
             <div className={styles.logFooter}>

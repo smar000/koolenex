@@ -215,8 +215,28 @@
   color: var(--dim);
 }
 .logEntry {
-  font-size: 10px;
-  line-height: 1.5;
+  /* Reduced from 10px, real request 2026-08-30 - the log read as
+     cluttered/hard to scan, both this and the time/text split below were
+     part of the same fix. */
+  font-size: 9px;
+  line-height: 1.45;
+}
+.logEntryTime {
+  color: var(--dim);
+  /* Own line above the message, not inline with it - a wrapped message
+     used to run directly under its own timestamp with no visual break,
+     making consecutive multi-line entries hard to tell apart at a
+     glance. */
+  margin-bottom: 1px;
+}
+.logEntryText {
+  color: var(--text);
+  /* Indented under its timestamp, including on any wrapped line beyond
+     the first (not just the first word) - padding+hanging indent via
+     text-indent's negative counterpart on padding-left alone would only
+     indent the first line, so this uses padding-left on the whole block
+     instead, which affects every wrapped line equally. */
+  padding-left: 8px;
 }
 .logFooter {
   padding: 10px 12px;
@@ -249,13 +269,19 @@
      padding. */
   width: 300px;
 }
+/* Outer wrapper classes only compose the shared layout now - the message
+   itself gets its color from .logEntryText (below), which they override
+   per outcome, keeping the timestamp (.logEntryTime) consistently dim
+   regardless of outcome rather than tinting the whole entry including
+   its timestamp. */
 .logEntrySuccess {
   composes: logEntry;
+}
+.logEntrySuccess .logEntryText {
   color: var(--green);
 }
 .logEntryNormal {
   composes: logEntry;
-  color: var(--muted);
 }
 
 .rowActions {

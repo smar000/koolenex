@@ -443,6 +443,21 @@ export class KnxConnection extends EventEmitter {
 
   // ── Individual address programming ────────────────────────────────────────────
 
+  /**
+   * Write an individual address to whichever device is currently in
+   * physical programming mode (button held down) - A_IndividualAddress_Write,
+   * the write-side counterpart to checkProgrammingMode()'s
+   * A_IndividualAddress_Read below. Real bug, found live 2026-08-30: this
+   * predates the real-capture investigation that established the correct
+   * wire format for these network-management broadcast services (GROUP-type
+   * frame to 0/0/0 at System priority - see checkProgrammingMode()'s own
+   * doc comment) and was never updated to match - it was still sending an
+   * individual-type frame to 0.0.0 at ordinary/Low priority, which a real
+   * device silently never accepted (confirmed: the device stayed fully
+   * responsive at its old address afterward, with no error reported at any
+   * layer). Fixed to use the same confirmed-correct framing as every other
+   * service in this family.
+   */
   async programIA(
     newAddr: string,
     _timeoutMs: number = 5000,
@@ -450,7 +465,9 @@ export class KnxConnection extends EventEmitter {
     if (!this.connected) throw new Error('Not connected');
     const addrBuf = encodePhysical(newAddr);
     const apdu = apduGroup('PhysicalAddress_Write', 0, addrBuf);
-    const cemi = buildCEMI(this.localAddr, '0.0.0', apdu, false);
+    const cemi = buildCEMI(this.localAddr, '0/0/0', apdu, true, {
+      priority: 'system',
+    });
     await this.sendCEMI(cemi);
     return { ok: true, newAddr };
   }
@@ -683,12 +700,33 @@ export class KnxConnection extends EventEmitter {
    * Read `length` bytes of device memory starting at `address`, over the bus.
    * Non-destructive: issues A_Memory_Read requests only. Used by the read-first
    * validation flow to compare a device's actual memory against a computed image.
+   *
+   * Default chunk size 228, matching the real MEM_CHUNK confirmed for
+   * writes (see its own comment in downloadDevice()). A first attempt at
+   * this live 2026-08-30 was reverted after a real `rc=252` device error -
+   * traced afterward (same day) to a genuinely unrelated cause: that test
+   * used a stale device id (a project reimport had regenerated device
+   * rows; the id in use no longer existed), so the GA table's computed
+   * "expected" length was wrong, and the read request over-ran the real,
+   * much smaller table actually allocated on the device. Confirmed via a
+   * real packet capture: real ETS reads the SAME address in two phases
+   * (2 bytes, then 4 more) specifically because it doesn't know the real
+   * count upfront either - but a SINGLE read for the correct total length
+   * (6 bytes here, matching the device's real 2 linked group addresses)
+   * succeeded in one shot, byte-for-byte identical to ETS's own phased
+   * result. The real lesson: `chunkSize` was never the problem - a
+   * REQUESTED LENGTH that exceeds a small table's real allocated size is.
+   * Restored to 228 now that this is understood; `readRegionInSession`'s
+   * own `Math.min(chunkSize, length - off)` already clamps correctly down
+   * to a small region's real length regardless of chunk size, so this is
+   * safe for both the large parameter-memory region (where it matters for
+   * speed) and small undeclared tables (where it's a no-op, correctly).
    */
   async readMemory(
     deviceAddr: string,
     address: number,
     length: number,
-    chunkSize: number = 12,
+    chunkSize: number = 228,
     onChunk?: (bytesRead: number) => void,
   ): Promise<Buffer> {
     if (!this.connected) throw new Error('Not connected');
@@ -717,11 +755,15 @@ export class KnxConnection extends EventEmitter {
    * (it's the same computed-image size used for "expected"), so real
    * progress reporting is possible without waiting for the whole read to
    * finish.
+   *
+   * Default chunk size 228 - see readMemory()'s own comment for the real
+   * story: an early rc=252 rejection at this size traced back to a stale
+   * device id (wrong computed table length, not the chunk size itself).
    */
   async readMemoryMany(
     deviceAddr: string,
     regions: Array<{ address: number; length: number }>,
-    chunkSize: number = 12,
+    chunkSize: number = 228,
     onChunk?: (bytesRead: number) => void,
   ): Promise<Buffer[]> {
     if (!this.connected) throw new Error('Not connected');
@@ -765,8 +807,8 @@ export class KnxConnection extends EventEmitter {
   ): Promise<Buffer> {
     const { waitResponse, nextSeq } = fns;
     const out = Buffer.alloc(length);
-    for (let off = 0; off < length; off += chunkSize) {
-      const n = Math.min(chunkSize, length - off);
+    let off = 0;
+    while (off < length) {
       const seq = nextSeq();
       const wantAddr = address + off;
       // A_Memory_Read only carries a 16-bit address. A resolved relmem base
@@ -779,7 +821,24 @@ export class KnxConnection extends EventEmitter {
       // that one, so this is deliberately the minimum change, not a blanket
       // switch to extended, based on real-hardware evidence of which
       // service each device family actually answers.
-      if (wantAddr > 0xffff) {
+      const useExtended = wantAddr > 0xffff;
+      // Real bug, found live 2026-08-30, same session as the short-response
+      // fix below: `apduMemoryRead`'s legacy A_Memory_Read packs its byte
+      // count into a 6-bit APCI field (`count & 0x3f`, max 63) - NOT a
+      // koolenex/device disagreement at all, a genuinely malformed request
+      // on koolenex's own part. `chunkSize` defaults to 228 (correct for
+      // the extended service's full 1-byte count field), and once a prior
+      // short response left `off` at a non-round offset, `n` could land at
+      // 64 - which `apduMemoryRead` then silently encoded as `64 & 0x3f =
+      // 0`, a request for literally zero bytes. The device answered
+      // exactly what was asked (nothing); the "zero bytes returned" safety
+      // check below caught the SYMPTOM correctly, but the actual cause was
+      // upstream. Cap `n` to each service's own real wire-format limit
+      // BEFORE building the request, not just AFTER interpreting the
+      // response.
+      const maxN = useExtended ? 255 : 63;
+      const n = Math.min(chunkSize, length - off, maxN);
+      if (useExtended) {
         const apdu = apduMemoryExtendedRead(seq, n, wantAddr);
         const respP = waitResponse('MemoryExtended_Read_Response', 3000);
         await this.sendCEMI(buildCEMI(this.localAddr, deviceAddr, apdu, false));
@@ -796,15 +855,34 @@ export class KnxConnection extends EventEmitter {
               16,
             )}, device answered 0x${gotAddr.toString(16)}`,
           );
-        // Clamp to the requested count: if the device pads/rounds its
-        // response to a fixed chunk size rather than honoring a shorter
-        // final request, an unclamped copy silently drifts every subsequent
-        // chunk by the overrun (confirmed empirically 2026-08-26 - produced
-        // scattered "real-looking data at the wrong offset" mismatches after
-        // this extended-read path was first added). See koolenex-reference
-        // memory for the before/after evidence.
-        data.copy(out, off, 0, Math.min(data.length, n));
-        onChunk?.(n);
+        // Real bug, found live 2026-08-30: a real device can answer a
+        // large single read request with a genuinely SHORT response (real
+        // capture evidence: a 98-byte request returned only ~34 real
+        // bytes, for reasons unrelated to `chunkSize` - the request
+        // itself is well-formed and the device ACKs it, it just doesn't
+        // return everything asked for in one response). This loop used to
+        // advance by the REQUESTED amount (`chunkSize`) regardless of how
+        // much data actually came back, permanently losing the shortfall -
+        // every later byte silently stayed at Buffer.alloc()'s zero
+        // default, indistinguishable from genuine on-device content,
+        // which looked exactly like a real device-side data-loss bug
+        // until a deliberately smaller, separate re-read of the same
+        // address range came back with the real (non-zero) content the
+        // large read had silently dropped. Clamping the copy length (the
+        // pre-existing fix below, for the OPPOSITE case - a
+        // padded/oversized response) already protects against a buffer
+        // overrun either way; the real fix is advancing `off` by what was
+        // ACTUALLY received, not what was requested, so a short response
+        // is retried for its own remainder on the next loop iteration
+        // instead of being silently accepted as complete.
+        const gotLen = Math.min(data.length, n);
+        if (gotLen === 0)
+          throw new Error(
+            `MemoryExtended_Read_Response returned zero bytes at 0x${wantAddr.toString(16)} (requested ${n})`,
+          );
+        data.copy(out, off, 0, gotLen);
+        onChunk?.(gotLen);
+        off += gotLen;
         continue;
       }
       const apdu = apduMemoryRead(seq, n, wantAddr);
@@ -818,8 +896,15 @@ export class KnxConnection extends EventEmitter {
             16,
           )}, device answered 0x${gotAddr.toString(16)}`,
         );
-      data.copy(out, off);
-      onChunk?.(n);
+      // Same real-short-response protection as the extended branch above.
+      const gotLen = Math.min(data.length, n);
+      if (gotLen === 0)
+        throw new Error(
+          `Memory_Response returned zero bytes at 0x${wantAddr.toString(16)} (requested ${n})`,
+        );
+      data.copy(out, off, 0, gotLen);
+      onChunk?.(gotLen);
+      off += gotLen;
     }
     return out;
   }
@@ -1008,7 +1093,19 @@ export class KnxConnection extends EventEmitter {
 
     await this.managementSession(deviceAddr, async (fns) => {
       const { nextSeq, waitResponse } = fns;
-      const MEM_CHUNK = 10;
+      // Real bug, found live 2026-08-30: this was 10 for as long as this
+      // per-chunk-flow-control code has existed, with no real evidence
+      // behind that number - it made writes correct (each chunk gets a
+      // real, healthy response) but needlessly slow, since it forces far
+      // more round trips than the data needs. Decoded a real ETS Full
+      // Download capture (docs/data/captures/2026-08-30_ets_full_download_
+      // serial_addressing.pcapng) directly: real ETS's own
+      // MemoryExtended_Write chunk sizes are 1, 2, 3, 4, 5, 6, 7, 10, 15,
+      // 30, 61, 62, 97, and 228 bytes - i.e. "as much as fits, capped at
+      // 228", using the smaller values only for a segment's tail remainder
+      // or genuinely small segments, never a fixed small pace. 228 matches
+      // exactly, confirmed against the real wire bytes rather than assumed.
+      const MEM_CHUNK = 228;
       // See DownloadExtra.mode's doc comment above for what 'partial' does.
       const mode: 'full' | 'partial' = extra?.mode ?? 'full';
 
@@ -1205,6 +1302,32 @@ export class KnxConnection extends EventEmitter {
       }
       let anyRelSegmentLoaded = false;
 
+      // One real, resolved-write job per interface object - the parameter
+      // object (from a `WriteRelMem` step below) and the GA/Association/
+      // Object 3 undeclared tables (further below) all become one of
+      // these, and are all executed together through the same batched
+      // phases (see the big comment further down for why).
+      interface RelmemJob {
+        objIdx: number;
+        label: string;
+        table: Buffer;
+        offset: number;
+        // Non-null only for a caller-supplied base (the /bus/write-memory
+        // debug tool's `resolvedBases`) - skips PID_TABLE_REFERENCE
+        // resolution entirely and uses this address directly.
+        presetBase: number | null;
+        // The real 9-byte LOAD_DATA extra, or null when no Unload/
+        // StartLoading/LoadData cycle applies at all (a WriteRelMem step
+        // whose object has no RelSegment declaration - the object is
+        // already loaded/known, use the caller-supplied base as-is).
+        loadDataPayload: Buffer | null;
+        // objIdx 4 (the application program) gets a real, real-hardware-
+        // confirmed PID_PROGRAM_VERSION write-back after its memory write
+        // finishes, before LoadCompleted - see the WriteRelMem case below.
+        isParamObject: boolean;
+      }
+      const relmemJobs: RelmemJob[] = [];
+
       for (const step of steps) {
         switch (step.type) {
           case 'WriteProp': {
@@ -1235,136 +1358,37 @@ export class KnxConnection extends EventEmitter {
             if (!paramMem) throw new Error('Parameter memory not available');
             const objIdx = step.objIdx ?? 4;
             const relSeg = relSegByObj.get(objIdx);
-            const base = extra?.resolvedBases?.[objIdx] ?? 0;
+            const presetBase = extra?.resolvedBases?.[objIdx] ?? null;
             const mem = paramMem.slice(0, step.size);
-            // Partial mode: skip this object entirely (no Unload/
-            // StartLoading/LoadData/write/LoadCompleted at all) when the
-            // device's current content already matches what we'd write -
-            // mirrors the real "17 bytes only" optimization seen in an
-            // actual ETS Partial Download capture (see DownloadExtra.mode's
-            // doc comment). Full mode's behavior below is unchanged either
-            // way - this whole block only runs `readRegionInSession` in
-            // partial mode.
-            if (mode === 'partial' && base) {
-              const current = await this.readRegionInSession(
-                fns,
-                deviceAddr,
-                base + (step.offset ?? 0),
-                mem.length,
-                MEM_CHUNK,
-              );
-              if (current.equals(mem)) {
-                log(
-                  `WriteRelMem ObjIdx=${objIdx}: partial mode, device already matches - skipping`,
-                );
-                break;
-              }
-            }
-            if (relSeg) {
-              log(`Unload ObjIdx=${objIdx}`);
-              await lsmWrite(objIdx, LSM_EVENT.UNLOAD);
-              log(`StartLoading ObjIdx=${objIdx}`);
-              await lsmWrite(objIdx, LSM_EVENT.START_LOADING);
-              log(`LoadData ObjIdx=${objIdx} Size=${relSeg.size}`);
-              await lsmWrite(
-                objIdx,
-                LSM_EVENT.LOAD_DATA,
-                // Full mode: preserve the model's own declared full/combined
-                // shape exactly as before. Partial mode: force the real
-                // captured Partial-Download mode byte (0x00) regardless of
-                // what the model declares - see DownloadExtra.mode.
-                loadDataExtra(
-                  relSeg.size,
-                  relSeg.fill,
-                  mode === 'full' ? relSeg.combined : false,
-                ),
-              );
-              anyRelSegmentLoaded = true;
-            }
-            for (let off = 0; off < mem.length; off += MEM_CHUNK) {
-              const chunk = mem.slice(off, off + MEM_CHUNK);
-              const seq = nextSeq();
-              const addr = base + step.offset! + off;
-              // A_Memory_Write only carries a 16-bit address - same problem as
-              // the read side (see readRegionInSession). A resolved relmem
-              // base can land above 0xFFFF, in which case the legacy service
-              // silently truncates to the wrong (low) address and writes
-              // nothing meaningful to the real target. Originally this only
-              // switched to A_MemoryExtended_Write when the address itself
-              // didn't fit in 16 bits. Correction: a real captured ETS
-              // Partial Download against 1.1.9 (address 0x5F53, well within
-              // 16 bits) still used A_MemoryExtended_Write exclusively -
-              // confirmed via byte-level replay: a verbatim replay of ETS's
-              // own captured frames (all-extended) persisted correctly on
-              // real hardware, while koolenex's own reconstruction (legacy
-              // Memory_Write for this same address, otherwise byte-identical
-              // count/address/data) silently failed to persist, twice,
-              // reproducibly. Root cause: this is a SystemB-family device
-              // (mask 0x07B0), which apparently only honors
-              // A_MemoryExtended_Write on the RelSegment-gated download path
-              // regardless of address size. Not a universal rule though -
-              // gate on `useExtendedMemory` (the device's real mask version,
-              // read above) rather than hardcoding "always extended": use
-              // extended unconditionally for a confirmed SystemB device,
-              // fall back to the original per-chunk address-size heuristic
-              // for anything else (unrecognized/unread mask, or a genuine
-              // legacy Bcu1/Bcu2/System-7 device, which real hardware has
-              // never confirmed either way for this specific write path).
-              const useExtendedForThisChunk =
-                useExtendedMemory ?? addr > 0xffff;
-              const apdu = useExtendedForThisChunk
-                ? apduMemoryExtendedWrite(seq, addr, chunk)
-                : apduConnected(
-                    seq,
-                    'Memory_Write',
-                    Buffer.concat([
-                      Buffer.from([
-                        chunk.length,
-                        (addr >> 8) & 0xff,
-                        addr & 0xff,
-                      ]),
-                      chunk,
-                    ]),
-                  );
-              const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
-              await this.sendCEMI(cemi);
-              await delay(30);
-              if (onProgress)
-                onProgress({
-                  msg: `WriteRelMem ${off}/${mem.length}`,
-                  pct: (off / mem.length) * 80,
-                });
-            }
-            if (relSeg) {
-              // Real ETS reads PID_PROGRAM_VERSION (property 13) on the
-              // Application Program object early in its session, then
-              // writes that SAME value back after the memory writes finish,
-              // right before LoadCompleted - root-caused 2026-08-28 by
-              // doing a complete, systematic pass over every frame in a
-              // real capture (not just the frames already expected), after
-              // two prior real fixes (load sequence, then authorization)
-              // still didn't make a write persist. Working theory:
-              // LoadCompleted marks the SEGMENT loaded, but this registers
-              // the freshly-loaded data as belonging to a real, known
-              // application - without it the device may discard the
-              // segment on restart despite LoadCompleted confirming
-              // Loaded state. Only meaningful for the Application Program
-              // object itself (objIdx 4 by KNX System 7 convention) - the
-              // GA/Association/other table objects don't have a program
-              // version to register. See docs/follow-ups/2026-08-28-
-              // write-path-missing-load-sequence.md.
-              if (objIdx === 4) {
-                const version = await propRead(4, 13);
-                if (version && version.length) {
-                  log(`PID_PROGRAM_VERSION=${version.toString('hex')} (write-back)`);
-                  await propWrite(4, 13, version);
-                } else {
-                  log('Could not read PID_PROGRAM_VERSION - skipping write-back');
-                }
-              }
-              log(`LoadCompleted ObjIdx=${objIdx}`);
-              await lsmWrite(objIdx, LSM_EVENT.LOAD_COMPLETED);
-            }
+            // Deferred to the batched phases below (Unload/StartLoading/
+            // LoadData/PID7-resolve/write/LoadCompleted run together across
+            // every interface object, not one at a time) - see the big
+            // comment on that batch for why. `presetBase` (the
+            // /bus/write-memory debug tool's caller-supplied address) skips
+            // PID_TABLE_REFERENCE resolution there entirely, same as before.
+            relmemJobs.push({
+              objIdx,
+              label: `param obj ${objIdx}`,
+              table: mem,
+              offset: step.offset ?? 0,
+              presetBase,
+              // Full mode: preserve the model's own declared full/combined
+              // shape exactly as before. Partial mode: force the real
+              // captured Partial-Download mode byte (0x00) regardless of
+              // what the model declares - see DownloadExtra.mode. `null`
+              // when the object has no RelSegment declaration at all - no
+              // Unload/StartLoading/LoadData cycle applies, same as before
+              // (the object is already loaded/known; write directly to
+              // whatever base was supplied).
+              loadDataPayload: relSeg
+                ? loadDataExtra(
+                    relSeg.size,
+                    relSeg.fill,
+                    mode === 'full' ? relSeg.combined : false,
+                  )
+                : null,
+              isParamObject: objIdx === 4,
+            });
             break;
           }
           case 'LoadImageProp': {
@@ -1442,106 +1466,295 @@ export class KnxConnection extends EventEmitter {
       const declaredTableObjIdxs = new Set(
         steps.filter((s) => s.type === 'WriteRelMem').map((s) => s.objIdx),
       );
-      const writeUndeclaredTable = async (
-        objIdx: number,
-        table: Buffer,
-        label: string,
-      ): Promise<void> => {
-        // Partial mode: peek the real base and current content BEFORE
-        // starting any load-state transition, and skip the whole cycle if
-        // the device already matches - same rationale as the WriteRelMem
-        // case above. No real Partial Download example of a GA/Association
-        // table write exists yet (see the reference doc's caveat below), so
-        // this is a best-effort extrapolation of the same pattern, not
-        // something independently confirmed for these two objects.
-        if (mode === 'partial') {
-          const peekBuf = await propRead(objIdx, 7);
-          const peekBase =
-            peekBuf && peekBuf.length >= 4 ? peekBuf.readUInt32BE(0) : 0;
-          if (peekBase) {
-            const current = await this.readRegionInSession(
-              fns,
-              deviceAddr,
-              peekBase,
-              table.length,
-              MEM_CHUNK,
-            );
-            if (current.equals(table)) {
-              log(
-                `ObjIdx=${objIdx} (${label}): partial mode, device already matches - skipping`,
-              );
-              return;
-            }
-          }
-        }
-        log(`Unload ObjIdx=${objIdx} (${label})`);
-        await lsmWrite(objIdx, LSM_EVENT.UNLOAD);
-        log(`StartLoading ObjIdx=${objIdx} (${label})`);
-        await lsmWrite(objIdx, LSM_EVENT.START_LOADING);
-        log(`LoadData ObjIdx=${objIdx} Size=${table.length} (${label})`);
-        await lsmWrite(
-          objIdx,
-          LSM_EVENT.LOAD_DATA,
-          // fill=0. mode=Full matches every real GA/Association table
-          // LoadData observed so far (see docs/knx-device-write-protocol.md
-          // §2.3); mode=Partial (2026-08-29) is the same best-effort
-          // extrapolation noted above, not independently confirmed on the
-          // wire for these two objects.
-          loadDataExtra(table.length, 0, mode === 'full'),
-        );
-        anyRelSegmentLoaded = true;
-        const baseBuf = await propRead(objIdx, 7);
-        const base = baseBuf && baseBuf.length >= 4 ? baseBuf.readUInt32BE(0) : 0;
-        if (!base) {
-          log(
-            `ObjIdx=${objIdx} (${label}): PID_TABLE_REFERENCE unallocated - skipping write`,
-          );
-          return;
-        }
-        for (let off = 0; off < table.length; off += MEM_CHUNK) {
-          const chunk = table.subarray(off, off + MEM_CHUNK);
-          const seq = nextSeq();
-          const addr = base + off;
-          // Same mask-version gate as the WriteRelMem case above (§3 of the
-          // reference doc) - extended unconditionally for a confirmed
-          // System B device, falling back to the address-size heuristic
-          // otherwise.
-          const useExtendedForThisChunk = useExtendedMemory ?? addr > 0xffff;
-          const apdu = useExtendedForThisChunk
-            ? apduMemoryExtendedWrite(seq, addr, chunk)
-            : apduConnected(
-                seq,
-                'Memory_Write',
-                Buffer.concat([
-                  Buffer.from([chunk.length, (addr >> 8) & 0xff, addr & 0xff]),
-                  chunk,
-                ]),
-              );
-          const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
-          await this.sendCEMI(cemi);
-          await delay(30);
-        }
-        log(`LoadCompleted ObjIdx=${objIdx} (${label})`);
-        await lsmWrite(objIdx, LSM_EVENT.LOAD_COMPLETED);
-      };
+      // Undeclared-table write: GA table (objIdx 1), Association table
+      // (objIdx 2), and Object 3 / Group Object Table (objIdx 3) all use
+      // the same real mechanism real ETS uses for a table the app's own
+      // model doesn't declare a step for - the same undeclared-table
+      // mechanism, folded into the same `relmemJobs` batch as the
+      // parameter object above (see the big comment on that batch below
+      // for why they all need to run together).
       if (gaTable && gaTable.length && !declaredTableObjIdxs.has(1)) {
-        await writeUndeclaredTable(1, gaTable, 'GA table');
+        relmemJobs.push({
+          objIdx: 1,
+          label: 'GA table',
+          table: gaTable,
+          offset: 0,
+          presetBase: null,
+          loadDataPayload: loadDataExtra(gaTable.length, 0, mode === 'full'),
+          isParamObject: false,
+        });
       }
       if (assocTable && assocTable.length && !declaredTableObjIdxs.has(2)) {
-        await writeUndeclaredTable(2, assocTable, 'Association table');
+        relmemJobs.push({
+          objIdx: 2,
+          label: 'Association table',
+          table: assocTable,
+          offset: 0,
+          presetBase: null,
+          loadDataPayload: loadDataExtra(assocTable.length, 0, mode === 'full'),
+          isParamObject: false,
+        });
       }
-      // Object 3 (Group Object Table) - same universal, undeclared-table
-      // mechanism as GA/Association above. See DownloadExtra.groupObjectTable's
-      // own doc comment for the write-trigger policy and its caveats (not yet
-      // independently proven on real hardware for this specific object -
-      // the GA/Assoc precedent this borrows from IS real-hardware-proven,
-      // Object 3 itself is not, as of this writing).
+      // Object 3's own write-trigger policy and caveats: see
+      // DownloadExtra.groupObjectTable's doc comment.
       if (
         extra?.groupObjectTable &&
         extra.groupObjectTable.length &&
         !declaredTableObjIdxs.has(3)
       ) {
-        await writeUndeclaredTable(3, extra.groupObjectTable, 'Group Object Table');
+        relmemJobs.push({
+          objIdx: 3,
+          label: 'Group Object Table',
+          table: extra.groupObjectTable,
+          offset: 0,
+          presetBase: null,
+          loadDataPayload: loadDataExtra(
+            extra.groupObjectTable.length,
+            0,
+            mode === 'full',
+          ),
+          isParamObject: false,
+        });
+      }
+
+      // Every interface-object write this download needs - the parameter
+      // object (WriteRelMem, above) and the undeclared GA/Association/
+      // Object 3 tables (above) - runs through the SAME batched phases
+      // together: Unload for every object first, then StartLoading+
+      // LoadData for every object, and only THEN PID_TABLE_REFERENCE
+      // (property 7) resolution + the real memory write for every object,
+      // then LoadCompleted for every object. Never one object's whole
+      // cycle run to completion before starting the next.
+      //
+      // Found via two real ETS Full Download captures against a freshly-
+      // reset device (2026-08-30): the first (GA/Association/Object 3
+      // only) showed Object 3 - last in an earlier, per-object-sequential
+      // version of this code - come back with PID 7 still unallocated even
+      // after its own correctly-formed Unload/StartLoading/LoadData cycle,
+      // on a real device, in a real run; the apparent "~1.5s gap before
+      // Object 3's PID 7 read" in that capture wasn't a deliberate
+      // per-object wait, it was real ETS working through the other two
+      // objects' own StartLoading/LoadData first. A second capture,
+      // re-examined after the parameter object hit the identical failure
+      // mode (a real koolenex Full Download attempt against the same
+      // freshly-reset device returned "segment_unallocated" for the
+      // parameter object itself, confirmed not caused by TCP reconnection
+      // or the device still being in physical programming mode - both
+      // ruled out live), showed the parameter object's own Unload/
+      // StartLoading/LoadData interleaved into the exact same batch as the
+      // other three, not run separately or first.
+      //
+      // Partial mode: peek each object's real base and current content
+      // BEFORE starting any load-state transition, and drop it from the
+      // batch entirely if the device already matches - same rationale as
+      // before this refactor. A job with a caller-supplied `presetBase`
+      // (the /bus/write-memory debug tool) peeks with that address
+      // directly instead of resolving PID 7 first. No real Partial
+      // Download example of a GA/Association/Object-3 table write exists
+      // yet (see the reference doc's caveat below), so extending this to
+      // those three objects is a best-effort extrapolation, not something
+      // independently confirmed for them - the parameter object's own
+      // partial-mode behavior is unchanged from before this refactor.
+      //
+      // Confirmed end to end on real hardware, 2026-08-30, alongside the
+      // memory-write flow-control fix below (both were needed together):
+      // a real Full Download against a genuinely blank, factory-reset
+      // device wrote all four objects cleanly in one run (no unallocated
+      // skips), and a subsequent Verify read back the parameter memory
+      // byte-for-byte matching (0 of 8178 bytes differing). See
+      // docs/knx-device-write-protocol.md's timing/pacing section for the
+      // consolidated writeup.
+      let activeJobs: RelmemJob[] = relmemJobs;
+      if (mode === 'partial') {
+        activeJobs = [];
+        for (const j of relmemJobs) {
+          let resolvedPeekBase: number;
+          if (j.presetBase != null) {
+            resolvedPeekBase = j.presetBase;
+          } else {
+            const buf = await propRead(j.objIdx, 7);
+            resolvedPeekBase = buf && buf.length >= 4 ? buf.readUInt32BE(0) : 0;
+          }
+          if (resolvedPeekBase) {
+            const current = await this.readRegionInSession(
+              fns,
+              deviceAddr,
+              resolvedPeekBase + j.offset,
+              j.table.length,
+              MEM_CHUNK,
+            );
+            if (current.equals(j.table)) {
+              log(
+                `ObjIdx=${j.objIdx} (${j.label}): partial mode, device already matches - skipping`,
+              );
+              continue;
+            }
+          }
+          activeJobs.push(j);
+        }
+      }
+
+      if (activeJobs.length) {
+        anyRelSegmentLoaded = true;
+
+        const loadCycleJobs = activeJobs.filter((j) => j.loadDataPayload);
+        for (const j of loadCycleJobs) {
+          log(`Unload ObjIdx=${j.objIdx} (${j.label})`);
+          await lsmWrite(j.objIdx, LSM_EVENT.UNLOAD);
+        }
+        for (const j of loadCycleJobs) {
+          log(`StartLoading ObjIdx=${j.objIdx} (${j.label})`);
+          await lsmWrite(j.objIdx, LSM_EVENT.START_LOADING);
+          log(`LoadData ObjIdx=${j.objIdx} Size=${j.table.length} (${j.label})`);
+          await lsmWrite(j.objIdx, LSM_EVENT.LOAD_DATA, j.loadDataPayload!);
+        }
+
+        const resolvedBase = new Map<number, number>();
+        for (const j of activeJobs) {
+          let base: number;
+          if (j.presetBase != null) {
+            base = j.presetBase;
+          } else if (j.loadDataPayload) {
+            // A small pacing delay before each PID_TABLE_REFERENCE read.
+            // Real-hardware testing (2026-08-30) against a genuinely blank
+            // device found the real underlying cause of an object's reads
+            // going unanswered was a large preceding memory write leaving
+            // the device processing a response backlog (see the real fix
+            // in the write loop below - it now waits for each chunk's own
+            // response instead of firing a fixed pace, which was the
+            // actual root cause). This delay is a low-risk, cheap
+            // defensive margin between consecutive objects' reads within
+            // the same batch phase, kept alongside that fix rather than
+            // independently proven necessary on its own.
+            await delay(30);
+            const baseBuf = await propRead(j.objIdx, 7);
+            base = baseBuf && baseBuf.length >= 4 ? baseBuf.readUInt32BE(0) : 0;
+            if (!base) {
+              log(
+                `ObjIdx=${j.objIdx} (${j.label}): PID_TABLE_REFERENCE unallocated - skipping write`,
+              );
+              continue;
+            }
+          } else {
+            // No RelSegment declaration and no caller-supplied base - the
+            // object is already loaded/known; matches the pre-refactor
+            // behavior of writing to address 0 + offset in this case
+            // (a real caller is expected to always supply a base here).
+            base = 0;
+          }
+          resolvedBase.set(j.objIdx, base);
+          for (let off = 0; off < j.table.length; off += MEM_CHUNK) {
+            const chunk = j.table.subarray(off, off + MEM_CHUNK);
+            const seq = nextSeq();
+            const addr = base + j.offset + off;
+            // A_Memory_Write only carries a 16-bit address - same problem as
+            // the read side (see readRegionInSession). A resolved relmem
+            // base can land above 0xFFFF, in which case the legacy service
+            // silently truncates to the wrong (low) address and writes
+            // nothing meaningful to the real target. Originally this only
+            // switched to A_MemoryExtended_Write when the address itself
+            // didn't fit in 16 bits. Correction: a real captured ETS
+            // Partial Download against 1.1.9 (address 0x5F53, well within
+            // 16 bits) still used A_MemoryExtended_Write exclusively -
+            // confirmed via byte-level replay: a verbatim replay of ETS's
+            // own captured frames (all-extended) persisted correctly on
+            // real hardware, while koolenex's own reconstruction (legacy
+            // Memory_Write for this same address, otherwise byte-identical
+            // count/address/data) silently failed to persist, twice,
+            // reproducibly. Root cause: this is a SystemB-family device
+            // (mask 0x07B0), which apparently only honors
+            // A_MemoryExtended_Write on the RelSegment-gated download path
+            // regardless of address size. Not a universal rule though -
+            // gate on `useExtendedMemory` (the device's real mask version,
+            // read above) rather than hardcoding "always extended": use
+            // extended unconditionally for a confirmed SystemB device,
+            // fall back to the original per-chunk address-size heuristic
+            // for anything else (unrecognized/unread mask, or a genuine
+            // legacy Bcu1/Bcu2/System-7 device, which real hardware has
+            // never confirmed either way for this specific write path).
+            const useExtendedForThisChunk = useExtendedMemory ?? addr > 0xffff;
+            const apdu = useExtendedForThisChunk
+              ? apduMemoryExtendedWrite(seq, addr, chunk)
+              : apduConnected(
+                  seq,
+                  'Memory_Write',
+                  Buffer.concat([
+                    Buffer.from([chunk.length, (addr >> 8) & 0xff, addr & 0xff]),
+                    chunk,
+                  ]),
+                );
+            const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+            // Real bug, found live 2026-08-30: this loop used to fire each
+            // chunk with a flat 30ms pace and never confirm the device
+            // actually kept up (these writes weren't response-waited at
+            // all, unlike propRead/propWrite). For a large write (the
+            // parameter object's memory, hundreds of chunks) a real device
+            // was found genuinely backlogged: its own response
+            // confirmations kept trickling in for ~9s after we'd finished
+            // BLASTING the whole burst - moving straight on to another
+            // object's PID 7 read while the device was still digesting
+            // that backlog meant the read queued behind it and timed out
+            // on our side, not a protocol/sequencing bug. Confirmed
+            // against a real ETS capture of this exact write (2026-08-30):
+            // ETS never blasts chunks either - it waits for each one's own
+            // real response (response times observed varying 56ms-279ms
+            // as the write progressed) before sending the next, adapting
+            // automatically to whatever the device's real pace is, no
+            // fixed delay involved at all. Same real response APCI
+            // (MemoryExtended_Write_Response / Memory_Response) either
+            // way; not fatal if a chunk's response never arrives (log and
+            // continue - a real device may legitimately not always
+            // respond, matching propWrite's own tolerance elsewhere).
+            const respP = waitResponse(
+              useExtendedForThisChunk
+                ? 'MemoryExtended_Write_Response'
+                : 'Memory_Response',
+              3000,
+            );
+            await this.sendCEMI(cemi);
+            try {
+              await respP;
+            } catch (_e) {
+              log(`No write response for ObjIdx=${j.objIdx} offset=${off} (continuing)`);
+            }
+            if (onProgress && j.isParamObject)
+              onProgress({
+                msg: `WriteRelMem ${off}/${j.table.length}`,
+                pct: (off / j.table.length) * 80,
+              });
+          }
+          // Real ETS reads PID_PROGRAM_VERSION (property 13) on the
+          // Application Program object early in its session, then writes
+          // that SAME value back after its memory writes finish, right
+          // before LoadCompleted - root-caused 2026-08-28 by doing a
+          // complete, systematic pass over every frame in a real capture
+          // (not just the frames already expected), after two prior real
+          // fixes (load sequence, then authorization) still didn't make a
+          // write persist. Working theory: LoadCompleted marks the SEGMENT
+          // loaded, but this registers the freshly-loaded data as
+          // belonging to a real, known application - without it the
+          // device may discard the segment on restart despite
+          // LoadCompleted confirming Loaded state. Only meaningful for the
+          // Application Program object itself (objIdx 4 by KNX System 7
+          // convention) - the GA/Association/Object 3 objects don't have a
+          // program version to register. See docs/follow-ups/2026-08-28-
+          // write-path-missing-load-sequence.md.
+          if (j.isParamObject && j.loadDataPayload) {
+            const version = await propRead(4, 13);
+            if (version && version.length) {
+              log(`PID_PROGRAM_VERSION=${version.toString('hex')} (write-back)`);
+              await propWrite(4, 13, version);
+            } else {
+              log('Could not read PID_PROGRAM_VERSION - skipping write-back');
+            }
+          }
+        }
+
+        for (const j of loadCycleJobs) {
+          if (!resolvedBase.has(j.objIdx)) continue; // unallocated - skipped above
+          log(`LoadCompleted ObjIdx=${j.objIdx} (${j.label})`);
+          await lsmWrite(j.objIdx, LSM_EVENT.LOAD_COMPLETED);
+        }
       }
 
       // Real ETS ends a RelSegment-driven download with a device Restart

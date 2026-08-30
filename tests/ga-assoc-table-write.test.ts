@@ -111,11 +111,21 @@ class TableFakeDevice extends KnxConnection {
       const address = (frame.apduData[1]! << 8) | frame.apduData[2]!;
       const data = frame.apduData.subarray(3, 3 + count);
       data.copy(this.memory, address);
+      // downloadDevice()'s memory-write loop now waits for each chunk's
+      // real response before sending the next (2026-08-30 fix) - respond
+      // like real hardware does, or every write would stall on the 3s
+      // timeout.
+      const respApdu = apduGroup('Memory_Response', 0, frame.apduData);
+      const resp = parseCEMI(buildCEMI(this.deviceAddr, this.localAddr, respApdu, false))!;
+      setImmediate(() => this._onCEMI(resp));
     } else if (frame.apciName === 'MemoryExtended_Write') {
       const count = frame.apduData[0]!;
       const address = (frame.apduData[1]! << 16) | (frame.apduData[2]! << 8) | frame.apduData[3]!;
       const data = frame.apduData.subarray(4, 4 + count);
       data.copy(this.memory, address);
+      const respApdu = apduConnectedFull(0, APCI_EXT.MemoryExtended_Write_Response, Buffer.alloc(0));
+      const resp = parseCEMI(buildCEMI(this.deviceAddr, this.localAddr, respApdu, false))!;
+      setImmediate(() => this._onCEMI(resp));
     }
     return Promise.resolve();
   }

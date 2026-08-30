@@ -355,11 +355,16 @@ describe('KnxConnection.programIA', () => {
     assert.deepEqual(result, { ok: true, newAddr: '1.1.5' });
     assert.equal(conn.sent.length, 1);
 
-    // Verify the CEMI is addressed to 0.0.0 (broadcast for programming)
+    // Same confirmed-correct wire format as every other network-management
+    // broadcast service in this family (see checkProgrammingMode() etc.):
+    // GROUP-type frame to 0/0/0 at System priority (ctrl1=0xb0) - not an
+    // individual-type frame to 0.0.0 at ordinary priority, which a real
+    // device silently never accepted (found live, 2026-08-30).
     const parsed = parseCEMI(conn.sent[0]!);
     assert.ok(parsed);
-    assert.equal(parsed.dst, '0.0.0');
-    assert.equal(parsed.isGroup, false);
+    assert.equal(parsed.dst, '0/0/0');
+    assert.equal(parsed.isGroup, true);
+    assert.equal(conn.sent[0]![2], 0xb0);
   });
 
   it('throws when not connected', async () => {
@@ -1004,7 +1009,10 @@ describe('KnxConnection.downloadDevice', () => {
     conn.connected = true;
     conn.localAddr = '1.0.1';
 
-    // 25 bytes of param memory — should be split into 3 chunks (10+10+5)
+    // 25 bytes of param memory - well under MEM_CHUNK (228, see
+    // knx-connection.ts's own comment), so this exercises the single-chunk
+    // path; the dedicated boundary-straddle test in
+    // relmem-write-protocol.test.ts covers the real multi-chunk case.
     const paramMem = Buffer.alloc(25, 0xaa);
     const steps: DownloadStep[] = [
       { type: 'WriteRelMem', objIdx: 0, propId: 0, size: 25, offset: 0x100 },

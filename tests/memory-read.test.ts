@@ -284,6 +284,40 @@ describe('KnxConnection.readMemory', () => {
     assert.equal(reads.length, 3);
   });
 
+  it('caps each legacy Memory_Read request at the real 6-bit count-field max (63), even when chunkSize is larger', async () => {
+    // Real bug, found live 2026-08-30, same session as the short-response
+    // fix above: `chunkSize` defaults to 228 (the real value confirmed for
+    // the EXTENDED write/read service's full 1-byte count field) - but the
+    // LEGACY A_Memory_Read packs its count into a 6-bit APCI field (max
+    // 63). A request for 64+ bytes via the legacy service isn't rejected
+    // or clamped anywhere upstream - `apduMemoryRead(seq, 64, addr)`
+    // silently encodes `64 & 0x3f = 0`, a request for literally zero
+    // bytes, which a real device correctly answers with... zero bytes,
+    // looking exactly like a device malfunction rather than a malformed
+    // request. This test's read (100 bytes at a legacy, sub-0xFFFF
+    // address, with the real default chunkSize of 228) would have hit
+    // `n=64` on some chunk without the cap in readRegionInSession().
+    const mem = Buffer.alloc(0x0200);
+    for (let i = 0; i < mem.length; i++) mem[i] = i & 0xff;
+    const dev = new FakeMemoryDevice('1.1.4', mem);
+
+    const out = await dev.readMemory('1.1.4', 0x0000, 100, 228);
+
+    assert.equal(out.length, 100);
+    assert.deepEqual([...out], [...mem.slice(0, 100)]);
+    const reads = dev.sent
+      .map((c) => parseCEMI(c))
+      .filter((f) => f && f.apciName === 'Memory_Read');
+    // Every real request's own encoded count must never exceed 63.
+    for (const f of reads) {
+      const count = f!.apdu[1]! & 0x3f;
+      assert.ok(
+        count > 0 && count <= 63,
+        `legacy Memory_Read count must be 1-63, got ${count}`,
+      );
+    }
+  });
+
   it('rejects a Memory_Response whose address does not match the request', async () => {
     const mem = Buffer.alloc(0x0200);
     for (let i = 0; i < mem.length; i++) mem[i] = i & 0xff;
@@ -403,5 +437,92 @@ describe('KnxConnection.readMemory — addresses above 0xFFFF', () => {
       dev.readMemory('1.1.10', 0x10000, 4, 8),
       /MemoryExtended read error rc=1/,
     );
+  });
+});
+
+// ── A response genuinely shorter than the requested count ──────────────────
+//
+// Real bug, found live 2026-08-30: a real device answered a large single
+// MemoryExtended_Read (98 bytes requested) with a genuinely SHORT response
+// (~34 real bytes) for reasons unrelated to the requested chunk size - the
+// request was well-formed and the device ACKed it (returnCode=0), it just
+// didn't return everything asked for in one response. The read loop used to
+// advance `off` by the REQUESTED amount regardless of how much data actually
+// came back, permanently losing the shortfall - every later byte silently
+// stayed at zero, indistinguishable from genuine on-device content. Looked
+// exactly like a real device-side data-loss/hardware-limitation bug until a
+// deliberately smaller, separate re-read of the same address range came back
+// with the real (non-zero) content the large read had silently dropped.
+describe('KnxConnection.readMemory — a response shorter than requested', () => {
+  it('retries for the remainder instead of silently accepting a short response as complete', async () => {
+    class ShortResponseDevice extends FakeMemoryDevice {
+      // Real hardware behavior being reproduced: however many bytes are
+      // requested in one call, this device only ever returns at most 10 of
+      // them - a hard per-response cap unrelated to what the caller asked
+      // for, forcing the read loop to come back for more.
+      static readonly MAX_PER_RESPONSE = 10;
+      sendCEMI(cemi: Buffer): Promise<void> {
+        this.sent.push(cemi);
+        const frame = parseCEMI(cemi);
+        if (frame && frame.apciName === 'MemoryExtended_Read') {
+          const requested = frame.apduData[0]!;
+          const address =
+            (frame.apduData[1]! << 16) |
+            (frame.apduData[2]! << 8) |
+            frame.apduData[3]!;
+          const actualCount = Math.min(
+            requested,
+            ShortResponseDevice.MAX_PER_RESPONSE,
+          );
+          const data = (this as any).memory.slice(
+            address,
+            address + actualCount,
+          );
+          const word =
+            ((TPCI.DATA_CONNECTED << 10) |
+              APCI_EXT.MemoryExtended_Read_Response) &
+            0xffff;
+          const respApdu = Buffer.concat([
+            Buffer.from([
+              (word >> 8) & 0xff,
+              word & 0xff,
+              0x00,
+              (address >> 16) & 0xff,
+              (address >> 8) & 0xff,
+              address & 0xff,
+            ]),
+            data,
+          ]);
+          const resp = parseCEMI(
+            buildCEMI('1.1.9', '1.0.1', respApdu, false),
+          )!;
+          setImmediate(() => this._onCEMI(resp));
+        }
+        return Promise.resolve();
+      }
+    }
+    // Base above 0xFFFF so this exercises the extended-read branch, matching
+    // where the real bug was found (a relmem base, e.g. Object 3's).
+    const mem = Buffer.alloc(0x10100);
+    for (let i = 0; i < mem.length; i++) mem[i] = (i * 7 + 3) & 0xff; // non-zero, non-trivial pattern
+    const dev = new ShortResponseDevice('1.1.9', mem);
+
+    // Ask for 98 bytes in ONE nominal chunk (chunkSize=98, matching the real
+    // Object 3 read) - the device can only ever give back 10 at a time.
+    const out = await dev.readMemory('1.1.9', 0x10000, 98, 98);
+
+    assert.equal(out.length, 98);
+    assert.deepEqual([...out], [...mem.slice(0x10000, 0x10000 + 98)]);
+    // Every byte must be real content from `mem`, not a silently-accepted
+    // zero for whatever a single response didn't cover.
+    assert.ok(
+      !out.equals(Buffer.alloc(98)),
+      'must not be all-zero - that is exactly the silent-truncation bug',
+    );
+    // 98 bytes at 10 bytes/response takes 10 real round trips, not 1.
+    const reads = dev.sent
+      .map((c) => parseCEMI(c))
+      .filter((f) => f && f.apciName === 'MemoryExtended_Read');
+    assert.equal(reads.length, 10);
   });
 });

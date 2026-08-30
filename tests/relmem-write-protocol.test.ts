@@ -111,10 +111,16 @@ class FakeWritableMemoryDevice extends KnxConnection {
       const address = (frame.apduData[1]! << 8) | frame.apduData[2]!;
       const data = frame.apduData.subarray(3, 3 + count);
       data.copy(this.memory, address);
-      // downloadDevice()'s WriteRelMem loop doesn't wait for a response
-      // (fire-and-forget, see the comment there) - no reply needed for the
-      // write to "land", matching the real fire-and-forget behavior. Still
-      // exercised via `sent` below for anyone who wants to inspect frames.
+      // downloadDevice()'s WriteRelMem loop now waits for each chunk's
+      // real response before sending the next (2026-08-30 fix, see its own
+      // comment there - a real device was found genuinely backlogged
+      // under the old fire-and-forget pacing) - respond like real
+      // hardware does, or every write would stall on the 3s timeout.
+      const respApdu = apduGroup('Memory_Response', 0, frame.apduData);
+      const resp = parseCEMI(
+        buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+      )!;
+      setImmediate(() => this._onCEMI(resp));
     } else if (frame.apciName === 'MemoryExtended_Write') {
       // extraBuf layout from apduMemoryExtendedWrite: [count(1)][addr(3,BE)][data...]
       const count = frame.apduData[0]!;
@@ -124,6 +130,15 @@ class FakeWritableMemoryDevice extends KnxConnection {
         frame.apduData[3]!;
       const data = frame.apduData.subarray(4, 4 + count);
       data.copy(this.memory, address);
+      const respApdu = apduConnectedFull(
+        0,
+        APCI_EXT.MemoryExtended_Write_Response,
+        Buffer.alloc(0),
+      );
+      const resp = parseCEMI(
+        buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+      )!;
+      setImmediate(() => this._onCEMI(resp));
     }
     return Promise.resolve();
   }
@@ -270,26 +285,29 @@ describe('WriteRelMem protocol-level test — 1.1.10 (real captured memory, base
     // case.
     const backing = Buffer.alloc(0x10100);
     const dev = new FakeWritableMemoryDevice('1.1.10', backing, null);
-    const payload = Buffer.alloc(16, 0xaa);
+    const payload = Buffer.alloc(250, 0xaa);
 
     const steps: DownloadStep[] = [
       { type: 'WriteRelMem', objIdx: 4, propId: 0, size: payload.length, offset: 0 },
     ];
-    // Base chosen so the write region straddles 0xFFFF with MEM_CHUNK=10:
-    // downloadDevice()'s WriteRelMem loop chunks at 10 bytes; base 0xFFF8 +
-    // off 0 = 0xFFF8 (fits), base 0xFFF8 + off 10 = 0x10002 (doesn't).
+    // Base/length chosen so the write region straddles 0xFFFF with the
+    // real MEM_CHUNK=228 (see knx-connection.ts's own comment - confirmed
+    // 2026-08-30 against a real ETS capture, not the old, unverified 10):
+    // downloadDevice()'s WriteRelMem loop chunks at 228 bytes; base
+    // 0xFFDC (65500) + off 0 = 0xFFDC (fits in 16 bits), base 0xFFDC + off
+    // 228 = 65728 = 0x100C0 (doesn't).
     await dev.downloadDevice('1.1.10', steps, null, null, payload, undefined, {
-      resolvedBases: { 4: 0xfff8 },
+      resolvedBases: { 4: 0xffdc },
     });
 
     const sentWrites = dev.writesSent();
-    assert.equal(sentWrites.length, 2, 'expected 2 chunks for a 16-byte write at MEM_CHUNK=10');
-    assert.equal(sentWrites[0]!.extended, false, 'fallback heuristic: first chunk (0xFFF8) fits in 16 bits');
-    assert.equal(sentWrites[0]!.address, 0xfff8);
-    assert.equal(sentWrites[1]!.extended, true, 'fallback heuristic: second chunk (0x10002) does not fit');
-    assert.equal(sentWrites[1]!.address, 0x10002);
+    assert.equal(sentWrites.length, 2, 'expected 2 chunks for a 250-byte write at MEM_CHUNK=228');
+    assert.equal(sentWrites[0]!.extended, false, 'fallback heuristic: first chunk (0xFFDC) fits in 16 bits');
+    assert.equal(sentWrites[0]!.address, 0xffdc);
+    assert.equal(sentWrites[1]!.extended, true, 'fallback heuristic: second chunk (0x100C0) does not fit');
+    assert.equal(sentWrites[1]!.address, 0x100c0);
     assert.deepEqual(
-      [...dev.memory.subarray(0xfff8, 0xfff8 + 16)],
+      [...dev.memory.subarray(0xffdc, 0xffdc + 250)],
       [...payload],
     );
   });

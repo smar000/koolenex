@@ -141,6 +141,29 @@ Objects that need writing are unloaded first, in reverse index order (e.g. 4 the
 (observed order: 4, then 3, then 1, then 2) 🟡 — likely dependency ordering between objects
 specific to the application, not verified against other configurations.
 
+### 3.1 Phases are batched across objects, not run one object at a time
+
+🟢 **Real ETS runs each load-state phase across every object that needs writing before moving to
+the next phase**, rather than completing one object's entire Unload → StartLoading → LoadData →
+resolve-address → write → LoadCompleted cycle before starting the next object's. Confirmed by
+frame-by-frame decode of a real ETS capture: every object's Unload is sent first, then every
+object's StartLoading+LoadData, then every object's memory address is resolved (the
+`PID_TABLE_REFERENCE` read, §6), and only then does each object's write/LoadCompleted proceed.
+
+This matters concretely for a genuinely blank (factory-reset) device, where an object's real
+memory segment has never been allocated: `PID_TABLE_REFERENCE` reads back `0x00000000`
+("unallocated") until the device itself allocates it as a side effect of processing the batch of
+StartLoading/LoadData declarations across *all* objects together. An implementation that resolves
+one object's address immediately after its own StartLoading/LoadData — before the other objects'
+declarations have been sent — can read back an unallocated address for objects later in the
+sequence, even though the exact same write would succeed once batched correctly. This was found
+and fixed 2026-08-30 in `downloadDevice()` (`server/knx-connection.ts`) by collecting every
+object's write into one job list and running each phase (Unload-all, StartLoading+LoadData-all,
+resolve-all, write, LoadCompleted-all) across the whole batch, instead of a per-object sequential
+loop. Confirmed end to end afterward: a real Full Download against a genuinely blank, factory-reset
+device wrote all four objects cleanly in one run, and a subsequent Verify matched the parameter
+memory byte-for-byte (0 of 8178 bytes differing).
+
 ## 4. Wire format reference
 
 ### 4.1 Memory write services
@@ -178,6 +201,75 @@ mis-displayed this write's target address in its one-line summary view (observed
 address when the real decoded address, from the raw bytes, was a different one). Never trust a
 capture tool's own summary/quick-view for a memory-write address — always manually decode the
 raw bytes.
+
+**Real per-chunk flow control, not a fixed pace** 🟢, found 2026-08-30 investigating a genuinely
+blank (factory-reset) device: a large object (e.g. the parameter object, split into many
+same-size memory-write chunks) sent as a fast, fire-and-forget burst — one write chunk immediately
+after the previous, with no wait for each chunk's own response — measurably outruns the device's
+own processing rate. Symptom observed live: after such a burst, the device kept sending write
+responses for several more seconds (~9s trickle observed) after koolenex had already finished
+sending, and any read issued to the device during that backlog (e.g. the next object's
+`PID_TABLE_REFERENCE` resolve, §3.1) went unanswered — not because the address was genuinely
+unallocated, but because the device had no processing capacity free to answer it.
+
+**Real ETS never has this problem because it waits for each chunk's own write response before
+sending the next one** — confirmed directly from a real capture: per-chunk response time varies
+observably (56ms–279ms across chunks in the same session), never a fixed pace. This means the
+correct fix is genuine flow control (wait for the real device response before sending the next
+chunk), not a fixed or scaled delay between chunks — a scaled-delay guess was tried first and,
+while it reduced the failure rate, did not fully eliminate it; real per-chunk `await` on the
+matching `Memory_Response`/`MemoryExtended_Write_Response` (with a generous timeout and a
+tolerant catch-and-continue, matching the existing `propWrite` pattern, since occasionally missing
+one response should not abort the whole download) is what actually matched real ETS's own
+behavior and resolved the issue. Implemented 2026-08-30 in `downloadDevice()`'s memory-write loop
+(`server/knx-connection.ts`).
+
+**Real per-chunk size: up to 228 bytes, not a small fixed pace** 🟢, found 2026-08-30 diagnosing a
+correct-but-very-slow real download (every chunk got a real, healthy response - the flow-control
+fix above was working - but writing 10KB of parameter memory still took several minutes). Decoded
+every `MemoryExtended_Write` chunk size directly from a real ETS Full Download capture
+(`docs/data/captures/2026-08-30_ets_full_download_serial_addressing.pcapng`): the real values seen
+are 1, 2, 3, 4, 5, 6, 7, 10, 15, 30, 61, 62, 97, and 228 bytes - i.e. ETS writes as much as fits in
+one chunk, capped at 228, using the smaller values only for a segment's tail remainder or
+genuinely small segments, never a fixed small pace. koolenex's own `MEM_CHUNK` constant had been
+`10` for as long as this per-chunk-flow-control code existed, with no real evidence behind that
+specific number - it made every chunk correct, just forced roughly 23x more round trips than the
+data needed. Fixed to `228`, confirmed against the real wire bytes above rather than assumed.
+Confirmed live afterward on real hardware: a real Full Download to 1.1.10 (10,433 bytes of
+parameter memory) that previously took 9+ minutes to reach 54% completed cleanly in ~38 seconds.
+
+**The read side (`readMemory()`/`readMemoryMany()`, used by `/bus/verify-device`) has the same
+slowness, for the same reason, and 228 turned out to be safe for reads too** 🟢 - a real
+`MemoryExtended_Read` at 228 bytes against 1.1.10 came back `rc=252` (a genuine device-reported
+error) on a first attempt live 2026-08-30, which looked at the time like reads and writes had
+asymmetric safe chunk sizes. Root-caused the same day: that test used a stale database device id
+(a project reimport had regenerated device rows), so the GA table's computed "expected" length was
+wrong, and the read request over-ran the real, much smaller table actually allocated on the device
+- confirmed directly, with the correct device id, that a single read at the table's real exact size
+(6 bytes here) succeeds cleanly at any chunk size, including 228. Restored to 228, matching the
+write side; `readRegionInSession()`'s own `Math.min(chunkSize, length - off)` already clamps
+correctly down to a small region's real length regardless of chunk size, so 228 is safe for both
+the large parameter-memory region (where it matters for speed) and small undeclared tables (where
+it's a no-op).
+
+**A second, genuinely separate read bug was found the same day, independent of chunk size
+entirely** 🟢: a real device answered a large single read request (98 bytes, Object 3's whole
+table) with a genuinely SHORT response (~34 real bytes) - the request was well-formed and the
+device ACKed it (`returnCode=0`), it simply didn't return everything asked for in one response.
+`readRegionInSession()`'s loop used to advance its read offset by the REQUESTED amount regardless
+of how much data actually came back, permanently losing the shortfall - every later byte silently
+stayed at the output buffer's zero default, indistinguishable from genuine on-device content. This
+produced a symptom that looked exactly like a real device-side data-loss/hardware limitation (a
+whole block of communication-object flags reading back as blank/default, consistently, across
+multiple real downloads from both koolenex AND real ETS) until a deliberately smaller, separate
+re-read of the same address range came back with the real, non-zero content the large read had been
+silently dropping the whole time. Fixed: the read loop now advances by what was ACTUALLY received,
+retrying for the genuine remainder, rather than assuming a fixed chunk size always arrives in full.
+A real, general lesson from how long this one took to find: a symptom that looks identical whether
+produced by "the device didn't persist this" or "our own read didn't retrieve this" cannot be told
+apart by re-reading with the same buggy read path, no matter how many times or how carefully - it
+took an intentionally differently-shaped read (a smaller, separate chunk) to reveal which one it
+actually was.
 
 ### 4.2 The 9-byte "LoadData" declaration
 

@@ -155,6 +155,16 @@ class LoadGatedFakeDevice extends KnxConnection {
       const data = frame.apduData.subarray(3, 3 + count);
       if (this.loadingObjIdx !== null) data.copy(this.memory, address);
       else this.rejectedWrites.push({ address, extended: false });
+      // downloadDevice()'s memory-write loop now waits for each chunk's
+      // real response before sending the next (2026-08-30 fix - a real
+      // device was found genuinely backlogged under the old fire-and-
+      // forget pacing) - respond like real hardware does, or every write
+      // would stall on the 3s timeout.
+      const respApdu = apduGroup('Memory_Response', 0, frame.apduData);
+      const resp = parseCEMI(
+        buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+      )!;
+      setImmediate(() => this._onCEMI(resp));
     } else if (frame.apciName === 'MemoryExtended_Write') {
       const count = frame.apduData[0]!;
       const address =
@@ -162,6 +172,15 @@ class LoadGatedFakeDevice extends KnxConnection {
       const data = frame.apduData.subarray(4, 4 + count);
       if (this.loadingObjIdx !== null) data.copy(this.memory, address);
       else this.rejectedWrites.push({ address, extended: true });
+      const respApdu = apduConnectedFull(
+        0,
+        APCI_EXT.MemoryExtended_Write_Response,
+        Buffer.alloc(0),
+      );
+      const resp = parseCEMI(
+        buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+      )!;
+      setImmediate(() => this._onCEMI(resp));
     }
     return Promise.resolve();
   }

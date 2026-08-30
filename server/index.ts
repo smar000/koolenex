@@ -110,6 +110,34 @@ async function start(): Promise<void> {
   server.listen(PORT, () => {
     logger.info('api', `koolenex started on port ${String(PORT)}`);
   });
+
+  // Real bug, found live 2026-08-30: this process had no shutdown handler
+  // at all - every restart during development (Ctrl+C, a normal `kill`, a
+  // supervisor restart) let the Node process just vanish, abandoning
+  // whatever TCP tunneling connection was open without ever sending the
+  // real KNX_bus.disconnect()'s own DISCONNECT_REQUEST. Real KNX IP
+  // routers support only a small number of concurrent tunnel channels;
+  // real ETS always disconnects cleanly on its own session lifecycle and
+  // has never hit this, while this project's own dev-time restarts (many,
+  // over one long real-hardware session) plausibly left the router
+  // holding several channels it believed were still active, a real
+  // candidate for the otherwise-unexplained `ECONNRESET` failures seen
+  // that same session. Does NOT help against a hard kill (`taskkill /F`,
+  // SIGKILL) - those bypass all process handlers, same as pulling the
+  // plug - but protects every normal restart from here on. The real
+  // disconnect (KnxConnection.disconnect() in knx-protocol.ts) sends the
+  // DISCONNECT_REQUEST synchronously but closes the socket on a short
+  // `setTimeout` afterward to let it flush - give the process a brief
+  // grace period rather than exiting the instant the handler returns.
+  const shutdown = (signal: string): void => {
+    logger.info('api', `${signal} received, disconnecting bus before exit`);
+    try {
+      bus.disconnect();
+    } catch (_) {}
+    setTimeout(() => process.exit(0), 300);
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 start().catch((err: unknown) => {

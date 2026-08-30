@@ -38,6 +38,7 @@ class KnxBusManager extends EventEmitter {
   projectId: number | string | null;
   _wss: WebSocketServer | null;
   _remapFn: ((telegram: Telegram) => Telegram) | null;
+  _reconnecting: Promise<{ host: string; port: number; type: 'udp' | 'tcp' }> | null;
 
   constructor() {
     super();
@@ -49,6 +50,7 @@ class KnxBusManager extends EventEmitter {
     this.projectId = null;
     this._wss = null;
     this._remapFn = null;
+    this._reconnecting = null;
   }
 
   /** Set a function that remaps telegram src/dst addresses (for demo mode) */
@@ -179,7 +181,35 @@ class KnxBusManager extends EventEmitter {
     this.type = null;
   }
 
-  write(
+  /**
+   * Transparently reconnects before a bus operation if the connection has
+   * gone idle-dropped since the last one - a KNXnet/IP gateway may close an
+   * idle TCP tunneling connection on its own after a period with no
+   * traffic (see knx-protocol.ts). Rather than holding the connection open
+   * indefinitely against a gateway-specific, unconfirmed idle timeout, the
+   * bus reconnects using the last known host/port/transport on demand.
+   * USB connections are not auto-reconnected (no default device path to
+   * retry); callers get the usual "not connected" error for those.
+   */
+  async _ensureConnected(): Promise<void> {
+    if (this.connected && this.connection) return;
+    if (!this.host || this.type === 'usb') {
+      throw new Error('Not connected to KNX bus');
+    }
+    if (!this._reconnecting) {
+      this._reconnecting = this.connect(
+        this.host,
+        this.port ?? 3671,
+        this.projectId,
+        (this.type ?? 'auto') as IpTransportProtocol,
+      ).finally(() => {
+        this._reconnecting = null;
+      });
+    }
+    await this._reconnecting;
+  }
+
+  async write(
     groupAddress: string,
     value: unknown,
     dpt: string | number = '1',
@@ -189,91 +219,81 @@ class KnxBusManager extends EventEmitter {
     value: unknown;
     dpt: string | number;
   }> {
-    if (!this.connection || !this.connected)
-      throw new Error('Not connected to KNX bus');
-    return this.connection.write(groupAddress, value, dpt);
+    await this._ensureConnected();
+    return this.connection!.write(groupAddress, value, dpt);
   }
 
-  read(groupAddress: string): Promise<{ ga: string; value: string }> {
-    if (!this.connection || !this.connected)
-      throw new Error('Not connected to KNX bus');
-    return this.connection.read(groupAddress);
+  async read(groupAddress: string): Promise<{ ga: string; value: string }> {
+    await this._ensureConnected();
+    return this.connection!.read(groupAddress);
   }
 
-  ping(
+  async ping(
     gaAddresses: string[],
     deviceAddress: string | null = null,
     timeoutMs: number = 2000,
   ): Promise<{ reachable: boolean; ga: string | null }> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.ping(gaAddresses, deviceAddress ?? '', timeoutMs);
+    await this._ensureConnected();
+    return this.connection!.ping(gaAddresses, deviceAddress ?? '', timeoutMs);
   }
 
-  identify(deviceAddress: string): Promise<void> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.identify(deviceAddress);
+  async identify(deviceAddress: string): Promise<void> {
+    await this._ensureConnected();
+    return this.connection!.identify(deviceAddress);
   }
 
-  scan(
+  async scan(
     area: number,
     line: number,
     timeoutMs: number = 200,
     onProgress?: (prog: ScanProgress) => void,
   ): Promise<Array<{ address: string; descriptor: string }>> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.scan(area, line, timeoutMs, onProgress);
+    await this._ensureConnected();
+    return this.connection!.scan(area, line, timeoutMs, onProgress);
   }
 
   abortScan(): void {
     if (this.connection) this.connection.abortScan();
   }
 
-  readDeviceInfo(deviceAddr: string): Promise<DeviceInfo> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.readDeviceInfo(deviceAddr);
+  async readDeviceInfo(deviceAddr: string): Promise<DeviceInfo> {
+    await this._ensureConnected();
+    return this.connection!.readDeviceInfo(deviceAddr);
   }
 
-  programIA(newAddr: string): Promise<{ ok: boolean; newAddr: string }> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.programIA(newAddr);
+  async programIA(newAddr: string): Promise<{ ok: boolean; newAddr: string }> {
+    await this._ensureConnected();
+    return this.connection!.programIA(newAddr);
   }
 
-  checkProgrammingMode(
+  async checkProgrammingMode(
     timeoutMs?: number,
   ): Promise<{ address: string | null }> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.checkProgrammingMode(timeoutMs);
+    await this._ensureConnected();
+    return this.connection!.checkProgrammingMode(timeoutMs);
   }
 
-  readSerialNumbersInProgrammingMode(
+  async readSerialNumbersInProgrammingMode(
     timeoutMs?: number,
   ): Promise<Array<{ serial: string; src: string }>> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.readSerialNumbersInProgrammingMode(timeoutMs);
+    await this._ensureConnected();
+    return this.connection!.readSerialNumbersInProgrammingMode(timeoutMs);
   }
 
-  assignIndividualAddressBySerial(
+  async assignIndividualAddressBySerial(
     serial: Buffer,
     newAddr: string,
     timeoutMs?: number,
   ): Promise<{ ok: boolean; verified: boolean; address: string | null }> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.assignIndividualAddressBySerial(
+    await this._ensureConnected();
+    return this.connection!.assignIndividualAddressBySerial(
       serial,
       newAddr,
       timeoutMs,
     );
   }
 
-  downloadDevice(
+  async downloadDevice(
     deviceAddr: string,
     steps: DownloadStep[],
     gaTable: Buffer | null,
@@ -282,9 +302,8 @@ class KnxBusManager extends EventEmitter {
     onProgress?: (p: DownloadProgress) => void,
     extra?: DownloadExtra,
   ): Promise<void> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.downloadDevice(
+    await this._ensureConnected();
+    return this.connection!.downloadDevice(
       deviceAddr,
       steps,
       gaTable,
@@ -295,15 +314,14 @@ class KnxBusManager extends EventEmitter {
     );
   }
 
-  readMemory(
+  async readMemory(
     deviceAddr: string,
     address: number,
     length: number,
     chunkSize?: number,
   ): Promise<Buffer> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.readMemory(deviceAddr, address, length, chunkSize);
+    await this._ensureConnected();
+    return this.connection!.readMemory(deviceAddr, address, length, chunkSize);
   }
 
   /**
@@ -312,11 +330,7 @@ class KnxBusManager extends EventEmitter {
    * The caller is expected to include the real captured Connect/Disconnect
    * control frames as part of `frames` itself (extracted straight from a
    * real ETS capture) - this method just fires each buffer through
-   * sendCEMI() in order, nothing more. Debug-only, built 2026-08-28 to test
-   * whether a real captured ETS Partial Download's exact bytes actually
-   * persist a write, bypassing koolenex's own step/APDU reconstruction
-   * entirely. See docs/follow-ups/2026-08-28-write-path-missing-load-
-   * sequence.md.
+   * sendCEMI() in order, nothing more. Debug-only.
    */
   async replayFrames(
     _deviceAddr: string,
@@ -324,24 +338,22 @@ class KnxBusManager extends EventEmitter {
     delayMs: number = 30,
     onProgress?: (i: number, total: number) => void,
   ): Promise<void> {
-    if (!this.connection || !this.connected)
-      throw new Error('Not connected to KNX bus');
+    await this._ensureConnected();
     for (let i = 0; i < frames.length; i++) {
-      await this.connection.sendCEMI(frames[i]!);
+      await this.connection!.sendCEMI(frames[i]!);
       if (onProgress) onProgress(i + 1, frames.length);
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
 
-  readMemoryMany(
+  async readMemoryMany(
     deviceAddr: string,
     regions: Array<{ address: number; length: number }>,
     chunkSize?: number,
     onChunk?: (bytesRead: number) => void,
   ): Promise<Buffer[]> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.readMemoryMany(
+    await this._ensureConnected();
+    return this.connection!.readMemoryMany(
       deviceAddr,
       regions,
       chunkSize,
@@ -352,15 +364,14 @@ class KnxBusManager extends EventEmitter {
   // Extended memory read (A_MemoryExtended_Read, 0x1FD) for System B / System 7
   // devices that do not answer the legacy A_Memory_Read. Exposed here so the
   // capability is reachable from routes; see the note in /bus/verify-device.
-  readMemoryExtended(
+  async readMemoryExtended(
     deviceAddr: string,
     address: number,
     length: number,
     chunkSize?: number,
   ): Promise<Buffer> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.readMemoryExtended(
+    await this._ensureConnected();
+    return this.connection!.readMemoryExtended(
       deviceAddr,
       address,
       length,
@@ -368,23 +379,21 @@ class KnxBusManager extends EventEmitter {
     );
   }
 
-  readProperty(
+  async readProperty(
     deviceAddr: string,
     objIdx: number,
     propId: number,
   ): Promise<Buffer> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.readProperty(deviceAddr, objIdx, propId);
+    await this._ensureConnected();
+    return this.connection!.readProperty(deviceAddr, objIdx, propId);
   }
 
-  readPropertyMany(
+  async readPropertyMany(
     deviceAddr: string,
     reads: Array<{ objIdx: number; propId: number }>,
   ): Promise<Buffer[]> {
-    if (!this.connection || !this.connected)
-      return Promise.reject(new Error('Not connected to KNX bus'));
-    return this.connection.readPropertyMany(deviceAddr, reads);
+    await this._ensureConnected();
+    return this.connection!.readPropertyMany(deviceAddr, reads);
   }
 
   status(): {

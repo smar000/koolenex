@@ -1679,14 +1679,14 @@ describe('KnxIpConnection.status', () => {
 const KnxBusManager = (await import('../server/knx-bus.ts')).default;
 
 describe('KnxBusManager: not-connected guards', () => {
-  it('write throws when not connected', () => {
+  it('write rejects when not connected', async () => {
     const bus = new KnxBusManager();
-    assert.throws(() => bus.write('1/0/0', true), /Not connected/);
+    await assert.rejects(() => bus.write('1/0/0', true), /Not connected/);
   });
 
-  it('read throws when not connected', () => {
+  it('read rejects when not connected', async () => {
     const bus = new KnxBusManager();
-    assert.throws(() => bus.read('1/0/0'), /Not connected/);
+    await assert.rejects(() => bus.read('1/0/0'), /Not connected/);
   });
 
   it('ping rejects when not connected', async () => {
@@ -1720,6 +1720,104 @@ describe('KnxBusManager: not-connected guards', () => {
       () => bus.downloadDevice('1.1.1', [], null, null, null),
       /Not connected/,
     );
+  });
+});
+
+describe('KnxBusManager._ensureConnected', () => {
+  it('reconnects using the last known host/port/type when idle-dropped', async () => {
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = false;
+    bus.connection = null;
+
+    let connectCalls = 0;
+    bus.connect = (async (
+      host: string,
+      port: number,
+      _projectId?: number | string | null,
+      protocol?: string,
+    ) => {
+      connectCalls++;
+      assert.equal(host, '10.0.0.5');
+      assert.equal(port, 3671);
+      assert.equal(protocol, 'tcp');
+      bus.connected = true;
+      bus.connection = {} as any;
+      return { host, port, type: 'tcp' as const };
+    }) as any;
+
+    await bus._ensureConnected();
+    assert.equal(connectCalls, 1);
+    assert.equal(bus.connected, true);
+  });
+
+  it('does not reconnect if already connected', async () => {
+    const bus = new KnxBusManager();
+    bus.connected = true;
+    bus.connection = {} as any;
+    let connectCalls = 0;
+    bus.connect = (async () => {
+      connectCalls++;
+      return { host: '', port: 0, type: 'tcp' as const };
+    }) as any;
+
+    await bus._ensureConnected();
+    assert.equal(connectCalls, 0);
+  });
+
+  it('rejects without attempting reconnect when no host is known', async () => {
+    const bus = new KnxBusManager();
+    bus.connected = false;
+    bus.host = null;
+    let connectCalls = 0;
+    bus.connect = (async () => {
+      connectCalls++;
+      return { host: '', port: 0, type: 'tcp' as const };
+    }) as any;
+
+    await assert.rejects(() => bus._ensureConnected(), /Not connected/);
+    assert.equal(connectCalls, 0);
+  });
+
+  it('rejects without attempting reconnect for USB connections', async () => {
+    const bus = new KnxBusManager();
+    bus.connected = false;
+    bus.host = null;
+    bus.type = 'usb';
+    let connectCalls = 0;
+    bus.connect = (async () => {
+      connectCalls++;
+      return { host: '', port: 0, type: 'tcp' as const };
+    }) as any;
+
+    await assert.rejects(() => bus._ensureConnected(), /Not connected/);
+    assert.equal(connectCalls, 0);
+  });
+
+  it('coalesces concurrent reconnect attempts into a single connect() call', async () => {
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = false;
+
+    let connectCalls = 0;
+    bus.connect = (async (host: string, port: number) => {
+      connectCalls++;
+      await new Promise((r) => setTimeout(r, 10));
+      bus.connected = true;
+      bus.connection = {} as any;
+      return { host, port, type: 'tcp' as const };
+    }) as any;
+
+    await Promise.all([
+      bus._ensureConnected(),
+      bus._ensureConnected(),
+      bus._ensureConnected(),
+    ]);
+    assert.equal(connectCalls, 1);
   });
 });
 

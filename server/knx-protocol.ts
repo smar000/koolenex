@@ -52,11 +52,16 @@ function pktConnState(
   channelId: number,
   localIp: string,
   localPort: number,
+  hostProtocol: number = HOST_PROTOCOL.UDP,
 ): Buffer {
+  const h =
+    hostProtocol === HOST_PROTOCOL.TCP
+      ? hpai('0.0.0.0', 0, HOST_PROTOCOL.TCP)
+      : hpai(localIp, localPort, HOST_PROTOCOL.UDP);
   return Buffer.concat([
     hdr(SVC.CONNSTATE_REQ, 16),
     Buffer.from([channelId, 0x00]),
-    hpai(localIp, localPort),
+    h,
   ]);
 }
 
@@ -267,6 +272,10 @@ class KnxIpConnection extends (KnxConnection as new () => InstanceType<
       );
 
       socket.on('error', (err: Error) => {
+        logger.warn('knx', 'TCP socket error', {
+          message: err.message,
+          code: (err as NodeJS.ErrnoException).code,
+        });
         if (!this.connected) fail(err);
         else {
           this.connected = false;
@@ -274,12 +283,17 @@ class KnxIpConnection extends (KnxConnection as new () => InstanceType<
         }
       });
 
-      socket.on('close', () => {
+      socket.on('close', (hadError: boolean) => {
+        logger.info('knx', 'TCP socket closed', { hadError });
         if (this.connected) {
           this.connected = false;
           this._clearHeartbeat();
           this.emit('disconnected');
         }
+      });
+
+      socket.on('end', () => {
+        logger.info('knx', 'TCP socket received FIN from remote');
       });
 
       socket.on('data', (chunk: Buffer) => this._onTcpData(chunk));
@@ -288,16 +302,17 @@ class KnxIpConnection extends (KnxConnection as new () => InstanceType<
         clearTimeout(connectTimer);
         this.tcpSocket = socket;
         this.transport = 'tcp';
-        // Real bug found via real-hardware testing, 2026-08-30: dropping
-        // the KNXnet/IP-level CONNSTATE heartbeat for TCP is correct (see
-        // the doc comment on it below - Calimero never sends one either),
-        // but Node's plain net.Socket does NOT enable OS-level TCP
-        // keepalive by default. Without either, an idle connection (a few
-        // minutes with no traffic - completely normal between real
-        // commissioning actions) got silently dropped by the router/
-        // network path with zero signal on either side, only discovered on
-        // the next send attempt. TCP keepalive is the real fix - it's what
-        // the (correctly skipped) KNXnet/IP heartbeat was standing in for.
+        // Node's plain net.Socket does not enable OS-level TCP keepalive by
+        // default; enabling it guards against a network path silently
+        // dropping the connection with no signal on either side. This does
+        // not prevent a KNXnet/IP gateway from applying its own idle
+        // timeout to a TCP tunneling connection and closing it (a clean
+        // FIN) after a period with no application traffic - TCP keepalive
+        // probes are transport-level and do not count as traffic against
+        // that timer. The connection manager (KnxBusManager) handles this
+        // by reconnecting on demand before the next bus operation rather
+        // than by holding the connection open with a periodic heartbeat -
+        // see _ensureConnected() in knx-bus.ts.
         socket.setKeepAlive(true, 30000);
         // TCP's CONNECT_REQ uses the placeholder HPAI (0.0.0.0:0, protocol
         // TCP) - the socket itself is the real endpoint. localIp/localPort
@@ -396,17 +411,16 @@ class KnxIpConnection extends (KnxConnection as new () => InstanceType<
     if (msg.length >= 20) this.localAddr = decodePhysicalRaw(msg, 18);
 
     this.connected = true;
-    // Real, confirmed 2026-08-30 (same session as the TCP ACK fix above):
-    // the CONNSTATE heartbeat is UDP-only too - confirmed against
-    // Calimero's real client (ClientConnection.java: `if (!stream)
-    // Executor.execute(heartbeat, ...)` - the heartbeat monitor is never
-    // even started for a stream/TCP connection). TCP's own connection
-    // liveness (the 'close'/'error' handlers in _connectTcp) already
-    // covers what the heartbeat exists for over UDP. Sending it anyway
-    // over TCP was a real bug found via real-hardware testing: the
-    // CONNSTATE_REQ's HPAI was still built with the UDP protocol code
-    // (pktConnState wasn't updated the way pktConnect was), and the real
-    // connection dropped shortly after the first one fired.
+    // The CONNECTIONSTATE_REQUEST heartbeat is UDP-only - confirmed
+    // against Calimero's own client (ClientConnection.java: the heartbeat
+    // monitor is never started for a stream/TCP connection). TCP's own
+    // connection liveness ('close'/'error' on the socket, see
+    // _connectTcp() above) covers what the heartbeat exists for over UDP.
+    // A KNXnet/IP gateway may still close an idle TCP tunneling connection
+    // on its own after a period with no application traffic; rather than
+    // holding the connection open indefinitely against a gateway-specific
+    // idle timeout, the caller (KnxBusManager) reconnects on demand before
+    // the next bus operation - see _ensureConnected() in knx-bus.ts.
     if (this.transport !== 'tcp') {
       this._hbTimer = setInterval(() => {
         this._sendRaw(pktConnState(this.channelId, this.localIp, this.localPort));

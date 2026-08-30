@@ -236,6 +236,14 @@ export interface VerifyCache {
   // Same idea, for an in-flight Program (write) action - see
   // ProgramProgress's own doc comment above for why this exists now.
   programProgress: Record<string, ProgramProgress>;
+  // Forgets a device's live program-progress entry (both the raw pct/msg
+  // and, via ProgrammingView's own reset, the "never move backward" max
+  // tracker). Call this when a NEW program run starts for a device -
+  // otherwise a device that previously finished at 100% carries that
+  // stale entry into the next run, where the ratchet immediately clamps
+  // the fresh 0% right back up to it before any real new message arrives,
+  // and stays stuck there for the whole download.
+  clearProgramProgress: (deviceAddress: string) => void;
 }
 
 export const VerifyCacheCtx = createContext<VerifyCache | null>(null);

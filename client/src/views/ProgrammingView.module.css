@@ -58,20 +58,22 @@
      the matching floor so the table (not the DEVICE column) is what
      shrinks/scrolls once the log pane leaves too little room, rather than
      squeezing DEVICE toward zero again. */
-  /* other columns' widths (88+75+250=413) + thDevice's own 168px min-width,
-     below - table-layout:fixed derives DEVICE's actual share from (this
-     min-width minus the other columns' widths), not from its own min-width
-     directly, so this has to stay in sync with both. (thProgress widened
-     55->75px 2026-08-29 - 55 was clipping "PROGRESS" itself under
-     table-layout:fixed, a real found-live bug: the header read "PROGRES".)
-     Trimmed as far as still legible (esp. the PROGRAMMED/etc. status
-     badge and the address badge) so the table needs less extra width than
-     it used to before falling back to horizontal scroll, since scroll is
-     otherwise the common case once the log pane is open too. Also .content
-     above got its right padding trimmed 20px -> 14px for the same reason.
-     ADDRESS used to be its own 46px column; folded into DEVICE as a small
-     pill instead (see .addrBadge) so thDevice's min-width absorbs it. */
-  min-width: 581px;
+  /* other columns' widths (88+280=368, thActions widened 2026-08-30 - see
+     its own comment) + thDevice's own 168px min-width, below -
+     table-layout:fixed derives DEVICE's actual share from (this min-width
+     minus the other columns' widths), not from its own min-width
+     directly, so this has to stay in sync with both. (The PROGRESS column
+     was removed - Program's live percentage now renders inside the
+     Program button itself, as its own fill background, instead of a
+     separate column.) Trimmed as far as still legible (esp. the
+     PROGRAMMED/etc. status badge and the address badge) so the table
+     needs less extra width than it used to before falling back to
+     horizontal scroll, since scroll is otherwise the common case once the
+     log pane is open too. Also .content above got its right padding
+     trimmed 20px -> 14px for the same reason. ADDRESS used to be its own
+     46px column; folded into DEVICE as a small pill instead (see
+     .addrBadge) so thDevice's min-width absorbs it. */
+  min-width: 536px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -97,36 +99,6 @@
   border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   border-radius: 999px;
   padding: 1px 7px;
-}
-.progressWrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.progressTrack {
-  flex: 1;
-  height: 3px;
-  background: #1a2030;
-  border-radius: 2px;
-  overflow: hidden;
-}
-.progressBar {
-  height: 100%;
-  transition: width 0.15s;
-  border-radius: 2px;
-}
-.progressPct {
-  font-size: 10px;
-  color: var(--muted);
-  width: 32px;
-}
-.progressErr {
-  font-size: 10px;
-  color: var(--red);
-}
-.progressDash {
-  color: var(--dim);
-  font-size: 10px;
 }
 .resizer {
   width: 5px;
@@ -241,13 +213,17 @@
 .thStatus {
   width: 88px;
 }
-.thProgress {
-  width: 75px;
-}
 .thActions {
-  /* viewSlot grew 46->52px (View + clear-cache icon pair) - widened to
-     match, see .table's min-width comment for how this feeds into it. */
-  width: 250px;
+  /* Real bug, found live 2026-08-30: viewSlot(52) + gap(6) +
+     verifyBtnWrap's actionBtn(min 92) + gap(6) + downloadModeAnchor's
+     actionBtn(min 92) = 248px of real content, packed into a 250px
+     column that itself loses 24px to TD's own horizontal padding (see
+     primitives.module.css's .td) - genuinely never enough room, just
+     narrowly enough to go unnoticed until Re-program's button visibly
+     spilled out past the column into whatever sits to its right (the log
+     panel's collapsed strip). Widened with real slack this time - see
+     .table's min-width comment for how this feeds into it. */
+  width: 280px;
 }
 .logEntrySuccess {
   composes: logEntry;
@@ -262,6 +238,12 @@
   display: flex;
   gap: 6px;
   align-items: center;
+  /* Right-aligned within the (now correctly widened, see .thActions'
+     comment) actions column - flush against the column's own right edge
+     rather than packed against its left, so the row's buttons land at a
+     consistent x right next to wherever the log panel/collapsed strip
+     sits, instead of drifting depending on how much slack the column has. */
+  justify-content: flex-end;
 }
 
 /* ── Verify progress popover: a small readout under the Verify button
@@ -336,28 +318,6 @@
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
   color: var(--red);
 }
-.verifyPopover {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 20;
-  width: 200px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
-}
-.verifyPopoverText {
-  font-size: 10px;
-  color: var(--muted);
-  white-space: nowrap;
-}
-
 /* ── Slide-over: opens automatically once a Verify read completes.
    position:absolute against .root (not position:fixed against the
    viewport) so both the scrim and the panel are scoped to this page's own
@@ -431,4 +391,113 @@
   min-height: 0;
   min-width: 0;
   display: flex;
+}
+
+/* ── Full/Partial download picker popover (2026-08-30) - the button that
+   opens it lives inside the table's own scrolling container (.content),
+   but the popover itself renders through a React portal into
+   document.body (see ProgrammingView.tsx's DownloadModePopover/
+   downloadModePopoverFor comments) with `position: fixed` coordinates
+   computed from the trigger's real on-screen rect. That's a deliberate
+   departure from AppShell's busStatusPopover (App.module.css), which can
+   get away with plain position:absolute because its own anchor never
+   sits inside a scrolling ancestor - this one does, and a portal is what
+   keeps it from being clipped by that ancestor's overflow. ── */
+.downloadModeAnchor {
+  position: relative;
+  display: inline-flex;
+}
+.downloadModePopover {
+  position: fixed;
+  z-index: 200;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  /* Guards against a transient frame where `pos` was computed from a
+     stale/zero rect (e.g. right after mount, before layout settles) -
+     keeps the popover fully offscreen rather than flashing at (0,0). */
+  animation: downloadModePopIn 0.12s ease-out;
+}
+@keyframes downloadModePopIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.downloadModeHeader {
+  font-size: 10px;
+  color: var(--dim);
+  letter-spacing: 0.08em;
+  padding: 6px 10px 6px;
+}
+.downloadModeOption {
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  padding: 11px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.downloadModeOption:hover:not(:disabled) {
+  background: var(--bg);
+}
+.downloadModeOption:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+/* Icon chip color reflects each mode's own character, not just a shared
+   accent tint - Full is the safe/thorough option (blue, same language the
+   rest of the app uses for "trustworthy default") and Partial is the
+   fast/lighter one (amber, same language the app uses for "quicker but
+   more conditional" - matches its own lightning-bolt icon). Two explicit
+   variant classes rather than one shared .downloadModeIcon, so each
+   option's chip is unambiguous even before reading the label. */
+.downloadModeIcon {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  font-size: 14px;
+  margin-top: 1px;
+}
+.downloadModeIconFull {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+.downloadModeIconPartial {
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+  color: var(--amber);
+}
+.downloadModeText {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.downloadModeLabel {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.downloadModeDesc {
+  font-size: 11px;
+  color: var(--dim);
+  line-height: 1.5;
+  white-space: normal;
 }

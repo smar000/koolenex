@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 import { Btn, Badge, SearchBox, Empty } from '../primitives.tsx';
 import { DeviceTypeIcon } from '../icons.tsx';
 import type { VerifyDecodedParam, GroupObjectEntryFlags } from '../api.ts';
-import { useLiveData, useVerifyCache } from '../contexts.ts';
+import { useVerifyCache } from '../contexts.ts';
 import styles from './DeviceComparisonView.module.css';
 
 /** Deterministic hue (0-359) from a section name, for the per-section tint. */
@@ -164,7 +164,6 @@ export function DeviceCompareResults({
    * elsewhere (e.g. the slide-over's own header). */
   showDeviceLabel?: boolean;
 }) {
-  const { busStatus } = useLiveData();
   const { cache, progress } = useVerifyCache();
 
   const [search, setSearch] = useState('');
@@ -569,12 +568,6 @@ export function DeviceCompareResults({
       </div>
 
       <div className={styles.body} ref={bodyRef}>
-        {busStatus?.connected === false && (
-          <div className={styles.warnBanner}>
-            Bus not connected — connect to a router/interface first.
-          </div>
-        )}
-
         {!result && !loading && (
           <Empty
             icon="⇄"

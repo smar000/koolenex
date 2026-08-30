@@ -110,6 +110,14 @@ router.put(
         installation_hints: z.string().optional(),
         floor_x: z.number().optional(),
         floor_y: z.number().optional(),
+        // Set after a real device-addressing write (see AddressDeviceModal
+        // in the client, added 2026-08-30) to record the physical serial
+        // number actually written to this address, for traceability -
+        // separate from whatever value the imported project itself carried
+        // (a canary template can arrive with a real prior villa's serial
+        // baked in, which this overwrites once this villa's own device is
+        // actually addressed).
+        serial_number: z.string().optional(),
       }),
     );
     const old = db.get<Record<string, unknown>>(
@@ -128,6 +136,8 @@ router.put(
     if (b.comment !== undefined) track('comment', b.comment);
     if (b.installation_hints !== undefined)
       track('installation_hints', b.installation_hints);
+    if (b.serial_number !== undefined)
+      track('serial_number', b.serial_number.trim());
     if (b.floor_x !== undefined) {
       sets.push('floor_x=?');
       vals.push(b.floor_x);

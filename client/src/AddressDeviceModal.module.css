@@ -1,0 +1,174 @@
+/* AddressDeviceModal - see AddressDeviceModal.tsx for the flow this backs.
+   Deliberately its own small module rather than reusing
+   ProjectInfoView.module.css - visually similar (tab row, field labels,
+   text inputs) but scoped to this one feature, which lives inline on the
+   Programming page rather than as its own view. */
+.scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 95;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 60px;
+}
+.panel {
+  width: min(560px, 92%);
+  max-height: calc(100% - 90px);
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.title {
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  font-size: 14px;
+}
+.closeBtn {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  width: 26px;
+  height: 26px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+}
+.closeBtn:hover {
+  color: var(--text);
+  border-color: var(--dim);
+}
+.body {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.intro {
+  font-size: 11px;
+  color: var(--dim);
+  line-height: 1.5;
+}
+.tabRow {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+.tabBtn {
+  padding: 6px 16px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  font-weight: 600;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  letter-spacing: 0.04em;
+  color: var(--dim);
+}
+.tabBtnActive {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.fieldLabel {
+  font-size: 9px;
+  color: var(--dim);
+  margin-bottom: 5px;
+  letter-spacing: 0.04em;
+}
+.textInput {
+  width: 100%;
+  background: var(--input-bg);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  padding: 6px 10px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+}
+.select {
+  composes: textInput;
+}
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+.col {
+  flex: 1;
+  min-width: 0;
+}
+.errorMsg {
+  font-size: 11px;
+  color: var(--red);
+}
+.successMsg {
+  font-size: 11px;
+  color: var(--green);
+}
+.detectedList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.detectedRow {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg);
+}
+.detectedSerial {
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--accent);
+}
+.matchedTag {
+  font-size: 10px;
+  color: var(--green);
+}
+.unmatchedTag {
+  font-size: 10px;
+  color: var(--amber);
+}
+.emptyState {
+  font-size: 11px;
+  color: var(--dim);
+  padding: 8px 0;
+}
+/* The experimental serial-based write path (no real-hardware confirmation
+   yet - see docs/knx-device-write-protocol.md §9, koolenex repo) needs to
+   read differently from every other write action in this app, which are
+   all real-hardware proven. Amber, not the app's usual accent/green, and
+   named as such rather than presented as equally trustworthy. */
+.experimentalBadge {
+  font-size: 9px;
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 30%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+.checkboxRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--dim);
+}

@@ -438,6 +438,13 @@ export default function App() {
         dispatch({ type: 'CLEAR_VERIFY_RESULT', deviceId }),
       progress: verifyProgress,
       programProgress,
+      clearProgramProgress: (deviceAddress: string) =>
+        setProgramProgress((p) => {
+          if (!(deviceAddress in p)) return p;
+          const next = { ...p };
+          delete next[deviceAddress];
+          return next;
+        }),
     }),
     [state.verifyCache, verifyProgress, programProgress],
   );

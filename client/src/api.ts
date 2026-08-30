@@ -381,16 +381,49 @@ export const api = {
     req<{ ok: boolean; newAddr: string }>('POST', '/bus/program-ia', {
       newAddr,
     }),
+  // Read-side counterpart to busProgramIA - detects a device currently held
+  // in physical programming mode by its address (A_IndividualAddress_Read/
+  // _Response), without needing to know its serial or address ahead of time.
+  // Only safe to write against (busProgramIA) when exactly one device is in
+  // programming mode - see busReadSerialsInProgrammingMode below for the
+  // multi-device-safe alternative.
+  busCheckProgrammingMode: (timeoutMs?: number) =>
+    req<{ address: string | null }>('POST', '/bus/check-programming-mode', {
+      timeoutMs,
+    }),
+  // Collects every device currently in programming mode by serial number
+  // (not just the first to answer) - server/knx-connection.ts's
+  // readSerialNumbersInProgrammingMode(), real-hardware confirmed
+  // 2026-08-30 to disambiguate multiple simultaneous devices cleanly.
+  busReadSerialsInProgrammingMode: (timeoutMs?: number) =>
+    req<{ devices: Array<{ serial: string; src: string }> }>(
+      'POST',
+      '/bus/read-serials-in-programming-mode',
+      { timeoutMs },
+    ),
+  // Address a device purely by its serial number - no programming-button
+  // press needed. See docs/knx-device-write-protocol.md §9 (koolenex repo):
+  // sourced from the Falcon SDK's own docs + Calimero's implementation, but
+  // unlike every other write path this app exposes, has NO real-hardware
+  // confirmation yet - surface that to the user, don't present it as
+  // equally proven to busProgramIA.
+  busAssignAddressBySerial: (serial: string, newAddress: string) =>
+    req<{ ok: boolean; verified: boolean; address: string | null }>(
+      'POST',
+      '/bus/assign-address-by-serial',
+      { serial, newAddress },
+    ),
   busProgramDevice: (
     deviceAddress: string,
     projectId: number,
     deviceId: number,
+    mode?: 'full' | 'partial',
   ) =>
-    req<{ ok: boolean; deviceAddress: string }>('POST', '/bus/program-device', {
-      deviceAddress,
-      projectId,
-      deviceId,
-    }),
+    req<{ ok: boolean; deviceAddress: string; mode: 'full' | 'partial' }>(
+      'POST',
+      '/bus/program-device',
+      { deviceAddress, projectId, deviceId, mode },
+    ),
 
   // Read-only: compare a device's actual memory to the computed image (no writes)
   busVerifyDevice: (

@@ -1,4 +1,5 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { STATUS_COLOR } from '../theme.ts';
 import {
   Btn,
@@ -18,6 +19,7 @@ import {
   useProgrammingLog,
 } from '../contexts.ts';
 import { DeviceCompareResults, displaySectionName } from './DeviceCompareResults.tsx';
+import { AddressDeviceModal } from '../AddressDeviceModal.tsx';
 import styles from './ProgrammingView.module.css';
 
 export function ProgrammingView() {
@@ -29,6 +31,7 @@ export function ProgrammingView() {
     clearResult: clearVerifyResult,
     progress: verifyProgress,
     programProgress,
+    clearProgramProgress,
   } = useVerifyCache();
   const COLMAP: Record<string, string> = {
     actuator: 'var(--actuator)',
@@ -116,9 +119,23 @@ export function ProgrammingView() {
     [sidebarWidth],
   );
 
-  const programDevice = async (deviceId: any, devAddr: string) => {
+  const programDevice = async (
+    deviceId: any,
+    devAddr: string,
+    mode: 'full' | 'partial' = 'full',
+  ) => {
     setLogOpen(true);
     programPctMaxRef.current[deviceId] = 0;
+    // Real bug, found live: resetting the ratchet above isn't enough on its
+    // own - a device that finished at 100% in a PRIOR run leaves that
+    // stale entry sitting in programProgress (context, WS-fed) until a
+    // fresh program:progress message for this run overwrites it. On the
+    // very first render after this function starts, the ratchet reads
+    // that stale 100 as the "raw" signal (no new message has arrived yet)
+    // and immediately clamps itself right back up to it, then stays stuck
+    // there for the whole new download since nothing lower can move it.
+    // Clearing the stale entry here closes that window.
+    clearProgramProgress(devAddr);
     // `progress[deviceId]` now only tracks coarse state (running/done/error)
     // for the button/status-badge - the real percentage/message comes from
     // `programProgress[devAddr]` (context, fed by the server's own
@@ -132,13 +149,15 @@ export function ProgrammingView() {
     // wired through knx-connection.ts's downloadDevice() calls) - the
     // client just never listened for it.
     setProgress((p) => ({ ...p, [deviceId]: { state: 'running' } }));
-    addLog(`[${new Date().toLocaleTimeString()}] Downloading → ${devAddr}`);
+    addLog(
+      `[${new Date().toLocaleTimeString()}] Downloading (${mode}) → ${devAddr}`,
+    );
     try {
       const pid = data?.project?.id;
-      await api.busProgramDevice(devAddr, pid!, deviceId);
+      await api.busProgramDevice(devAddr, pid!, deviceId, mode);
       setProgress((p) => ({ ...p, [deviceId]: { state: 'done' } }));
       addLog(
-        `[${new Date().toLocaleTimeString()}] ✓ ${devAddr} — programmed`,
+        `[${new Date().toLocaleTimeString()}] ✓ ${devAddr} — programmed (${mode})`,
       );
       onDeviceStatus(deviceId, 'programmed');
       // A successful write just changed the device's real content - the
@@ -280,7 +299,7 @@ export function ProgrammingView() {
   // knx_serial_number_addressing_research memory for the real fix for
   // that case, not yet implemented).
   const [programmingAll, setProgrammingAll] = useState(false);
-  const programmAll = async () => {
+  const programmAll = async (mode: 'full' | 'partial') => {
     if (programmingAll) return;
     const targets = devices.filter(
       (d: any) => d.status === 'modified' && d.individual_address,
@@ -288,16 +307,100 @@ export function ProgrammingView() {
     if (!targets.length) return;
     setProgrammingAll(true);
     addLog(
-      `[${new Date().toLocaleTimeString()}] Program All Modified — queued ${targets.length} device(s)`,
+      `[${new Date().toLocaleTimeString()}] Program All Modified (${mode}) — queued ${targets.length} device(s)`,
     );
     try {
       for (const d of targets) {
-        await programDevice(d.id, d.individual_address);
+        await programDevice(d.id, d.individual_address, mode);
       }
     } finally {
       setProgrammingAll(false);
     }
   };
+
+  // ── Full vs Partial download picker: a small popover anchored to
+  // whichever Program button was clicked (a device row's own button, or
+  // the page-level "Program All Modified"), rather than a page-level
+  // setting or a split-button menu - explicit choice, per click, right
+  // where the action happens. `downloadModePopoverFor` is either a device
+  // id (row button) or the literal 'all' (header button); null means
+  // closed.
+  //
+  // Real bug, found live 2026-08-30: an earlier version positioned this
+  // with plain CSS (position:absolute against a wrapper div sitting in
+  // the table's own DOM position). The table's containing .content panel
+  // scrolls (table-layout:fixed forces horizontal scroll once the log
+  // pane is open), and a position:absolute descendant of a scrolling
+  // ancestor gets clipped by that ancestor's overflow - not just visually
+  // cramped, its trailing text was cut off outright rather than wrapping,
+  // which is exactly what showed up live. Fixed by rendering the popover
+  // through a portal into document.body, positioned with `fixed`
+  // coordinates computed from the real anchor's on-screen rect
+  // (anchorRefs, one per row + the header button) - a portal is
+  // unaffected by any ancestor's overflow/clipping, by definition.
+  const [downloadModePopoverFor, setDownloadModePopoverFor] = useState<
+    number | 'all' | null
+  >(null);
+  const anchorRefs = useRef<Map<number | 'all', HTMLDivElement>>(new Map());
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const [popoverPos, setPopoverPos] = useState<{
+    top: number;
+    left: number;
+  } | null>(null);
+  const DOWNLOAD_POPOVER_WIDTH = 300;
+
+  useEffect(() => {
+    if (downloadModePopoverFor === null) {
+      setPopoverPos(null);
+      return;
+    }
+    const place = () => {
+      const anchor = anchorRefs.current.get(downloadModePopoverFor);
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const left = Math.max(
+        8,
+        Math.min(
+          rect.right - DOWNLOAD_POPOVER_WIDTH,
+          window.innerWidth - DOWNLOAD_POPOVER_WIDTH - 8,
+        ),
+      );
+      setPopoverPos({ top: rect.bottom + 6, left });
+    };
+    place();
+    const onDocClick = (e: MouseEvent) => {
+      if (!popoverRef.current?.contains(e.target as Node)) {
+        setDownloadModePopoverFor(null);
+      }
+    };
+    // Closes rather than tracks on scroll/resize (any nested scroll
+    // container, via capture:true) - simpler than continuously
+    // repositioning a short-lived menu, and avoids it drifting away from
+    // its anchor mid-scroll.
+    const onScrollOrResize = () => setDownloadModePopoverFor(null);
+    document.addEventListener('mousedown', onDocClick);
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize);
+    };
+  }, [downloadModePopoverFor]);
+
+  const chooseDownloadMode = (mode: 'full' | 'partial') => {
+    const target = downloadModePopoverFor;
+    setDownloadModePopoverFor(null);
+    if (target === null) return;
+    if (target === 'all') {
+      programmAll(mode);
+      return;
+    }
+    const dev = devices.find((d: any) => d.id === target);
+    if (dev) programDevice(dev.id, dev.individual_address, mode);
+  };
+
+  const [addressModalOpen, setAddressModalOpen] = useState(false);
 
   return (
     <div className={styles.root}>
@@ -306,13 +409,30 @@ export function ProgrammingView() {
           title="Programming"
           actions={[
             <Btn
-              key="all"
-              onClick={programmAll}
-              color="var(--amber)"
-              disabled={programmingAll}
+              key="address"
+              onClick={() => setAddressModalOpen(true)}
+              color="var(--accent)"
             >
-              {programmingAll ? '⋯ Programming…' : '▷ Program All Modified'}
+              + Address New Device
             </Btn>,
+            <div
+              key="all"
+              className={styles.downloadModeAnchor}
+              ref={(el) => {
+                if (el) anchorRefs.current.set('all', el);
+                else anchorRefs.current.delete('all');
+              }}
+            >
+              <Btn
+                onClick={() =>
+                  setDownloadModePopoverFor((v) => (v === 'all' ? null : 'all'))
+                }
+                color="var(--amber)"
+                disabled={programmingAll}
+              >
+                {programmingAll ? '⋯ Programming…' : '▷ Program All Modified'}
+              </Btn>
+            </div>,
           ]}
         />
         <div className={styles.content}>
@@ -350,7 +470,6 @@ export function ProgrammingView() {
               <tr>
                 <TH className={styles.thDevice}>DEVICE</TH>
                 <TH className={styles.thStatus}>STATUS</TH>
-                <TH className={styles.thProgress}>PROGRESS</TH>
                 <TH className={styles.thActions}></TH>
               </tr>
             </thead>
@@ -415,39 +534,6 @@ export function ProgrammingView() {
                       )}
                     </TD>
                     <TD>
-                      {prog ? (
-                        <div
-                          className={styles.progressWrap}
-                          title={liveProgramProgress?.msg}
-                        >
-                          <div className={styles.progressTrack}>
-                            <div
-                              className={styles.progressBar}
-                              style={{
-                                width: `${programPct}%`,
-                                background:
-                                  prog.state === 'done'
-                                    ? 'var(--green)'
-                                    : prog.state === 'error'
-                                      ? 'var(--red)'
-                                      : 'var(--accent)',
-                              }}
-                            />
-                          </div>
-                          {prog.state !== 'error' && (
-                            <span className={styles.progressPct}>
-                              {Math.round(programPct)}%
-                            </span>
-                          )}
-                          {prog.state === 'error' && (
-                            <span className={styles.progressErr}>ERR</span>
-                          )}
-                        </div>
-                      ) : (
-                        <span className={styles.progressDash}>—</span>
-                      )}
-                    </TD>
-                    <TD>
                       <div className={styles.rowActions}>
                         {/* Fixed-width slot, always rendered (empty when
                             there's no cached result yet) so Verify/Program
@@ -483,58 +569,87 @@ export function ProgrammingView() {
                         </div>
                         <div className={styles.verifyBtnWrap}>
                           <Btn
-                            className={styles.actionBtn}
+                            className={`${styles.actionBtn}${verifying ? ' pulse' : ''}`}
                             onClick={() =>
                               verifyDevice(d.id, d.individual_address)
                             }
                             disabled={prog?.state === 'running' || verifying}
                             title={
-                              verifyCache[d.id]
-                                ? 'Read the device again and compare to the computed image — no writes'
-                                : 'Read the device and compare to the computed image — no writes'
+                              verifying
+                                ? (liveVerifyProgress
+                                    ? `${liveVerifyProgress.bytesRead}/${liveVerifyProgress.totalBytes} bytes`
+                                    : 'Reading device…')
+                                : verifyCache[d.id]
+                                  ? 'Read the device again and compare to the computed image — no writes'
+                                  : 'Read the device and compare to the computed image — no writes'
+                            }
+                            // Same treatment as the Program button - the
+                            // button's own background becomes the progress
+                            // bar while a verify read is in flight, with the
+                            // live percentage as its text. Previously paired
+                            // with a separate floating popover (byte
+                            // counter, its own mini bar) - removed, it read
+                            // as messy/overlapping neighboring rows once the
+                            // button itself already showed the percentage.
+                            // The total byte count now goes into the log
+                            // once at the start of the read instead (see
+                            // verifyDevice()) for anyone who wants it.
+                            style={
+                              verifying && liveVerifyProgress
+                                ? {
+                                    background: `linear-gradient(to right, color-mix(in srgb, var(--accent) 55%, transparent) 0%, color-mix(in srgb, var(--accent) 55%, transparent) ${Math.round(liveVerifyProgress.pct)}%, var(--surface) ${Math.round(liveVerifyProgress.pct)}%, var(--surface) 100%)`,
+                                    color: 'var(--text)',
+                                    cursor: 'wait',
+                                  }
+                                : undefined
                             }
                           >
                             {verifying ? (
-                              <Spinner />
+                              liveVerifyProgress ? (
+                                `${Math.round(liveVerifyProgress.pct)}%`
+                              ) : (
+                                <Spinner />
+                              )
                             ) : verifyCache[d.id] ? (
                               'Re-verify'
                             ) : (
                               'Verify'
                             )}
                           </Btn>
-                          {verifying && (
-                            <div className={styles.verifyPopover}>
-                              {liveVerifyProgress ? (
-                                <>
-                                  <div className={styles.progressTrack}>
-                                    <div
-                                      className={styles.progressBar}
-                                      style={{
-                                        width: `${liveVerifyProgress.pct}%`,
-                                        background: 'var(--accent)',
-                                      }}
-                                    />
-                                  </div>
-                                  <span className={styles.verifyPopoverText}>
-                                    {liveVerifyProgress.bytesRead}/
-                                    {liveVerifyProgress.totalBytes} bytes (
-                                    {liveVerifyProgress.pct}%)
-                                  </span>
-                                </>
-                              ) : (
-                                <span className={styles.verifyPopoverText}>
-                                  Reading device…
-                                </span>
-                              )}
-                            </div>
-                          )}
                         </div>
+                        <div
+                          className={styles.downloadModeAnchor}
+                          ref={(el) => {
+                            if (el) anchorRefs.current.set(d.id, el);
+                            else anchorRefs.current.delete(d.id);
+                          }}
+                        >
                         <Btn
-                          className={styles.actionBtn}
-                          onClick={() =>
-                            programDevice(d.id, d.individual_address)
-                          }
+                          className={`${styles.actionBtn}${prog?.state === 'running' ? ' pulse' : ''}`}
+                          onClick={() => {
+                            // Real request 2026-08-30: only offer the
+                            // Full/Partial choice when there's something a
+                            // Partial Download could actually skip - a
+                            // device with no known modifications (never
+                            // downloaded, or already matching what was
+                            // last written) has nothing to differentiate
+                            // the two modes on, so the popup would just be
+                            // an extra click for no real decision. Go
+                            // straight to a Full download for those.
+                            if (d.status !== 'modified') {
+                              programDevice(d.id, d.individual_address, 'full');
+                              return;
+                            }
+                            setDownloadModePopoverFor((v) =>
+                              v === d.id ? null : d.id,
+                            );
+                          }}
                           disabled={prog?.state === 'running'}
+                          title={
+                            prog?.state === 'running'
+                              ? liveProgramProgress?.msg
+                              : undefined
+                          }
                           // Colored/labeled off the PERSISTENT status
                           // (d.status, stored server-side), not the
                           // transient in-memory `prog` state, so it still
@@ -559,9 +674,32 @@ export function ProgrammingView() {
                               ? `color-mix(in srgb, ${STATUS_COLOR[d.status]} 12%, transparent)`
                               : undefined
                           }
+                          // While running, the button's own background
+                          // becomes the progress bar (a hard-stop
+                          // linear-gradient, filled up to the live
+                          // percentage) instead of popping a separate
+                          // PROGRESS column open elsewhere in the row -
+                          // explicit request, replacing that column
+                          // entirely. `style` is spread last inside Btn, so
+                          // this overrides its usual disabled-state gray.
+                          // The `pulse` class (global.css) and `wait`
+                          // cursor make clear the download is still active
+                          // during a real, long, percentage-static stretch
+                          // late in a write (observed live: ~20s+ sitting
+                          // at 80% before jumping to 100%) rather than
+                          // reading as stalled.
+                          style={
+                            prog?.state === 'running'
+                              ? {
+                                  background: `linear-gradient(to right, color-mix(in srgb, var(--accent) 55%, transparent) 0%, color-mix(in srgb, var(--accent) 55%, transparent) ${Math.round(programPct)}%, var(--surface) ${Math.round(programPct)}%, var(--surface) 100%)`,
+                                  color: 'var(--text)',
+                                  cursor: 'wait',
+                                }
+                              : undefined
+                          }
                         >
                           {prog?.state === 'running' ? (
-                            <Spinner />
+                            `${Math.round(programPct)}%`
                           ) : prog?.state === 'error' ? (
                             'Retry'
                           ) : d.status === 'programmed' ? (
@@ -572,6 +710,7 @@ export function ProgrammingView() {
                             'Program'
                           )}
                         </Btn>
+                        </div>
                       </div>
                     </TD>
                   </tr>
@@ -731,6 +870,117 @@ export function ProgrammingView() {
           onClick={() => setSlideOverDevice(null)}
         />
       )}
+      {addressModalOpen && (
+        <AddressDeviceModal
+          devices={devices}
+          onClose={() => setAddressModalOpen(false)}
+          addLog={(line) => {
+            setLogOpen(true);
+            addLog(line);
+          }}
+        />
+      )}
+      {downloadModePopoverFor !== null &&
+        popoverPos &&
+        createPortal(
+          <DownloadModePopover
+            panelRef={popoverRef}
+            pos={popoverPos}
+            width={DOWNLOAD_POPOVER_WIDTH}
+            // Defensive only, in practice never true: a row's own Program
+            // button (see its onClick above) now skips this popup
+            // entirely and goes straight to a Full download unless
+            // status==='modified', and the header's "Program All
+            // Modified" only ever targets status==='modified' devices
+            // (see programmAll) - so by the time this popup can be
+            // showing at all, there's always something real for Partial
+            // to diff against. Kept as a belt-and-braces check rather
+            // than assuming that invariant can never drift.
+            partialDisabled={
+              downloadModePopoverFor !== 'all' &&
+              devices.find((d: any) => d.id === downloadModePopoverFor)
+                ?.status !== 'modified'
+            }
+            onChoose={chooseDownloadMode}
+          />,
+          document.body,
+        )}
+    </div>
+  );
+}
+
+/**
+ * Full vs Partial download choice, shown as a small popover anchored right
+ * under whichever Program button was clicked - see downloadModePopoverFor's
+ * own comment in ProgrammingView for why this is a per-click popover rather
+ * than a page-level setting or a split-button menu, and its own comment for
+ * why this renders through a portal (document.body) at `fixed` coordinates
+ * rather than plain CSS positioning against its trigger button. Mode
+ * meanings and the real evidence behind them: docs/knx-device-write-
+ * protocol.md §4.2 (koolenex repo) - Full rewrites the object's whole
+ * segment, Partial skips whatever the device already matches and writes
+ * only the difference.
+ */
+function DownloadModePopover({
+  panelRef,
+  pos,
+  width,
+  partialDisabled,
+  onChoose,
+}: {
+  panelRef: React.RefObject<HTMLDivElement | null>;
+  pos: { top: number; left: number };
+  width: number;
+  partialDisabled: boolean;
+  onChoose: (mode: 'full' | 'partial') => void;
+}) {
+  return (
+    <div
+      className={styles.downloadModePopover}
+      ref={panelRef}
+      style={{ top: pos.top, left: pos.left, width }}
+    >
+      <div className={styles.downloadModeHeader}>DOWNLOAD MODE</div>
+      <button
+        type="button"
+        className={styles.downloadModeOption}
+        onClick={() => onChoose('full')}
+      >
+        <span
+          className={`${styles.downloadModeIcon} ${styles.downloadModeIconFull}`}
+        >
+          ⬇
+        </span>
+        <span className={styles.downloadModeText}>
+          <span className={styles.downloadModeLabel}>Full Download</span>
+          <span className={styles.downloadModeDesc}>
+            Rewrites every segment. Always safe, slower.
+          </span>
+        </span>
+      </button>
+      <button
+        type="button"
+        className={styles.downloadModeOption}
+        onClick={() => onChoose('partial')}
+        disabled={partialDisabled}
+        title={
+          partialDisabled
+            ? 'Not available — no known modifications for this device, so there is nothing to skip'
+            : undefined
+        }
+      >
+        <span
+          className={`${styles.downloadModeIcon} ${styles.downloadModeIconPartial}`}
+        >
+          ⚡
+        </span>
+        <span className={styles.downloadModeText}>
+          <span className={styles.downloadModeLabel}>Partial Download</span>
+          <span className={styles.downloadModeDesc}>
+            Writes only what differs from the device. Faster.
+          </span>
+        </span>
+      </button>
     </div>
   );
 }

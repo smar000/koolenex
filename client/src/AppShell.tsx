@@ -93,11 +93,14 @@ const VIEWS: ViewEntry[] = [
   { id: 'monitor', slug: 'monitor', Icon: IconMonitor, label: 'Monitor' },
   { id: 'scan', slug: 'scan', Icon: IconScan, label: 'Scan' },
   {
+    // wip: true removed 2026-08-31 - stale from when this page genuinely
+    // was a work-in-progress placeholder; it's had extensive real work
+    // since (device addressing, download modes, log panel, etc.) and no
+    // longer belongs dimmed out next to the other, fully real nav items.
     id: 'programming',
     slug: 'programming',
     Icon: IconProgramming,
     label: 'Programming',
-    wip: true,
   },
 ];
 

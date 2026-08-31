@@ -93,6 +93,24 @@
   align-items: center;
   gap: 7px;
 }
+/* Real bug found live 2026-08-31: the device name and manufacturer label
+   used to be two plain flex ITEMS on .devName's single row, alongside the
+   icon/address-pill/serial-icon - a short name (fits one line) left the
+   manufacturer sitting right after it, but a longer name (wraps to 2+
+   lines) pushed the manufacturer down to wherever the wrap happened to
+   end, landing at a different horizontal position per row. Stacking name
+   +manufacturer in their own column (name on top, manufacturer directly
+   under it, both left-aligned) makes the manufacturer's position
+   independent of how many lines the name itself wraps to. */
+.devNameCol {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+.devNameText {
+  overflow-wrap: break-word;
+}
 .mfrLabel {
   color: var(--dim);
   font-size: 9px;

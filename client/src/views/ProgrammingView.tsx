@@ -657,12 +657,14 @@ export function ProgrammingView() {
                         >
                           <IconSerial size={12} />
                         </span>
-                        {d.name}
-                        {d.manufacturer && (
-                          <span className={styles.mfrLabel}>
-                            {d.manufacturer}
-                          </span>
-                        )}
+                        <span className={styles.devNameCol}>
+                          <span className={styles.devNameText}>{d.name}</span>
+                          {d.manufacturer && (
+                            <span className={styles.mfrLabel}>
+                              {d.manufacturer}
+                            </span>
+                          )}
+                        </span>
                       </span>
                     </TD>
                     <TD>

@@ -175,12 +175,12 @@ export function AddressDeviceModal({
         [serial]: { ok: true, msg: `✓ Addressed as ${target.individual_address}` },
       }));
       addLog(
-        `[${new Date().toLocaleTimeString()}] ✓ ${serial} → ${target.individual_address}`,
+        `[${new Date().toLocaleTimeString()}] Addressed ${serial} → ${target.individual_address}`,
       );
     } catch (e: any) {
       setDetectResult((r) => ({ ...r, [serial]: { ok: false, msg: e.message } }));
       addLog(
-        `[${new Date().toLocaleTimeString()}] ✗ ${serial} — ${e.message}`,
+        `[${new Date().toLocaleTimeString()}] Addressing failed → ${serial} — ${e.message}`,
       );
     }
     setDetectBusy((b) => ({ ...b, [serial]: false }));
@@ -226,12 +226,12 @@ export function AddressDeviceModal({
       await updateDevice(target.id, { serial_number: manualSerial });
       setManualResult({ ok: true, msg: `✓ Addressed as ${target.individual_address}` });
       addLog(
-        `[${new Date().toLocaleTimeString()}] ✓ ${manualSerial} → ${target.individual_address}`,
+        `[${new Date().toLocaleTimeString()}] Addressed ${manualSerial} → ${target.individual_address}`,
       );
     } catch (e: any) {
       setManualResult({ ok: false, msg: e.message });
       addLog(
-        `[${new Date().toLocaleTimeString()}] ✗ ${manualSerial} — ${e.message}`,
+        `[${new Date().toLocaleTimeString()}] Addressing failed → ${manualSerial} — ${e.message}`,
       );
     }
     setManualBusy(false);

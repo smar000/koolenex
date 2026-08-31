@@ -79,16 +79,85 @@ export function ProgrammingView() {
   // yet) for a log that's empty most of the time. Auto-opens itself the
   // moment there's something to show (a Verify or Program click).
   const [logOpen, setLogOpen] = useState(false);
-  // How much width the log panel/collapsed strip currently reserves on the
-  // right, so the slide-over (and its scrim) can stop short of it instead
-  // of covering it - see the comment at the slide-over below.
+
+  // ── Log panel orientation: vertical (right-docked, the original layout)
+  // or horizontal (bottom-docked) - real request 2026-08-31, deliberately
+  // its own independent size/preference from the vertical sidebar's width,
+  // so switching back and forth doesn't lose either one's own resize.
+  const SIDEBAR_HEIGHT_MIN = 120;
+  const SIDEBAR_HEIGHT_MAX = 420;
+  const [sidebarHeight, setSidebarHeight] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem('programmingLogHeight'));
+      if (saved >= SIDEBAR_HEIGHT_MIN && saved <= SIDEBAR_HEIGHT_MAX)
+        return saved;
+    } catch {}
+    return 180;
+  });
+  const heightRef = useRef(sidebarHeight);
+  const [logOrientation, setLogOrientation] = useState<
+    'vertical' | 'horizontal'
+  >(() => {
+    try {
+      const saved = localStorage.getItem('programmingLogOrientation');
+      if (saved === 'horizontal' || saved === 'vertical') return saved;
+    } catch {}
+    return 'vertical';
+  });
+  const toggleLogOrientation = () => {
+    setLogOrientation((o) => {
+      const next = o === 'vertical' ? 'horizontal' : 'vertical';
+      try {
+        localStorage.setItem('programmingLogOrientation', next);
+      } catch {}
+      return next;
+    });
+  };
+
+  // How much width/height the log panel/collapsed strip currently reserves
+  // on the right (vertical) or bottom (horizontal), so the slide-over (and
+  // its scrim) can stop short of it instead of covering it - see the
+  // comment at the slide-over below. Only one of the two is ever actually
+  // used at a time (by orientation), but both are always computed since
+  // each mode remembers its own independent size even while inactive.
   const logPanelWidth = logOpen ? sidebarWidth + 5 : 28;
+  const logPanelHeight = logOpen ? sidebarHeight + 5 : 28;
 
   const onResizerMouseDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
       setResizing(true);
       document.body.style.userSelect = 'none';
+      if (logOrientation === 'horizontal') {
+        document.body.style.cursor = 'row-resize';
+        const startY = e.clientY;
+        const startHeight = sidebarHeight;
+        const onMove = (ev: MouseEvent) => {
+          const delta = startY - ev.clientY; // panel is at the bottom - dragging up grows it
+          const next = Math.min(
+            SIDEBAR_HEIGHT_MAX,
+            Math.max(SIDEBAR_HEIGHT_MIN, startHeight + delta),
+          );
+          heightRef.current = next;
+          setSidebarHeight(next);
+        };
+        const onUp = () => {
+          setResizing(false);
+          document.body.style.userSelect = '';
+          document.body.style.cursor = '';
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          try {
+            localStorage.setItem(
+              'programmingLogHeight',
+              String(heightRef.current),
+            );
+          } catch {}
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        return;
+      }
       document.body.style.cursor = 'col-resize';
       const startX = e.clientX;
       const startWidth = sidebarWidth;
@@ -117,7 +186,7 @@ export function ProgrammingView() {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [sidebarWidth],
+    [sidebarWidth, sidebarHeight, logOrientation],
   );
 
   const programDevice = async (
@@ -158,7 +227,7 @@ export function ProgrammingView() {
       await api.busProgramDevice(devAddr, pid!, deviceId, mode);
       setProgress((p) => ({ ...p, [deviceId]: { state: 'done' } }));
       addLog(
-        `[${new Date().toLocaleTimeString()}] ✓ ${devAddr} — programmed (${mode})`,
+        `[${new Date().toLocaleTimeString()}] Downloaded (${mode}) → ${devAddr}`,
       );
       onDeviceStatus(deviceId, 'programmed');
       // A successful write just changed the device's real content - the
@@ -172,7 +241,7 @@ export function ProgrammingView() {
     } catch (err: any) {
       setProgress((p) => ({ ...p, [deviceId]: { state: 'error' } }));
       addLog(
-        `[${new Date().toLocaleTimeString()}] ✗ ${devAddr} — ${err.message}`,
+        `[${new Date().toLocaleTimeString()}] Download failed (${mode}) → ${devAddr} — ${err.message}`,
       );
     }
   };
@@ -256,8 +325,13 @@ export function ProgrammingView() {
           ([name, count]) =>
             `${count} ${sectionWord(name)}${count === 1 ? '' : 's'}`,
         );
+      // No leading match/mismatch symbol - the byte-match figures and any
+      // named differing sections already say whether it matched, without
+      // needing a separate glyph or color to repeat the same information
+      // (real request 2026-08-31: log entries shouldn't rely on
+      // color/tick to carry the "did this succeed" signal at all).
       const msg =
-        `${r.match ? '✓' : '≠'} ${devAddr} — ${scopes.join('; ')}` +
+        `Verified → ${devAddr} — ${scopes.join('; ')}` +
         (mismatchedSections.length ? `; ${mismatchedSections.join(', ')} differ` : '');
       addLog(`[${new Date().toLocaleTimeString()}] ${msg}`);
       // Slide over to show the full comparison as soon as the read completes,
@@ -269,7 +343,7 @@ export function ProgrammingView() {
       if (dev) setLogOpen(false);
     } catch (err: any) {
       addLog(
-        `[${new Date().toLocaleTimeString()}] ✗ ${devAddr} — verify failed: ${err.message}`,
+        `[${new Date().toLocaleTimeString()}] Verify failed → ${devAddr} — ${err.message}`,
       );
     } finally {
       setVerifyingIds((s) => {
@@ -417,7 +491,9 @@ export function ProgrammingView() {
   );
 
   return (
-    <div className={styles.root}>
+    <div
+      className={`${styles.root} ${logOrientation === 'horizontal' ? styles.rootHorizontal : ''}`}
+    >
       <div className={styles.main}>
         <SectionHeader
           title="Programming"
@@ -786,24 +862,46 @@ export function ProgrammingView() {
       {logOpen ? (
         <>
           <div
-            className={styles.resizer}
+            className={
+              logOrientation === 'horizontal'
+                ? styles.resizerHorizontal
+                : styles.resizer
+            }
             onMouseDown={onResizerMouseDown}
             title="Drag to resize"
           />
           <div
-            className={`${styles.sidebar} ${resizing ? styles.sidebarResizing : ''}`}
-            style={{ width: sidebarWidth }}
+            className={`${styles.sidebar} ${logOrientation === 'horizontal' ? styles.sidebarHorizontal : ''} ${resizing ? styles.sidebarResizing : ''}`}
+            style={
+              logOrientation === 'horizontal'
+                ? { height: sidebarHeight }
+                : { width: sidebarWidth }
+            }
           >
             <div className={styles.logHeader}>
               LOG
-              <button
-                type="button"
-                className={styles.logCollapseBtn}
-                onClick={() => setLogOpen(false)}
-                title="Collapse log"
-              >
-                ▸
-              </button>
+              <div className={styles.logHeaderActions}>
+                <button
+                  type="button"
+                  className={styles.logCollapseBtn}
+                  onClick={toggleLogOrientation}
+                  title={
+                    logOrientation === 'horizontal'
+                      ? 'Switch to a vertical (right-docked) log panel'
+                      : 'Switch to a horizontal (bottom-docked) log panel'
+                  }
+                >
+                  {logOrientation === 'horizontal' ? '⬓' : '⬔'}
+                </button>
+                <button
+                  type="button"
+                  className={styles.logCollapseBtn}
+                  onClick={() => setLogOpen(false)}
+                  title="Collapse log"
+                >
+                  {logOrientation === 'horizontal' ? '▾' : '▸'}
+                </button>
+              </div>
             </div>
             <div className={styles.logBody}>
               {log.length === 0 ? (
@@ -823,15 +921,13 @@ export function ProgrammingView() {
                   const m = l.match(/^\[([^\]]+)\]\s*([\s\S]*)$/);
                   const time = m?.[1];
                   const text = m ? m[2] : l;
+                  // Deliberately no success/failure color or symbol here -
+                  // real request 2026-08-31: every entry's own wording
+                  // already says what happened ("Downloaded", "Download
+                  // failed", "Verified", etc.), so a separate color/tick
+                  // was redundant, not an extra signal.
                   return (
-                    <div
-                      key={i}
-                      className={
-                        l.includes('✓')
-                          ? styles.logEntrySuccess
-                          : styles.logEntryNormal
-                      }
-                    >
+                    <div key={i} className={styles.logEntry}>
                       {time && (
                         <div className={styles.logEntryTime}>{time}</div>
                       )}
@@ -856,11 +952,23 @@ export function ProgrammingView() {
       ) : (
         <button
           type="button"
-          className={styles.logCollapsedStrip}
+          className={
+            logOrientation === 'horizontal'
+              ? styles.logCollapsedStripHorizontal
+              : styles.logCollapsedStrip
+          }
           onClick={() => setLogOpen(true)}
           title="Open log"
         >
-          <span className={styles.logCollapsedLabel}>LOG</span>
+          <span
+            className={
+              logOrientation === 'horizontal'
+                ? styles.logCollapsedLabelHorizontal
+                : styles.logCollapsedLabel
+            }
+          >
+            LOG
+          </span>
           {log.length > 0 && (
             <span className={styles.logCollapsedCount}>{log.length}</span>
           )}
@@ -907,10 +1015,15 @@ export function ProgrammingView() {
         className={`${styles.slideOver} ${slideOverDevice ? styles.slideOverOpen : ''}`}
         style={
           slideOverDevice
-            ? {
-                right: logPanelWidth,
-                width: `min(900px, max(320px, calc(96% - ${logPanelWidth}px)))`,
-              }
+            ? logOrientation === 'horizontal'
+              ? // Horizontal mode reserves no width on the right at all
+                // (the log panel is bottom-docked instead) - only needs to
+                // stop short of it vertically.
+                { right: 0, bottom: logPanelHeight }
+              : {
+                  right: logPanelWidth,
+                  width: `min(900px, max(320px, calc(96% - ${logPanelWidth}px)))`,
+                }
             : { right: 0 }
         }
       >
@@ -925,7 +1038,10 @@ export function ProgrammingView() {
                       COLMAP[slideOverDevice.device_type] || 'var(--muted)',
                   }}
                 />
-                {slideOverDevice.individual_address} — {slideOverDevice.name}
+                {slideOverDevice.has_address
+                  ? slideOverDevice.individual_address
+                  : '-.-.-'}{' '}
+                — {slideOverDevice.name}
               </span>
               <button
                 className={styles.slideOverClose}
@@ -947,7 +1063,11 @@ export function ProgrammingView() {
       {slideOverDevice && (
         <div
           className={styles.slideOverScrim}
-          style={{ right: logPanelWidth }}
+          style={
+            logOrientation === 'horizontal'
+              ? { right: 0, bottom: logPanelHeight }
+              : { right: logPanelWidth }
+          }
           onClick={() => setSlideOverDevice(null)}
         />
       )}

@@ -1,6 +1,8 @@
 /* ProgrammingView */
 .root {
   display: flex;
+  /* Row (the default) lays out [.main, resizer, log panel] side by side -
+     the original, vertical/right-docked log layout. */
   flex: 1;
   overflow: hidden;
   /* Positioning root for the slide-over/scrim below - keeps both scoped to
@@ -9,6 +11,15 @@
      them correctly without ever covering the sidebar. */
   position: relative;
   min-width: 0;
+}
+/* Horizontal log mode, added 2026-08-31: same three children
+   ([.main, resizer, log panel]), just stacked as a column instead of a
+   row - .main on top, the panel bottom-docked. Everything else about the
+   layout (the resizer's own drag handler, the panel's internal
+   header/body/footer flex-column) stays the same; only this direction
+   flip plus the panel/resizer's own width->height swap (below) differ. */
+.rootHorizontal {
+  flex-direction: column;
 }
 .main {
   flex: 1;
@@ -129,12 +140,38 @@
 .resizer:active {
   background: color-mix(in srgb, var(--accent) 35%, transparent);
 }
+/* Horizontal mode's resizer: a full-width horizontal bar (drags height via
+   mouse-Y, see onResizerMouseDown) instead of a narrow vertical bar
+   (drags width via mouse-X) - added 2026-08-31. */
+.resizerHorizontal {
+  height: 5px;
+  width: 100%;
+  flex-shrink: 0;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+}
+.resizerHorizontal:hover,
+.resizerHorizontal:active {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
 .sidebar {
   flex-shrink: 0;
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+/* Horizontal mode: same panel, full page width instead of a border on the
+   left, a border on top instead (it's now above, not beside, .main) -
+   added 2026-08-31. Its own internal layout (header/body/footer, all
+   already flex-column) needs no change - only the outer dimension the
+   size prop controls flips from width (see the inline style at the call
+   site) to height. */
+.sidebarHorizontal {
+  border-left: none;
+  border-top: 1px solid var(--border);
+  width: 100%;
 }
 .sidebarResizing {
   user-select: none;
@@ -148,6 +185,11 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+.logHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .logCollapseBtn {
   background: none;
@@ -186,6 +228,34 @@
 .logCollapsedLabel {
   writing-mode: vertical-rl;
   transform: rotate(180deg);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+/* Horizontal mode's collapsed state: a thin strip along the bottom edge
+   instead of the right - the label reads normally (no rotation needed,
+   there's no vertical strip to fit it into) - added 2026-08-31. */
+.logCollapsedStripHorizontal {
+  flex-shrink: 0;
+  height: 24px;
+  width: 100%;
+  border-left: none;
+  border-top: 1px solid var(--border);
+  background: none;
+  cursor: pointer;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 12px;
+  color: var(--dim);
+  font-family: inherit;
+}
+.logCollapsedStripHorizontal:hover {
+  color: var(--fg);
+  background: var(--surface);
+}
+.logCollapsedLabelHorizontal {
   font-size: 9px;
   letter-spacing: 0.1em;
 }
@@ -268,20 +338,6 @@
      more than the 24px of slack the 280px width left over TD's own 24px
      padding. */
   width: 300px;
-}
-/* Outer wrapper classes only compose the shared layout now - the message
-   itself gets its color from .logEntryText (below), which they override
-   per outcome, keeping the timestamp (.logEntryTime) consistently dim
-   regardless of outcome rather than tinting the whole entry including
-   its timestamp. */
-.logEntrySuccess {
-  composes: logEntry;
-}
-.logEntrySuccess .logEntryText {
-  color: var(--green);
-}
-.logEntryNormal {
-  composes: logEntry;
 }
 
 .rowActions {

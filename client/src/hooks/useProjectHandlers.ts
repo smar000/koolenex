@@ -405,6 +405,20 @@ export function useProjectHandlers(
           deviceId: updated.device_id,
           status: updated.device_status as any,
         });
+        // The Compare page (DeviceCompareResults.tsx) and the Programming
+        // slide-over both read the SAME cached verify result
+        // (state.verifyCache[deviceId]) - its "project" column is a
+        // snapshot of what the target looked like at the moment that
+        // Verify ran, not a live recompute. Left in place, a genuine edit
+        // silently kept showing that stale pre-edit target next to the
+        // (now also stale) device reading, with nothing indicating either
+        // side had moved. Real user feedback, 2026-08-31: "our comparison
+        // page ... is still defaulting to the original unmodified
+        // version." Dropping the cache entry (same action the
+        // Programming page's own per-row clear button already uses)
+        // forces both pages back to their real empty/"run Verify" state
+        // instead of showing a comparison that's quietly gone wrong.
+        dispatch({ type: 'CLEAR_VERIFY_RESULT', deviceId: updated.device_id });
       }
     },
     [state.activeProjectId],
@@ -443,14 +457,16 @@ export function useProjectHandlers(
           flags: updated.flags,
         },
       });
-      // See the matching comment in handleUpdateComObjectGAs above - same
-      // server-side markDeviceModifiedIfProgrammed() mechanism.
+      // See the matching comments in handleUpdateComObjectGAs above - same
+      // server-side markDeviceModifiedIfProgrammed() mechanism, and same
+      // stale-compare-cache reasoning for the CLEAR_VERIFY_RESULT dispatch.
       if (updated.device_status) {
         dispatch({
           type: 'SET_DEVICE_STATUS',
           deviceId: updated.device_id,
           status: updated.device_status as any,
         });
+        dispatch({ type: 'CLEAR_VERIFY_RESULT', deviceId: updated.device_id });
       }
     },
     [state.activeProjectId],
@@ -458,6 +474,12 @@ export function useProjectHandlers(
 
   const applyDeviceStatus = useCallback((deviceId: number, status: string) => {
     dispatch({ type: 'SET_DEVICE_STATUS', deviceId, status: status as any });
+    // Same stale-compare-cache reasoning as handleUpdateComObjectGAs/Flags
+    // above - every caller of applyDeviceStatus (currently just
+    // DeviceParameters.tsx's save) only calls it when the server actually
+    // persisted a genuine change, so the device's cached verify result
+    // (its "project" column) is stale the moment this fires.
+    dispatch({ type: 'CLEAR_VERIFY_RESULT', deviceId });
   }, []);
 
   const handleAddScannedDevice = useCallback(

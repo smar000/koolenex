@@ -840,11 +840,31 @@ interface ComObjectFlagsCellProps {
   onUpdateComObjectFlags?: (coId: number, body: Record<string, unknown>) => void;
 }
 
+// The composite `flags` string (buildFlags(), ets-parser.ts) only ever
+// encodes the 5 boolean C/R/W/T/U flags - it never carried Read-On-Init or
+// Priority, so a cell showing just `co.flags` gave no visible sign that
+// either had changed, even though the popover's own checkboxes updated
+// correctly the instant you clicked. Real user report, 2026-08-31, with a
+// screenshot of exactly this: Read-On-Init checked in the popover, closed
+// popover, cell still just said "CRT" - not a stale-data bug, a missing
+// display. Appends a compact "·RI" when Read-On-Init is on and "·<initial>"
+// for a non-default Priority (ETS's own default is Low, so that one stays
+// silent) - same abbreviations DeviceCompareResults.tsx's FlagChips uses,
+// just condensed for this column's narrow width instead of one chip each.
+function flagsCellDisplay(co: any): string {
+  let s = co.flags || '';
+  if (co.read_on_init) s += '·RI';
+  if (co.priority && co.priority !== 'low') {
+    s += '·' + co.priority[0]!.toUpperCase();
+  }
+  return s;
+}
+
 function ComObjectFlagsCell({ co, onUpdateComObjectFlags }: ComObjectFlagsCellProps) {
   const [open, setOpen] = useState(false);
 
   if (!onUpdateComObjectFlags) {
-    return <span className={styles.dimMono}>{co.flags}</span>;
+    return <span className={styles.dimMono}>{flagsCellDisplay(co)}</span>;
   }
 
   return (
@@ -854,7 +874,7 @@ function ComObjectFlagsCell({ co, onUpdateComObjectFlags }: ComObjectFlagsCellPr
         className={styles.flagsCellClickable}
         title="Click to edit flags, priority and Read-On-Init"
       >
-        {co.flags}
+        {flagsCellDisplay(co)}
       </span>
       {open && (
         <>

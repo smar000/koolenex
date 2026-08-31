@@ -620,7 +620,10 @@
   white-space: nowrap;
 }
 .thCoFlags {
-  width: 60px;
+  /* Widened from 60px, 2026-08-31 - the cell can now show "·RI"/"·<Priority
+     initial>" suffixes alongside the C/R/W/T/U composite (see
+     flagsCellDisplay(), DevicePinPanel.tsx), which didn't fit at 60px. */
+  width: 90px;
 }
 .sameDevRowSelected {
   composes: sameDevRow;

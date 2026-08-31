@@ -226,9 +226,22 @@ export function AddressDeviceModal({
 
   const manualSerialValid = /^[0-9a-fA-F]{12}$/.test(manualSerial);
   const manualMatch = manualSerialValid ? matchBySerial(manualSerial) : null;
+  // Resolved from allDevices, not the has_address-filtered `devices` above
+  // - real request 2026-08-31: opening this modal from the serial icon of
+  // an unaddressed device (has_address=0) was inconsistent, popping the
+  // "assign a project address" modal instead of this one. A locked target
+  // can legitimately have no real address yet; what changes is which
+  // actions are offered below (lockedNoAddress), not whether the target
+  // itself can be found.
   const lockedTarget = lockDevice
-    ? (devices.find((d) => d.id === initialDeviceId) ?? null)
+    ? (allDevices.find((d) => d.id === initialDeviceId) ?? null)
     : null;
+  // No real address to write to at all - only serial CAPTURE is safe here
+  // (updateDevice, no bus write), same reasoning as the has_address guard
+  // on `devices` above: writing to a synthetic placeholder address would
+  // be hazardous, so no write path is offered for this case at all, not
+  // even the normally-safe programIA/assignAddressBySerial ones.
+  const lockedNoAddress = !!lockedTarget && !lockedTarget.has_address;
   const manualTarget = devices.find(
     (d) => d.id === (manualDeviceId || manualMatch?.id),
   );
@@ -281,7 +294,9 @@ export function AddressDeviceModal({
         <div className={styles.header}>
           <span className={styles.title}>
             {lockDevice
-              ? 'Edit/Update Device Serial Number'
+              ? lockedNoAddress
+                ? 'Capture Device Serial Number'
+                : 'Edit/Update Device Serial Number'
               : 'Address New Device'}
           </span>
           <button className={styles.closeBtn} onClick={onClose} title="Close">
@@ -291,11 +306,21 @@ export function AddressDeviceModal({
         <div className={styles.body}>
           <div className={styles.intro}>
             {lockDevice ? (
-              <>
-                Re-confirm or update the recorded serial number for this
-                device, either by pressing its programming button to detect
-                it, or by entering the serial directly.
-              </>
+              lockedNoAddress ? (
+                <>
+                  Capture this device's serial number, either by pressing
+                  its programming button to detect it, or by entering the
+                  serial directly. No project address is assigned yet, so
+                  nothing is written to the device - it just records the
+                  serial.
+                </>
+              ) : (
+                <>
+                  Re-confirm or update the recorded serial number for this
+                  device, either by pressing its programming button to
+                  detect it, or by entering the serial directly.
+                </>
+              )
             ) : (
               <>
                 Write a real KNX individual address onto a physical device,
@@ -341,9 +366,13 @@ export function AddressDeviceModal({
                     const busy = detectBusy[d.serial];
                     const result = detectResult[d.serial];
                     const canUseProgIA = detected.length === 1;
+                    // No real project address to compare against at all -
+                    // capture-only regardless of what this device
+                    // currently reports (see lockedNoAddress above).
                     const isMatch =
-                      !!lockedTarget &&
-                      d.src === lockedTarget.individual_address;
+                      lockedNoAddress ||
+                      (!!lockedTarget &&
+                        d.src === lockedTarget.individual_address);
                     return (
                       <div key={d.serial} className={styles.detectedRow}>
                         <div className={styles.detectedSerial}>
@@ -352,14 +381,21 @@ export function AddressDeviceModal({
                         {isMatch ? (
                           <>
                             <div className={styles.matchedTag}>
-                              Already reports {lockedTarget!.individual_address}{' '}
-                              — nothing to write, just confirm the serial.
+                              {lockedNoAddress
+                                ? 'No project address assigned yet — nothing to write, just capture the serial.'
+                                : `Already reports ${lockedTarget!.individual_address} — nothing to write, just confirm the serial.`}
                             </div>
                             <Btn
                               onClick={() => confirmSerial(d.serial)}
                               disabled={confirmBusy}
                             >
-                              {confirmBusy ? <Spinner /> : 'Confirm Serial'}
+                              {confirmBusy ? (
+                                <Spinner />
+                              ) : lockedNoAddress ? (
+                                'Use This Serial'
+                              ) : (
+                                'Confirm Serial'
+                              )}
                             </Btn>
                           </>
                         ) : (
@@ -446,36 +482,53 @@ export function AddressDeviceModal({
               )}
               {lockedTarget && (
                 <div className={styles.matchedTag}>
-                  Addressing: {lockedTarget.individual_address} —{' '}
-                  {lockedTarget.name}
+                  {lockedNoAddress
+                    ? `Recording serial for: ${lockedTarget.name}`
+                    : `Addressing: ${lockedTarget.individual_address} — ${lockedTarget.name}`}
                 </div>
               )}
-              <Btn
-                onClick={writeManual}
-                disabled={
-                  manualBusy ||
-                  !manualSerialValid ||
-                  !(manualDeviceId || manualMatch) ||
-                  manualNoChange
-                }
-                color="var(--amber)"
-                title={
-                  manualNoChange
-                    ? 'No change — this is already the recorded serial for this device'
-                    : 'Write by targeting this exact serial number — not yet confirmed on real hardware'
-                }
-              >
-                {manualBusy ? (
-                  <Spinner />
-                ) : (
-                  <>
-                    Write Address{' '}
-                    <span className={styles.experimentalBadge}>
-                      Experimental
-                    </span>
-                  </>
-                )}
-              </Btn>
+              {lockedNoAddress ? (
+                <Btn
+                  onClick={() => confirmSerial(manualSerial)}
+                  disabled={
+                    confirmBusy || !manualSerialValid || manualNoChange
+                  }
+                  title={
+                    manualNoChange
+                      ? 'No change — this is already the recorded serial for this device'
+                      : 'Record this serial number — no bus write, there is no project address yet to write it to'
+                  }
+                >
+                  {confirmBusy ? <Spinner /> : 'Use This Serial'}
+                </Btn>
+              ) : (
+                <Btn
+                  onClick={writeManual}
+                  disabled={
+                    manualBusy ||
+                    !manualSerialValid ||
+                    !(manualDeviceId || manualMatch) ||
+                    manualNoChange
+                  }
+                  color="var(--amber)"
+                  title={
+                    manualNoChange
+                      ? 'No change — this is already the recorded serial for this device'
+                      : 'Write by targeting this exact serial number — not yet confirmed on real hardware'
+                  }
+                >
+                  {manualBusy ? (
+                    <Spinner />
+                  ) : (
+                    <>
+                      Write Address{' '}
+                      <span className={styles.experimentalBadge}>
+                        Experimental
+                      </span>
+                    </>
+                  )}
+                </Btn>
+              )}
               {manualResult && (
                 <div
                   className={

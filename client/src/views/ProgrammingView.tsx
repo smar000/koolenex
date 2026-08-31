@@ -613,11 +613,15 @@ export function ProgrammingView() {
                             programming button is pressed during a write, or
                             when entered by hand (see AddressDeviceModal) -
                             it is NOT always present just because the
-                            imported project has a planned address. Enabled
-                            even for a has_address=0 row (2026-08-30, real
-                            request) - routes into the address-assignment
-                            step first rather than being a dead end,
-                            matching the "-.-.-" badge's own click target. */}
+                            imported project has a planned address. Always
+                            opens AddressDeviceModal, regardless of
+                            has_address (fixed 2026-08-31 - previously
+                            routed a has_address=0 row into the address-
+                            assignment modal instead, which was actually
+                            inconsistent: this icon is about the SERIAL,
+                            and AddressDeviceModal now has its own
+                            capture-only layout for a device with no real
+                            address yet - see its lockedNoAddress). */}
                         <span
                           className={styles.serialIcon}
                           style={{
@@ -630,16 +634,12 @@ export function ProgrammingView() {
                           }}
                           title={
                             !d.has_address
-                              ? 'No project address yet — click to assign one'
+                              ? 'No serial captured yet — click to detect or enter one'
                               : d.serial_number
                                 ? `Serial ${d.serial_number} — click to re-address`
                                 : 'Not yet commissioned — no serial recorded. Click to address this device.'
                           }
-                          onClick={() =>
-                            d.has_address
-                              ? setAddressModalFor(d.id)
-                              : setAssignAddressFor(d.id)
-                          }
+                          onClick={() => setAddressModalFor(d.id)}
                         >
                           <IconSerial size={12} />
                         </span>
@@ -1073,12 +1073,18 @@ export function ProgrammingView() {
       )}
       {addressModalFor !== null &&
         (() => {
-          // A known-serial device (already commissioned once) opens
-          // straight on the serial tab, pre-filled, with the picker
-          // locked to it - re-scanning/re-picking a device we already
-          // have a record for is unnecessary friction. A row with no
-          // recorded serial still opens on the general 'detect' tab
-          // (its own default), since that IS the discovery step.
+          // Any row-scoped opening (the serial icon on a specific device)
+          // locks the modal to that device, regardless of whether it has a
+          // recorded serial or a real address yet - only the top-level
+          // "Scan for New Device" button (addressModalFor === 'scan', no
+          // row context) leaves it unlocked, since picking among several
+          // detected devices is the actual point there. A known-serial
+          // device (already commissioned once) additionally opens
+          // straight on the serial tab, pre-filled - re-scanning/
+          // re-picking a device we already have a record for is
+          // unnecessary friction. A row with no recorded serial still
+          // opens on the general 'detect' tab (its own default), since
+          // that IS the discovery step.
           const rowDevice =
             typeof addressModalFor === 'number'
               ? devices.find((d: any) => d.id === addressModalFor)
@@ -1094,7 +1100,7 @@ export function ProgrammingView() {
               }
               initialTab={known ? 'serial' : undefined}
               initialSerial={known ? rowDevice!.serial_number : undefined}
-              lockDevice={known}
+              lockDevice={typeof addressModalFor === 'number'}
               onClose={() => setAddressModalFor(null)}
               addLog={(line) => {
                 setLogOpen(true);

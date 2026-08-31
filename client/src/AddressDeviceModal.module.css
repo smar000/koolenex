@@ -89,6 +89,17 @@
   margin-bottom: 5px;
   letter-spacing: 0.04em;
 }
+/* Separator between the scan and manual-entry sections in the lockDevice
+   ("known device") layout, added 2026-08-31 - both are always offered
+   together there (no tabs), so a plain divider replaces the tab bar that
+   used to separate them. */
+.orDivider {
+  font-size: 9px;
+  color: var(--dim);
+  text-align: center;
+  letter-spacing: 0.1em;
+  margin: 4px 0;
+}
 .textInput {
   width: 100%;
   background: var(--input-bg);

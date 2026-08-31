@@ -7,8 +7,9 @@ import styles from './AddressDeviceModal.module.css';
 
 /**
  * Guided flow for writing a real KNX individual address onto a physical
- * device - either a device currently held in programming mode (button
- * press) or one identified purely by its serial number. Opened inline on
+ * device - either a device currently in programming mode (pressed once to
+ * enter it, not held down) or one identified purely by its serial number.
+ * Opened inline on
  * the Programming page (see ProgrammingView.tsx's "Address New Device"
  * button), not a separate view - the operator needs to see this alongside
  * the same device list/log they're already working from.
@@ -139,10 +140,13 @@ export function AddressDeviceModal({
     setScanning(false);
   };
 
-  const writeDetected = async (serial: string, viaProgIA: boolean) => {
-    const deviceId = detectSelection[serial];
-    if (!deviceId) return;
-    const target = devices.find((d) => d.id === deviceId);
+  const writeDetected = async (
+    serial: string,
+    viaProgIA: boolean,
+    explicitTarget?: Device,
+  ) => {
+    const target =
+      explicitTarget ?? devices.find((d) => d.id === detectSelection[serial]);
     if (!target) return;
     setDetectBusy((b) => ({ ...b, [serial]: true }));
     setDetectResult((r) => {
@@ -186,6 +190,30 @@ export function AddressDeviceModal({
     setDetectBusy((b) => ({ ...b, [serial]: false }));
   };
 
+  // ── lockDevice-only: confirm a detected serial with no bus write ────────
+  // Real request 2026-08-31: when the modal was opened for a specific,
+  // already-addressed device, a scan that finds it already reporting the
+  // EXPECTED address has nothing to write - programIA/assignAddressBySerial
+  // would just be re-asserting an address the device already has. This
+  // just records the serial (`updateDevice`), the same bookkeeping every
+  // real write already does at the end, without touching the bus at all.
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const confirmSerial = async (serial: string) => {
+    if (!lockedTarget) return;
+    setConfirmBusy(true);
+    try {
+      await updateDevice(lockedTarget.id, { serial_number: serial });
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Confirmed serial ${serial} for ${lockedTarget.individual_address}`,
+      );
+    } catch (e: any) {
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Confirming serial failed → ${e.message}`,
+      );
+    }
+    setConfirmBusy(false);
+  };
+
   // ── Serial-entry tab ─────────────────────────────────────────────────────
   const [manualSerial, setManualSerial] = useState(initialSerial ?? '');
   const [manualDeviceId, setManualDeviceId] = useState<number | ''>(
@@ -201,6 +229,16 @@ export function AddressDeviceModal({
   const lockedTarget = lockDevice
     ? (devices.find((d) => d.id === initialDeviceId) ?? null)
     : null;
+  const manualTarget = devices.find(
+    (d) => d.id === (manualDeviceId || manualMatch?.id),
+  );
+  // Nothing to write - the entered serial already matches what's on
+  // record for this device (real request 2026-08-31: don't offer a write
+  // that would just be re-recording the same value).
+  const manualNoChange =
+    !!manualTarget &&
+    !!manualTarget.serial_number &&
+    manualTarget.serial_number.toLowerCase() === manualSerial.toLowerCase();
 
   const writeManual = async () => {
     const deviceId = manualDeviceId || manualMatch?.id;
@@ -241,18 +279,215 @@ export function AddressDeviceModal({
     <div className={styles.scrim} onClick={onClose}>
       <div className={styles.panel} onClick={(e) => e.stopPropagation()}>
         <div className={styles.header}>
-          <span className={styles.title}>Address New Device</span>
+          <span className={styles.title}>
+            {lockDevice
+              ? 'Edit/Update Device Serial Number'
+              : 'Address New Device'}
+          </span>
           <button className={styles.closeBtn} onClick={onClose} title="Close">
             ✕
           </button>
         </div>
         <div className={styles.body}>
           <div className={styles.intro}>
-            Write a real KNX individual address onto a physical device, either
-            by detecting it while its programming button is held, or by
-            entering its serial number directly.
+            {lockDevice ? (
+              <>
+                Re-confirm or update the recorded serial number for this
+                device, either by pressing its programming button to detect
+                it, or by entering the serial directly.
+              </>
+            ) : (
+              <>
+                Write a real KNX individual address onto a physical device,
+                either by pressing its programming button to detect it, or by
+                entering its serial number directly.
+              </>
+            )}
           </div>
 
+          {lockDevice ? (
+            // ── Known-device layout: no tabs, no candidate picker at all -
+            // the target is already fixed (lockedTarget), so there is
+            // nothing to choose between. Real request 2026-08-31: what
+            // "press the programming button" should actually DO here is
+            // different from the general new-device flow too - the device
+            // already has its address, so a matching scan result has
+            // nothing to write, only a serial to confirm (see
+            // confirmSerial above). Only a scan result reporting a
+            // DIFFERENT address than expected still offers a real write
+            // (that physical unit isn't this project slot yet).
+            <>
+              <Btn onClick={scan} disabled={scanning}>
+                {scanning ? (
+                  <>
+                    <Spinner /> Scanning…
+                  </>
+                ) : (
+                  '⟲ Press Programming Button & Scan'
+                )}
+              </Btn>
+              {detectError && (
+                <div className={styles.errorMsg}>&#x2717; {detectError}</div>
+              )}
+              {detected && detected.length === 0 && (
+                <div className={styles.emptyState}>
+                  No devices answered. Press the physical programming button
+                  on this device, then scan again.
+                </div>
+              )}
+              {detected && detected.length > 0 && (
+                <div className={styles.detectedList}>
+                  {detected.map((d) => {
+                    const busy = detectBusy[d.serial];
+                    const result = detectResult[d.serial];
+                    const canUseProgIA = detected.length === 1;
+                    const isMatch =
+                      !!lockedTarget &&
+                      d.src === lockedTarget.individual_address;
+                    return (
+                      <div key={d.serial} className={styles.detectedRow}>
+                        <div className={styles.detectedSerial}>
+                          Serial {d.serial}
+                        </div>
+                        {isMatch ? (
+                          <>
+                            <div className={styles.matchedTag}>
+                              Already reports {lockedTarget!.individual_address}{' '}
+                              — nothing to write, just confirm the serial.
+                            </div>
+                            <Btn
+                              onClick={() => confirmSerial(d.serial)}
+                              disabled={confirmBusy}
+                            >
+                              {confirmBusy ? <Spinner /> : 'Confirm Serial'}
+                            </Btn>
+                          </>
+                        ) : (
+                          <>
+                            <div className={styles.unmatchedTag}>
+                              Reports {d.src || 'no address'}, not{' '}
+                              {lockedTarget?.individual_address} — writing
+                              will re-address this physical unit.
+                            </div>
+                            <div className={styles.row}>
+                              {canUseProgIA && (
+                                <Btn
+                                  onClick={() =>
+                                    writeDetected(
+                                      d.serial,
+                                      true,
+                                      lockedTarget ?? undefined,
+                                    )
+                                  }
+                                  disabled={busy || !lockedTarget}
+                                  title="Write via the programming-mode broadcast — real-hardware confirmed, safe here since exactly one device answered"
+                                >
+                                  {busy ? <Spinner /> : '⚡ Write Address'}
+                                </Btn>
+                              )}
+                              <Btn
+                                onClick={() =>
+                                  writeDetected(
+                                    d.serial,
+                                    false,
+                                    lockedTarget ?? undefined,
+                                  )
+                                }
+                                disabled={busy || !lockedTarget}
+                                color="var(--amber)"
+                                title="Write by targeting this exact serial number — not yet confirmed on real hardware"
+                              >
+                                {busy ? (
+                                  <Spinner />
+                                ) : (
+                                  <>
+                                    Write by Serial{' '}
+                                    <span className={styles.experimentalBadge}>
+                                      Experimental
+                                    </span>
+                                  </>
+                                )}
+                              </Btn>
+                            </div>
+                          </>
+                        )}
+                        {result && (
+                          <div
+                            className={
+                              result.ok ? styles.successMsg : styles.errorMsg
+                            }
+                          >
+                            {result.msg}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className={styles.orDivider}>OR</div>
+
+              <div className={styles.row}>
+                <div className={styles.col}>
+                  <div className={styles.fieldLabel}>SERIAL NUMBER (12 hex chars)</div>
+                  <input
+                    className={styles.textInput}
+                    value={manualSerial}
+                    onChange={(e) => setManualSerial(e.target.value.trim())}
+                    placeholder="e.g. 00fa1234abcd"
+                  />
+                </div>
+              </div>
+              {manualSerial && !manualSerialValid && (
+                <div className={styles.errorMsg}>
+                  Serial must be exactly 12 hex characters (6 bytes).
+                </div>
+              )}
+              {lockedTarget && (
+                <div className={styles.matchedTag}>
+                  Addressing: {lockedTarget.individual_address} —{' '}
+                  {lockedTarget.name}
+                </div>
+              )}
+              <Btn
+                onClick={writeManual}
+                disabled={
+                  manualBusy ||
+                  !manualSerialValid ||
+                  !(manualDeviceId || manualMatch) ||
+                  manualNoChange
+                }
+                color="var(--amber)"
+                title={
+                  manualNoChange
+                    ? 'No change — this is already the recorded serial for this device'
+                    : 'Write by targeting this exact serial number — not yet confirmed on real hardware'
+                }
+              >
+                {manualBusy ? (
+                  <Spinner />
+                ) : (
+                  <>
+                    Write Address{' '}
+                    <span className={styles.experimentalBadge}>
+                      Experimental
+                    </span>
+                  </>
+                )}
+              </Btn>
+              {manualResult && (
+                <div
+                  className={
+                    manualResult.ok ? styles.successMsg : styles.errorMsg
+                  }
+                >
+                  {manualResult.msg}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
           <div className={styles.tabRow}>
             <button
               className={`${styles.tabBtn} ${tab === 'detect' ? styles.tabBtnActive : ''}`}
@@ -268,21 +503,14 @@ export function AddressDeviceModal({
             </button>
           </div>
 
-          {/* Only meaningful for a dropdown that picks among candidates -
-              hidden on the serial tab when the target is already fully
-              known (lockDevice), since that tab shows no picker at all
-              in that case. Still shown on the detect tab, which can
-              still turn up other devices to match. */}
-          {!(lockDevice && tab === 'serial') && (
-            <label className={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={showAllDevices}
-                onChange={(e) => setShowAllDevices(e.target.checked)}
-              />
-              Show already-programmed devices too (re-addressing a factory-reset unit)
-            </label>
-          )}
+          <label className={styles.checkboxRow}>
+            <input
+              type="checkbox"
+              checked={showAllDevices}
+              onChange={(e) => setShowAllDevices(e.target.checked)}
+            />
+            Show already-programmed devices too (re-addressing a factory-reset unit)
+          </label>
 
           {tab === 'detect' ? (
             <>
@@ -300,8 +528,8 @@ export function AddressDeviceModal({
               )}
               {detected && detected.length === 0 && (
                 <div className={styles.emptyState}>
-                  No devices answered. Hold the physical programming button
-                  down on the target device, then scan again.
+                  No devices answered. Press the physical programming button
+                  on the target device, then scan again.
                 </div>
               )}
               {detected && detected.length > 0 && (
@@ -311,6 +539,18 @@ export function AddressDeviceModal({
                     const busy = detectBusy[d.serial];
                     const result = detectResult[d.serial];
                     const canUseProgIA = detected.length === 1;
+                    const selectedTarget = devices.find(
+                      (dev) => dev.id === detectSelection[d.serial],
+                    );
+                    // d.src is the device's real, currently-reported
+                    // individual address (A_IndividualAddress_Read, read
+                    // live during the scan) - nothing to write if the
+                    // selected target's own address already matches it
+                    // (real request 2026-08-31, same reasoning as the
+                    // manual tab's no-change guard below).
+                    const noChange =
+                      !!selectedTarget &&
+                      selectedTarget.individual_address === d.src;
                     return (
                       <div key={d.serial} className={styles.detectedRow}>
                         <div className={styles.detectedSerial}>
@@ -353,17 +593,29 @@ export function AddressDeviceModal({
                           {canUseProgIA && (
                             <Btn
                               onClick={() => writeDetected(d.serial, true)}
-                              disabled={busy || !detectSelection[d.serial]}
-                              title="Write via the programming-mode broadcast — real-hardware confirmed, safe here since exactly one device answered"
+                              disabled={
+                                busy || !detectSelection[d.serial] || noChange
+                              }
+                              title={
+                                noChange
+                                  ? 'No change — this device already reports this address'
+                                  : 'Write via the programming-mode broadcast — real-hardware confirmed, safe here since exactly one device answered'
+                              }
                             >
                               {busy ? <Spinner /> : '⚡ Write Address'}
                             </Btn>
                           )}
                           <Btn
                             onClick={() => writeDetected(d.serial, false)}
-                            disabled={busy || !detectSelection[d.serial]}
+                            disabled={
+                              busy || !detectSelection[d.serial] || noChange
+                            }
                             color="var(--amber)"
-                            title="Write by targeting this exact serial number — not yet confirmed on real hardware"
+                            title={
+                              noChange
+                                ? 'No change — this device already reports this address'
+                                : 'Write by targeting this exact serial number — not yet confirmed on real hardware'
+                            }
                           >
                             {busy ? (
                               <Spinner />
@@ -371,7 +623,7 @@ export function AddressDeviceModal({
                               <>
                                 Write by Serial{' '}
                                 <span className={styles.experimentalBadge}>
-                                  unconfirmed
+                                  Experimental
                                 </span>
                               </>
                             )}
@@ -452,17 +704,24 @@ export function AddressDeviceModal({
                 disabled={
                   manualBusy ||
                   !manualSerialValid ||
-                  !(manualDeviceId || manualMatch)
+                  !(manualDeviceId || manualMatch) ||
+                  manualNoChange
                 }
                 color="var(--amber)"
-                title="Write by targeting this exact serial number — not yet confirmed on real hardware"
+                title={
+                  manualNoChange
+                    ? 'No change — this is already the recorded serial for this device'
+                    : 'Write by targeting this exact serial number — not yet confirmed on real hardware'
+                }
               >
                 {manualBusy ? (
                   <Spinner />
                 ) : (
                   <>
                     Write Address{' '}
-                    <span className={styles.experimentalBadge}>unconfirmed</span>
+                    <span className={styles.experimentalBadge}>
+                      Experimental
+                    </span>
                   </>
                 )}
               </Btn>
@@ -475,6 +734,8 @@ export function AddressDeviceModal({
                   {manualResult.msg}
                 </div>
               )}
+            </>
+          )}
             </>
           )}
         </div>

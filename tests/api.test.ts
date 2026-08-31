@@ -467,13 +467,24 @@ describe('Device validation', () => {
       '00a625401d94',
       did,
     ]);
-    const { status, data } = await req(
+    // Real behavior, 2026-08-31: individual_address handling was gated to
+    // only fire when the value genuinely changes (see the test above -
+    // this is exactly what makes THAT test's clear-on-change guarantee
+    // correct: a same-address resend must not count as "a change" either).
+    // A request whose only field is an unchanged individual_address is now
+    // a genuine no-op, so it correctly falls through to the route's
+    // pre-existing "No fields to update" 400 guard instead of silently
+    // succeeding - the real thing this test guards against (a same-address
+    // resend wiping the recorded serial) is verified directly against the
+    // DB below, independent of the response status.
+    const { status } = await req(
       'PUT',
       `/projects/${pid}/devices/${did}`,
       { individual_address: before.individual_address },
     );
-    assert.equal(status, 200);
-    assert.equal(data.serial_number, '00a625401d94');
+    assert.equal(status, 400);
+    const row = db.get('SELECT serial_number FROM devices WHERE id=?', [did]);
+    assert.equal(row.serial_number, '00a625401d94');
   });
 
   it('PUT individual_address does not clobber a serial_number sent in the same request', async () => {

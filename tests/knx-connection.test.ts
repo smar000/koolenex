@@ -357,8 +357,15 @@ describe('KnxConnection.programIA', () => {
     // match; see restartDevice()'s own doc comment.
     assert.deepEqual(result, { ok: true, newAddr: '1.1.5', restarted: true });
     // PhysicalAddress_Write, then a full management session for the
-    // Restart: T_Connect, Restart (data), T_Disconnect.
-    assert.equal(conn.sent.length, 4);
+    // Restart: T_Connect, DeviceDescriptor_Read, PropertyValue_Read (P=56),
+    // PropertyValue_Read (P=11), Restart (data), T_Disconnect. The three
+    // identity reads (added 2026-08-31, mirroring a real ETS capture - see
+    // restartDevice()'s own doc comment) are best-effort here: no response
+    // is simulated for any of them, so each genuinely times out before the
+    // next is sent (this is exactly the "continues anyway" resilience path
+    // the real implementation is designed for) - still 6 real frames sent
+    // regardless of whether anything answers.
+    assert.equal(conn.sent.length, 7);
 
     // Same confirmed-correct wire format as every other network-management
     // broadcast service in this family (see checkProgrammingMode() etc.):
@@ -780,8 +787,11 @@ describe('KnxConnection.assignIndividualAddressBySerial', () => {
     // Write, then Read (both via the normal Tunneling connection, GROUP-
     // type to 0/0/0 - confirmed byte-for-byte against real ETS traffic,
     // 2026-08-30), then a full management session for the Restart:
-    // T_Connect, Restart (data), T_Disconnect.
-    assert.equal(conn.sent.length, 5);
+    // T_Connect, DeviceDescriptor_Read, PropertyValue_Read (P=56),
+    // PropertyValue_Read (P=11), Restart (data), T_Disconnect - same three
+    // best-effort identity reads as programIA()'s own test above (see its
+    // comment for why the count includes them even though nothing answers).
+    assert.equal(conn.sent.length, 8);
     // The Restart's own management session addresses the device at its
     // NEW individual address (1.1.20), not the broadcast address used for
     // the write/read-verify.

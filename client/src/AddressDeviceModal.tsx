@@ -163,20 +163,47 @@ export function AddressDeviceModal({
       await ensureBusConnected();
       setScanStatus('Press the programming button on the device now…');
       addLog(`[${new Date().toLocaleTimeString()}] Scanning for devices in programming mode…`);
-      // Same real-hardware timing finding as writeAddressDirect's scan
-      // below (2026-08-31): 3s was too short for someone to physically
-      // walk to the device and press its button. Raised to 30s (the
-      // server route's own hard cap).
-      const r = await api.busReadSerialsInProgrammingMode(30000);
-      setDetected(r.devices);
+      // Real live-test finding, 2026-08-31: "our Scan for New Device
+      // functionality does not seem to pick up our device in prog mode" -
+      // this only ever tried the serial-number scan
+      // (A_SystemNetworkParameter_Read), which gets zero replies from a
+      // non-Albrecht-Jung device (HDL) even with the button genuinely
+      // held - see writeAddressDirect()'s own dual-mechanism fix, same
+      // day, for the full real-hardware finding. Applying the same fix
+      // here: run both broadcasts concurrently in short (3s) rounds,
+      // exiting as soon as either reports at least one device, for up to
+      // 30s total. A device found ONLY via the legacy address broadcast
+      // has no real serial - `serial: ''` marks that case; every
+      // dictionary below is keyed by `src` (the address, always real and
+      // unique) rather than `serial` (which can't be, when empty) - see
+      // the render blocks' own comments.
+      const roundMs = 3000;
+      const deadline = Date.now() + 30000;
+      const bySrc = new Map<string, string>(); // src -> serial ('' if unknown)
+      while (bySrc.size === 0 && Date.now() < deadline) {
+        const thisRound = Math.min(roundMs, Math.max(deadline - Date.now(), 100));
+        const [serialScan, addrCheck] = await Promise.all([
+          api.busReadSerialsInProgrammingMode(thisRound),
+          api.busCheckProgrammingMode(thisRound),
+        ]);
+        for (const d of serialScan.devices) bySrc.set(d.src, d.serial);
+        if (addrCheck.address && !bySrc.has(addrCheck.address)) {
+          bySrc.set(addrCheck.address, '');
+        }
+      }
+      const devicesFound = [...bySrc.entries()].map(([src, serial]) => ({
+        serial,
+        src,
+      }));
+      setDetected(devicesFound);
       const sel: Record<string, number | ''> = {};
-      for (const d of r.devices) {
-        const m = matchBySerial(d.serial);
-        sel[d.serial] = m ? m.id : (initialDeviceId ?? '');
+      for (const d of devicesFound) {
+        const m = d.serial ? matchBySerial(d.serial) : null;
+        sel[d.src] = m ? m.id : (initialDeviceId ?? '');
       }
       setDetectSelection(sel);
       addLog(
-        `[${new Date().toLocaleTimeString()}] Scan complete — ${r.devices.length} device(s) found in programming mode`,
+        `[${new Date().toLocaleTimeString()}] Scan complete — ${devicesFound.length} device(s) found in programming mode`,
       );
     } catch (e: any) {
       setDetectError(e.message);
@@ -185,28 +212,34 @@ export function AddressDeviceModal({
     setScanning(false);
   };
 
+  // Keyed by `src` (the device's address, always real and unique), not
+  // `serial` (which is '' for a device found only via the legacy address
+  // broadcast - see scan()'s own comment) - `serial` is still the value
+  // actually used for the write/persist below, just no longer the key.
   const writeDetected = async (
+    src: string,
     serial: string,
     viaProgIA: boolean,
     explicitTarget?: Device,
   ) => {
     const target =
-      explicitTarget ?? devices.find((d) => d.id === detectSelection[serial]);
+      explicitTarget ?? devices.find((d) => d.id === detectSelection[src]);
     if (!target) return;
-    setDetectBusy((b) => ({ ...b, [serial]: true }));
+    setDetectBusy((b) => ({ ...b, [src]: true }));
     setDetectResult((r) => {
       const next = { ...r };
-      delete next[serial];
+      delete next[src];
       return next;
     });
     addLog(
-      `[${new Date().toLocaleTimeString()}] Addressing ${serial} → ${target.individual_address} (${target.name})`,
+      `[${new Date().toLocaleTimeString()}] Addressing ${serial || src} → ${target.individual_address} (${target.name})`,
     );
     try {
       await ensureBusConnected();
       if (viaProgIA) {
         await api.busProgramIA(target.individual_address);
       } else {
+        if (!serial) throw new Error('No serial number available to write by');
         const r = await api.busAssignAddressBySerial(
           serial,
           target.individual_address,
@@ -219,21 +252,24 @@ export function AddressDeviceModal({
           );
         }
       }
-      await updateDevice(target.id, { serial_number: serial });
+      // Only a real serial is worth persisting - an empty one (legacy
+      // address-broadcast detection) would just overwrite whatever the
+      // project already had on record with nothing.
+      if (serial) await updateDevice(target.id, { serial_number: serial });
       setDetectResult((r) => ({
         ...r,
-        [serial]: { ok: true, msg: `✓ Addressed as ${target.individual_address}` },
+        [src]: { ok: true, msg: `✓ Addressed as ${target.individual_address}` },
       }));
       addLog(
-        `[${new Date().toLocaleTimeString()}] Addressed ${serial} → ${target.individual_address}`,
+        `[${new Date().toLocaleTimeString()}] Addressed ${serial || src} → ${target.individual_address}`,
       );
     } catch (e: any) {
-      setDetectResult((r) => ({ ...r, [serial]: { ok: false, msg: e.message } }));
+      setDetectResult((r) => ({ ...r, [src]: { ok: false, msg: e.message } }));
       addLog(
-        `[${new Date().toLocaleTimeString()}] Addressing failed → ${serial} — ${e.message}`,
+        `[${new Date().toLocaleTimeString()}] Addressing failed → ${serial || src} — ${e.message}`,
       );
     }
-    setDetectBusy((b) => ({ ...b, [serial]: false }));
+    setDetectBusy((b) => ({ ...b, [src]: false }));
   };
 
   // ── lockDevice-only: confirm a detected serial with no bus write ────────
@@ -1112,9 +1148,11 @@ export function AddressDeviceModal({
                           (!!lockedTarget &&
                             d.src === lockedTarget.individual_address);
                         return (
-                          <div key={d.serial} className={styles.detectedRow}>
+                          <div key={d.src} className={styles.detectedRow}>
                             <div className={styles.detectedSerial}>
-                              Serial {d.serial}
+                              {d.serial
+                                ? `Serial ${d.serial}`
+                                : `${d.src} (no serial — detected via legacy address broadcast)`}
                             </div>
                             <div className={isMatch ? styles.matchedTag : styles.unmatchedTag}>
                               {lockedNoAddress
@@ -1125,7 +1163,12 @@ export function AddressDeviceModal({
                             </div>
                             <Btn
                               onClick={() => confirmSerial(d.serial)}
-                              disabled={confirmBusy}
+                              disabled={confirmBusy || !d.serial}
+                              title={
+                                !d.serial
+                                  ? 'No real serial number to confirm - this device was only found via the legacy address broadcast'
+                                  : undefined
+                              }
                             >
                               {confirmBusy ? (
                                 <Spinner />
@@ -1192,12 +1235,19 @@ export function AddressDeviceModal({
               {detected && detected.length > 0 && (
                 <div className={styles.detectedList}>
                   {detected.map((d) => {
-                    const matched = matchBySerial(d.serial);
-                    const busy = detectBusy[d.serial];
-                    const result = detectResult[d.serial];
+                    // Keyed by d.src throughout (see scan()'s own comment) -
+                    // d.serial can be '' for a device found only via the
+                    // legacy address broadcast (real live-test finding,
+                    // 2026-08-31: "Scan for New Device... does not seem to
+                    // pick up our device in prog mode" - a non-Albrecht-
+                    // Jung device that doesn't answer the serial-number
+                    // scan at all).
+                    const matched = d.serial ? matchBySerial(d.serial) : null;
+                    const busy = detectBusy[d.src];
+                    const result = detectResult[d.src];
                     const canUseProgIA = detected.length === 1;
                     const selectedTarget = devices.find(
-                      (dev) => dev.id === detectSelection[d.serial],
+                      (dev) => dev.id === detectSelection[d.src],
                     );
                     // d.src is the device's real, currently-reported
                     // individual address (A_IndividualAddress_Read, read
@@ -1209,9 +1259,11 @@ export function AddressDeviceModal({
                       !!selectedTarget &&
                       selectedTarget.individual_address === d.src;
                     return (
-                      <div key={d.serial} className={styles.detectedRow}>
+                      <div key={d.src} className={styles.detectedRow}>
                         <div className={styles.detectedSerial}>
-                          Serial {d.serial}
+                          {d.serial
+                            ? `Serial ${d.serial}`
+                            : `${d.src} (no serial — detected via legacy address broadcast)`}
                         </div>
                         {matched ? (
                           <div className={styles.matchedTag}>
@@ -1219,7 +1271,9 @@ export function AddressDeviceModal({
                           </div>
                         ) : (
                           <div className={styles.unmatchedTag}>
-                            No matching serial in the project — pick manually
+                            {d.serial
+                              ? 'No matching serial in the project — pick manually'
+                              : 'No serial to match — pick the target device manually'}
                           </div>
                         )}
                         <div className={styles.row}>
@@ -1227,11 +1281,11 @@ export function AddressDeviceModal({
                             <div className={styles.fieldLabel}>ASSIGN TO</div>
                             <select
                               className={styles.select}
-                              value={detectSelection[d.serial] ?? ''}
+                              value={detectSelection[d.src] ?? ''}
                               onChange={(e) =>
                                 setDetectSelection((s) => ({
                                   ...s,
-                                  [d.serial]: e.target.value
+                                  [d.src]: e.target.value
                                     ? Number(e.target.value)
                                     : '',
                                 }))
@@ -1249,9 +1303,9 @@ export function AddressDeviceModal({
                         <div className={styles.row}>
                           {canUseProgIA && (
                             <Btn
-                              onClick={() => writeDetected(d.serial, true)}
+                              onClick={() => writeDetected(d.src, d.serial, true)}
                               disabled={
-                                busy || !detectSelection[d.serial] || noChange
+                                busy || !detectSelection[d.src] || noChange
                               }
                               title={
                                 noChange
@@ -1263,15 +1317,20 @@ export function AddressDeviceModal({
                             </Btn>
                           )}
                           <Btn
-                            onClick={() => writeDetected(d.serial, false)}
+                            onClick={() => writeDetected(d.src, d.serial, false)}
                             disabled={
-                              busy || !detectSelection[d.serial] || noChange
+                              busy ||
+                              !detectSelection[d.src] ||
+                              noChange ||
+                              !d.serial
                             }
                             color="var(--amber)"
                             title={
-                              noChange
-                                ? 'No change — this device already reports this address'
-                                : 'Write by targeting this exact serial number — not yet confirmed on real hardware'
+                              !d.serial
+                                ? 'No real serial number available — this device was only found via the legacy address broadcast'
+                                : noChange
+                                  ? 'No change — this device already reports this address'
+                                  : 'Write by targeting this exact serial number — not yet confirmed on real hardware'
                             }
                           >
                             {busy ? (

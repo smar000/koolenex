@@ -21,7 +21,6 @@ import {
 } from '../contexts.ts';
 import { DeviceCompareResults, displaySectionName } from './DeviceCompareResults.tsx';
 import { AddressDeviceModal } from '../AddressDeviceModal.tsx';
-import { AssignProjectAddressModal } from '../AssignProjectAddressModal.tsx';
 import styles from './ProgrammingView.module.css';
 
 export function ProgrammingView() {
@@ -490,13 +489,13 @@ export function ProgrammingView() {
   // general discovery/bulk-match workflow); a number = opened from a
   // specific row's serial icon, pre-selecting that device but still
   // allowing a different match if the scan turns up something else.
+  // Also opened by clicking the "-.-.-" placeholder badge itself (see
+  // DeviceAddr's onAssignClick below) - AddressDeviceModal's lockedNoAddress
+  // case handles a device with has_address=0 directly; the separate
+  // AssignProjectAddressModal this used to open is gone (merged in, 2026-
+  // 08-31 - real user feedback: "let's combine address edit and serial
+  // edit into the one popup").
   const [addressModalFor, setAddressModalFor] = useState<number | 'scan' | null>(
-    null,
-  );
-  // A device with has_address=0 needs a real project address assigned
-  // before it's eligible for AddressDeviceModal at all - see the guard in
-  // that component. Opened by clicking the "-.-.-" placeholder itself.
-  const [assignAddressFor, setAssignAddressFor] = useState<number | null>(
     null,
   );
 
@@ -618,7 +617,13 @@ export function ProgrammingView() {
                           device={d}
                           wtype="device"
                           className={styles.addrBadge}
-                          onAssignClick={() => setAssignAddressFor(d.id)}
+                          // Opens the same combined AddressDeviceModal the
+                          // serial icon does (not the old, separate
+                          // AssignProjectAddressModal - merged in 2026-08-
+                          // 31, see that component's own doc comment) -
+                          // it already supports a locked target with no
+                          // project address yet (lockedNoAddress).
+                          onAssignClick={() => setAddressModalFor(d.id)}
                         />
                         {/* Serial-status indicator, added 2026-08-30: a
                             device can have a real project address and still
@@ -668,14 +673,24 @@ export function ProgrammingView() {
                       </span>
                     </TD>
                     <TD>
-                      {prog?.state === 'done' ? (
-                        <Badge label="PROGRAMMED" color="var(--green)" />
-                      ) : (
-                        <Badge
-                          label={d.status.toUpperCase()}
-                          color={STATUS_COLOR[d.status] || 'var(--dim)'}
-                        />
-                      )}
+                      <div className={styles.statusCol}>
+                        {prog?.state === 'done' ? (
+                          <Badge label="PROGRAMMED" color="var(--green)" />
+                        ) : (
+                          <Badge
+                            label={d.status.toUpperCase()}
+                            color={STATUS_COLOR[d.status] || 'var(--dim)'}
+                          />
+                        )}
+                        {d.last_download && (
+                          <span
+                            className={styles.lastDownloadLabel}
+                            title={`Last download to device: ${new Date(d.last_download).toLocaleString()}`}
+                          >
+                            D/L: {new Date(d.last_download).toLocaleDateString()}
+                          </span>
+                        )}
+                      </div>
                     </TD>
                     <TD>
                       <div className={styles.rowActions}>
@@ -1135,22 +1150,6 @@ export function ProgrammingView() {
               initialSerial={known ? rowDevice!.serial_number : undefined}
               lockDevice={typeof addressModalFor === 'number'}
               onClose={() => setAddressModalFor(null)}
-              addLog={(line) => {
-                setLogOpen(true);
-                addLog(line);
-              }}
-            />
-          );
-        })()}
-      {assignAddressFor !== null &&
-        (() => {
-          const target = devices.find((d: any) => d.id === assignAddressFor);
-          if (!target) return null;
-          return (
-            <AssignProjectAddressModal
-              device={target}
-              devices={devices}
-              onClose={() => setAssignAddressFor(null)}
               addLog={(line) => {
                 setLogOpen(true);
                 addLog(line);

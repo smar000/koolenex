@@ -849,6 +849,33 @@ router.post('/bus/program-ia', async (req: Request, res: Response) => {
   }
 });
 
+// Direct A_Restart trigger against an already-addressed device - no
+// address write involved. Added 2026-08-31 as a real diagnostic tool
+// (docs/knx-device-write-protocol.md §9.5): lets Restart be tested in
+// isolation from the write path, to check whether a given device visibly
+// reboots on A_Restart at all, independent of anything else in flight.
+router.post('/bus/restart-device', async (req: Request, res: Response) => {
+  const b = requireBus(res);
+  if (!b) return;
+  const body = validateBody(
+    req,
+    z.object({
+      deviceAddress: z.string().min(1),
+      settleMs: z.number().int().min(0).max(10000).optional(),
+      postRestartDelayMs: z.number().int().min(0).max(10000).optional(),
+    }),
+  );
+  try {
+    await b.restartDevice(body.deviceAddress, body.settleMs, body.postRestartDelayMs);
+    res.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    res
+      .status(msg.includes('Not connected') ? 409 : 502)
+      .json({ error: safeError('bus', 'Restart device failed', e) });
+  }
+});
+
 // Detect a device currently in physical programming mode (button held
 // down) - broadcasts A_IndividualAddress_Read and reports whether/what
 // answered. Read-side counterpart to /bus/program-ia above; independent of
@@ -1264,7 +1291,17 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
         groupObjectTable,
       },
     );
-    db.run('UPDATE devices SET status=? WHERE id=?', ['programmed', dev.id]);
+    // Real bug, found live 2026-08-31: this only ever updated `status` -
+    // `last_download` was never touched by a live koolenex download at
+    // all, so it silently kept whatever value the device last had from
+    // its original .knxproj import (a real ETS-reported download
+    // timestamp), even after a genuine, confirmed-on-hardware koolenex
+    // write. Set it here too, to the moment this write actually completed.
+    db.run('UPDATE devices SET status=?, last_download=? WHERE id=?', [
+      'programmed',
+      new Date().toISOString(),
+      dev.id,
+    ]);
     db.scheduleSave();
     res.json({ ok: true, deviceAddress, mode });
   } catch (e) {

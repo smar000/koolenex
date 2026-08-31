@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Btn, Spinner } from './primitives.tsx';
 import { api } from './api.ts';
-import { useProjectActions } from './contexts.ts';
+import { useProjectActions, useBusActions, useLiveData } from './contexts.ts';
 import type { Device } from '../../shared/types.ts';
 import styles from './AddressDeviceModal.module.css';
 
@@ -71,7 +71,9 @@ export function AddressDeviceModal({
   onClose: () => void;
   addLog: (line: string) => void;
 }) {
-  const { updateDevice } = useProjectActions();
+  const { updateDevice, unassignDevice } = useProjectActions();
+  const { connect } = useBusActions();
+  const { busStatus } = useLiveData();
   const [tab, setTab] = useState<'detect' | 'serial'>(initialTab ?? 'detect');
   const [showAllDevices, setShowAllDevices] = useState(false);
 
@@ -117,13 +119,55 @@ export function AddressDeviceModal({
     Record<string, { ok: boolean; msg: string }>
   >({});
 
+  // Real user request, 2026-08-31: "Detect should also auto-initiate a
+  // connection if possible" - then, once a device write also came up
+  // (about to fail outright with no connection at all): "please wire up
+  // autoconnect to the write button (and in fact to all write buttons)."
+  // Shared by every bus-write action below (scan/writeAddressDirect/
+  // writeBySerial/writeDetected/writeManual). `busStatus` still carries
+  // the last known host/port/type even while disconnected (see AppShell's
+  // own connection badge) - reused here as "if possible": nothing to
+  // auto-connect to if the bus has never been told a host at all (the
+  // badge itself, or the standalone Bus Connection panel, is where that
+  // first happens - this can't invent a host it was never given).
+  const ensureBusConnected = async (): Promise<void> => {
+    if (busStatus.connected) return;
+    if (!busStatus.host) {
+      throw new Error(
+        'Not connected to the bus, and no previous connection to reuse - connect from the status badge first.',
+      );
+    }
+    addLog(
+      `[${new Date().toLocaleTimeString()}] Connecting to ${busStatus.host}…`,
+    );
+    await connect(
+      busStatus.host,
+      busStatus.port ?? 3671,
+      (busStatus.type as 'udp' | 'tcp' | 'auto' | undefined) ?? 'auto',
+    );
+    addLog(`[${new Date().toLocaleTimeString()}] Connected`);
+  };
+
+  // Status indicator specifically for the scan's own "press the button
+  // now" reminder - real user request, 2026-08-31: "when it is clicked,
+  // and connection made, it should show a status indicator reminding the
+  // user to press prog on their device."
+  const [scanStatus, setScanStatus] = useState<string | null>(null);
+
   const scan = async () => {
     setScanning(true);
     setDetectError(null);
     setDetected(null);
-    addLog(`[${new Date().toLocaleTimeString()}] Scanning for devices in programming mode…`);
+    setScanStatus(null);
     try {
-      const r = await api.busReadSerialsInProgrammingMode(3000);
+      await ensureBusConnected();
+      setScanStatus('Press the programming button on the device now…');
+      addLog(`[${new Date().toLocaleTimeString()}] Scanning for devices in programming mode…`);
+      // Same real-hardware timing finding as writeAddressDirect's scan
+      // below (2026-08-31): 3s was too short for someone to physically
+      // walk to the device and press its button. Raised to 30s (the
+      // server route's own hard cap).
+      const r = await api.busReadSerialsInProgrammingMode(30000);
       setDetected(r.devices);
       const sel: Record<string, number | ''> = {};
       for (const d of r.devices) {
@@ -137,6 +181,7 @@ export function AddressDeviceModal({
     } catch (e: any) {
       setDetectError(e.message);
     }
+    setScanStatus(null);
     setScanning(false);
   };
 
@@ -158,6 +203,7 @@ export function AddressDeviceModal({
       `[${new Date().toLocaleTimeString()}] Addressing ${serial} → ${target.individual_address} (${target.name})`,
     );
     try {
+      await ensureBusConnected();
       if (viaProgIA) {
         await api.busProgramIA(target.individual_address);
       } else {
@@ -236,12 +282,473 @@ export function AddressDeviceModal({
   const lockedTarget = lockDevice
     ? (allDevices.find((d) => d.id === initialDeviceId) ?? null)
     : null;
+
+  // Real bug, live-tested 2026-08-31: manualSerial only ever seeded once
+  // from initialSerial at mount (a snapshot of lockedTarget.serial_number
+  // taken when the modal opened) - a real address+serial write completing
+  // WHILE the modal stayed open (e.g. via Write Address on the other tab)
+  // never touched this box again, so it kept showing whatever it had at
+  // mount (often blank) even after the project record itself was updated.
+  // That produced a spurious "Serial must be exactly 12 hex characters"
+  // warning on a perfectly valid just-recorded serial - the box was stale,
+  // not the data. Resync whenever the locked device's own recorded serial
+  // changes. Scoped to the lockDevice case only - in the general
+  // (non-locked) flow below, this same input is a genuine blank-slate
+  // manual entry field (optionally pre-filled once via initialSerial),
+  // with no single "locked" device whose own recorded serial it should
+  // ever be forced to track.
+  useEffect(() => {
+    if (!lockDevice) return;
+    setManualSerial(lockedTarget?.serial_number ?? '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lockDevice, lockedTarget?.serial_number]);
+
   // No real address to write to at all - only serial CAPTURE is safe here
   // (updateDevice, no bus write), same reasoning as the has_address guard
   // on `devices` above: writing to a synthetic placeholder address would
   // be hazardous, so no write path is offered for this case at all, not
   // even the normally-safe programIA/assignAddressBySerial ones.
   const lockedNoAddress = !!lockedTarget && !lockedTarget.has_address;
+
+  // ── Project address editing, folded into this modal 2026-08-31 ──────────
+  // Previously a separate popup (AssignProjectAddressModal), opened only
+  // from the "-.-.-" placeholder badge for a not-yet-addressed device -
+  // real user feedback: "clicking the address takes me to the device info
+  // page, nowhere to edit/change the address again" (once has_address was
+  // true, there was no way back into that modal at all) and "address write
+  // in serial box doesn't make sense, unless we have address edit there
+  // too... let's combine address edit and serial edit into the one
+  // popup." Folded in here instead of kept separate - this section covers
+  // both the original "assign for the first time" case and a genuinely
+  // new "edit/reassign later" capability.
+  const REAL_MAX = 15;
+  const [addrEditing, setAddrEditing] = useState(lockedNoAddress);
+  const suggestAddr = (): { a: number; l: number; n: number } => {
+    const a =
+      lockedTarget && lockedTarget.area <= REAL_MAX ? lockedTarget.area : 1;
+    const l =
+      lockedTarget && lockedTarget.line <= REAL_MAX ? lockedTarget.line : 1;
+    const used = new Set(
+      allDevices
+        .filter(
+          (d) =>
+            d.id !== lockedTarget?.id &&
+            d.has_address &&
+            d.area === a &&
+            d.line === l,
+        )
+        .map((d) => Number(d.individual_address.split('.')[2]))
+        .filter((n) => Number.isFinite(n)),
+    );
+    let n = 1;
+    while (used.has(n) && n <= 255) n++;
+    return { a, l, n };
+  };
+  // Two tabs for the lockDevice layout - real user feedback, 2026-08-31,
+  // on the first single-scroll merged version: "our popup for address/
+  // serial change is looking a bit convoluted. Please make two tabs - one
+  // for device address and one for serial number." Defaults to the
+  // 'serial' tab when opened via the serial icon on a device with an
+  // already-known serial (matches the old initialTab behavior - jumping
+  // straight to the thing you're most likely here to re-confirm), 'address'
+  // otherwise (including lockedNoAddress, where the address form itself
+  // still needs to be filled in first).
+  const [deviceTab, setDeviceTab] = useState<'address' | 'serial'>(
+    initialTab === 'serial' ? 'serial' : 'address',
+  );
+  const initialAddr = lockedTarget?.has_address
+    ? {
+        a: Number(lockedTarget.individual_address.split('.')[0]),
+        l: Number(lockedTarget.individual_address.split('.')[1]),
+        n: Number(lockedTarget.individual_address.split('.')[2]),
+      }
+    : suggestAddr();
+  const [addrArea, setAddrArea] = useState(initialAddr.a);
+  const [addrLine, setAddrLine] = useState(initialAddr.l);
+  const [addrDevNum, setAddrDevNum] = useState(initialAddr.n);
+  const [addrBusy, setAddrBusy] = useState(false);
+  const [addrError, setAddrError] = useState<string | null>(null);
+  const newAddr = `${addrArea}.${addrLine}.${addrDevNum}`;
+  const addrConflict = allDevices.find(
+    (d) => d.id !== lockedTarget?.id && d.has_address && d.individual_address === newAddr,
+  );
+  const addrUnchanged =
+    !!lockedTarget?.has_address && lockedTarget.individual_address === newAddr;
+
+  const saveAddr = async () => {
+    if (!lockedTarget || addrConflict || addrUnchanged) return;
+    setAddrBusy(true);
+    setAddrError(null);
+    try {
+      await updateDevice(lockedTarget.id, { individual_address: newAddr });
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Assigned project address ${newAddr} to ${lockedTarget.name}`,
+      );
+      setAddrEditing(false);
+    } catch (e: any) {
+      setAddrError(e.message || 'Failed to assign address');
+    }
+    setAddrBusy(false);
+  };
+
+  // Refuses on a device with a physically-confirmed serial - matches the
+  // server's own guard (server/routes/devices.ts) - surfaced here as a
+  // disabled button with an explanatory title rather than letting the
+  // request round-trip just to fail.
+  const [unassignBusy, setUnassignBusy] = useState(false);
+  const doUnassign = async () => {
+    if (!lockedTarget) return;
+    setUnassignBusy(true);
+    try {
+      await unassignDevice(lockedTarget.id);
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Unassigned project address for ${lockedTarget.name}`,
+      );
+    } catch (e: any) {
+      setAddrError(e.message || 'Failed to unassign');
+    }
+    setUnassignBusy(false);
+  };
+
+  // Direct broadcast write of the CURRENT project address, no serial
+  // needed - moved onto the Device Address tab itself, 2026-08-31: "Put
+  // the Write Address button below this [the address display/edit]." The
+  // serial-based write (busAssignAddressBySerial) stays on the Serial tab
+  // below, since it inherently needs a serial to target by.
+  const [writeAddrBusy, setWriteAddrBusy] = useState(false);
+  const [writeAddrResult, setWriteAddrResult] = useState<
+    { ok: boolean; msg: string } | null
+  >(null);
+  // Status line for the detect-first flow below - mirrors scanStatus's
+  // "press the button now" pattern, but scoped to this button since scan()
+  // and writeAddressDirect() are independent flows that can each be
+  // mid-run at the same time (different tabs).
+  const [writeAddrStatus, setWriteAddrStatus] = useState<string | null>(null);
+  // True only while actively waiting on the programming-mode scan (i.e. a
+  // real cancel window) - false once the scan has resolved and the actual
+  // address write is in flight, where cancelling would no longer mean
+  // anything. Drives the Write Address button's real user request,
+  // 2026-08-31: "The cancel can be the write button itself."
+  const [writeAddrWaiting, setWriteAddrWaiting] = useState(false);
+  const writeAddrAbortRef = useRef<AbortController | null>(null);
+  // Real user finding, 2026-08-31: "It is showing a tick but I did not
+  // press the prog button" + "how is it writing to the device if I
+  // haven't pressed the prog button? i.e. how does it know which device?"
+  // - programIA()/A_IndividualAddress_Write is a fire-and-forget broadcast
+  // to 0/0/0 with no device identifier in the frame at all - it's accepted
+  // by whichever single device physically has its button held, and there
+  // was previously NOTHING in this flow that told the operator to press it
+  // before firing the write, or that confirmed a device was actually
+  // listening first. Real follow-up: "FYI, there was no notification that
+  // prog button press is required." Fixed by reusing the same
+  // busReadSerialsInProgrammingMode() scan the Serial tab's Detect button
+  // already uses (real-hardware confirmed there) as a mandatory
+  // detect-before-write gate: (a) tell the operator to press the button,
+  // (b) wait for the scan and see who answers, (c) refuse to proceed
+  // unless EXACTLY one device answers (zero = nothing pressed / didn't
+  // register; more than one = genuinely ambiguous, the broadcast has no
+  // way to pick between them), (d) only then send the write. Every step
+  // logged, per explicit request ("each step should go into log").
+  //
+  // Real live-test finding, same day: the original 3s window was much too
+  // short - "this needs to be at least 30 seconds or more as it will take
+  // time for people to go to the device to set prog mode" - raised to
+  // 30000ms (the server route's own hard cap, server/routes/bus.ts). A
+  // long wait needs a real way out, so it's paired with an AbortController
+  // wired to the button itself (see writeAddrWaiting/cancelWriteAddress).
+  const writeAddressDirect = async () => {
+    if (!lockedTarget?.has_address) return;
+    // Real bug, live-tested 2026-08-31: "I change the address to 1.1.21 in
+    // the UI selectors, but did NOT click Save to the project, and instead
+    // directly clicked Write. This then wrote the old address, 1.1.20." -
+    // this write path used lockedTarget.individual_address (the last SAVED
+    // project value) throughout, ignoring newAddr (the live selector
+    // value) entirely unless Save had already been clicked first. Fixed:
+    // write whatever the selectors currently show, and persist that same
+    // value to the project automatically on a confirmed write (see the
+    // updateDevice call below) - the operator's real request, not just a
+    // bug fix: "We need to write whatever is in the selectors AND
+    // automatically update the project DB with this value as soon as we
+    // write."
+    if (addrConflict) {
+      setWriteAddrResult({
+        ok: false,
+        msg: `⚠ ${newAddr} is already assigned to ${addrConflict.name} in this project — resolve the conflict before writing.`,
+      });
+      return;
+    }
+    setWriteAddrBusy(true);
+    setWriteAddrResult(null);
+    setWriteAddrStatus(null);
+    const controller = new AbortController();
+    writeAddrAbortRef.current = controller;
+    try {
+      await ensureBusConnected();
+      setWriteAddrStatus('Press the programming button on the device now…');
+      setWriteAddrWaiting(true);
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Waiting for a device in programming mode before writing ${newAddr}…`,
+      );
+      // Real live-test finding, 2026-08-31: on a non-Albrecht-Jung device
+      // (HDL M/AG40B.1), the serial-number scan alone (A_SystemNetworkParameter_
+      // Read, PID_SERIAL_NUMBER) got zero responses even with the physical
+      // button genuinely held/pressed - cross-checked against a real ETS
+      // capture taken against this exact device the same day, which shows
+      // ETS itself using the older, more universally-supported
+      // A_IndividualAddress_Read broadcast instead (checkProgrammingMode()
+      // below) for this manufacturer. Running both concurrently and
+      // merging by responding address covers both cases without slowing
+      // down the devices that do answer the serial scan (Albrecht Jung,
+      // real-hardware confirmed there).
+      //
+      // Real live-test finding, same day, after the above: a single
+      // Promise.all([...30000ms calls]) took the FULL 30s to resolve even
+      // when the device answered within a few seconds - readSerialsInProgrammingMode
+      // deliberately never resolves early (it collects for its whole
+      // window, by design, to catch multiple simultaneous devices), so
+      // Promise.all was always blocked on whichever of the two calls
+      // didn't get a match, however fast the other one was. Real ETS
+      // itself (per capture) reacts within a few seconds of a real press.
+      // Fixed by polling in short (3s) rounds instead of one long call,
+      // exiting the loop the instant either mechanism reports a device,
+      // while still allowing up to 30s total for someone to physically
+      // reach the device and press its button.
+      const roundMs = 3000;
+      const deadline = Date.now() + 30000;
+      const byAddress = new Map<string, string | null>(); // address -> serial (null if unknown)
+      let sawAnySerialReply = false;
+      while (byAddress.size === 0 && Date.now() < deadline) {
+        const thisRound = Math.min(roundMs, Math.max(deadline - Date.now(), 100));
+        const [serialScan, addrCheck] = await Promise.all([
+          api.busReadSerialsInProgrammingMode(thisRound, controller.signal),
+          api.busCheckProgrammingMode(thisRound, controller.signal),
+        ]);
+        if (serialScan.devices.length > 0) sawAnySerialReply = true;
+        for (const d of serialScan.devices) byAddress.set(d.src, d.serial);
+        if (addrCheck.address && !byAddress.has(addrCheck.address)) {
+          byAddress.set(addrCheck.address, null);
+        }
+      }
+      setWriteAddrWaiting(false);
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Scan complete — ${byAddress.size} device(s) found in programming mode` +
+          (byAddress.size > 0 && !sawAnySerialReply
+            ? ' (via legacy address broadcast — no serial available)'
+            : ''),
+      );
+      if (byAddress.size === 0) {
+        setWriteAddrStatus(null);
+        setWriteAddrResult({
+          ok: false,
+          msg: '⚠ No device detected in programming mode — press and release the programming button on the target device, then try again.',
+        });
+        addLog(
+          `[${new Date().toLocaleTimeString()}] Write aborted — no device answered either programming-mode scan`,
+        );
+        setWriteAddrBusy(false);
+        return;
+      }
+      if (byAddress.size > 1) {
+        const ids = [...byAddress.entries()]
+          .map(([addr, serial]) => (serial ? `${serial} @ ${addr}` : addr))
+          .join(', ');
+        setWriteAddrStatus(null);
+        setWriteAddrResult({
+          ok: false,
+          msg: `⚠ ${byAddress.size} devices are in programming mode at once (${ids}) — this write is ambiguous. Press the button on only the one device you mean to address, then try again.`,
+        });
+        addLog(
+          `[${new Date().toLocaleTimeString()}] Write aborted — ${byAddress.size} devices answered at once (${ids}), refusing to guess`,
+        );
+        setWriteAddrBusy(false);
+        return;
+      }
+      const [detectedAddr, detectedSerial] = [...byAddress.entries()][0]!;
+      setWriteAddrStatus(null);
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Identified device ${detectedSerial ?? detectedAddr} in programming mode — writing address ${newAddr}…`,
+      );
+      const r = await api.busProgramIA(newAddr);
+      // Real user finding, 2026-08-31: a green checkmark showed up even
+      // though the programming button was never pressed. Root cause:
+      // A_IndividualAddress_Write is a fire-and-forget broadcast with NO
+      // application-layer response at all (matches real ETS's own blind
+      // spot for this exact service) - busProgramIA() resolving without
+      // throwing only means the frame was sent, never that any device
+      // received or acted on it. Treating "no exception" as "success" was
+      // simply wrong for a service that structurally cannot confirm
+      // itself. The read-back below (originally added just to grab the
+      // serial - "Did it also grab the serial at the same time? If not it
+      // should do") is now the ONLY thing this result is allowed to call
+      // success: a real point-to-point read of the target address,
+      // succeeding only if a real device is actually there to answer.
+      let serialMsg = '';
+      let confirmed = false;
+      try {
+        const info = await api.busDeviceInfo(newAddr);
+        confirmed = true;
+        const serial = (info as { serialNumber?: string }).serialNumber;
+        // Persist the address that was actually written - not just the
+        // serial - the moment it's confirmed, per the real request above.
+        // serial_number is included in the SAME call deliberately: the
+        // server clears serial_number whenever individual_address changes
+        // unless the caller also supplies a new one in that request
+        // (server/routes/devices.ts) - carrying forward the freshly-read
+        // (or, failing that, previously-known) serial here avoids that
+        // guard wiping out exactly the value this write just confirmed.
+        await updateDevice(lockedTarget.id, {
+          individual_address: newAddr,
+          serial_number: serial ?? lockedTarget.serial_number ?? '',
+        });
+        addLog(
+          `[${new Date().toLocaleTimeString()}] Project address updated to ${newAddr}`,
+        );
+        if (serial) {
+          serialMsg = `, serial ${serial} recorded`;
+          addLog(
+            `[${new Date().toLocaleTimeString()}] Read back serial ${serial} from ${newAddr}`,
+          );
+        }
+      } catch (e: any) {
+        addLog(
+          `[${new Date().toLocaleTimeString()}] No device answered at ${newAddr} after the write → ${e.message}`,
+        );
+      }
+      if (confirmed) {
+        setWriteAddrResult({
+          ok: true,
+          msg: r.restarted
+            ? `✓ Confirmed — device now responds at ${newAddr}${serialMsg}`
+            : `✓ Confirmed — device now responds at ${newAddr}${serialMsg} (restart itself may not have completed)`,
+        });
+        addLog(
+          `[${new Date().toLocaleTimeString()}] Confirmed device at ${newAddr}`,
+        );
+      } else {
+        setWriteAddrResult({
+          ok: false,
+          msg: `⚠ Write sent, but no device answered at ${newAddr} afterward — was the programming button actually pressed? This broadcast write has no confirmation of its own.`,
+        });
+        addLog(
+          `[${new Date().toLocaleTimeString()}] Could not confirm any device at ${newAddr} after the write`,
+        );
+      }
+    } catch (e: any) {
+      setWriteAddrStatus(null);
+      setWriteAddrWaiting(false);
+      if (e.code === 'aborted') {
+        setWriteAddrResult({
+          ok: false,
+          msg: 'Cancelled — no address was written.',
+        });
+        addLog(
+          `[${new Date().toLocaleTimeString()}] Cancelled — no address was written`,
+        );
+      } else {
+        setWriteAddrResult({ ok: false, msg: e.message });
+        addLog(
+          `[${new Date().toLocaleTimeString()}] Address write failed → ${e.message}`,
+        );
+      }
+    }
+    writeAddrAbortRef.current = null;
+    setWriteAddrBusy(false);
+  };
+
+  // Aborts the in-flight programming-mode wait, wired to the same button
+  // that started it - real user request, 2026-08-31: "The cancel can be
+  // the write button itself."
+  const cancelWriteAddress = () => {
+    writeAddrAbortRef.current?.abort();
+  };
+
+  // Plain bookkeeping - clears a recorded serial with no bus interaction
+  // at all, distinct from confirmSerial (records one) - real user request,
+  // 2026-08-31: "a button next to the serial number, which allows us to
+  // clear any existing number from the DB."
+  const [clearSerialBusy, setClearSerialBusy] = useState(false);
+  const clearSerial = async () => {
+    if (!lockedTarget?.serial_number) return;
+    setClearSerialBusy(true);
+    try {
+      await updateDevice(lockedTarget.id, { serial_number: '' });
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Cleared recorded serial for ${lockedTarget.name}`,
+      );
+    } catch (e: any) {
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Failed to clear serial → ${e.message}`,
+      );
+    }
+    setClearSerialBusy(false);
+  };
+
+  // Write-by-serial, using whatever serial is currently recorded (edited
+  // on the Serial tab) - moved here from the Serial tab, 2026-08-31: "The
+  // Write Address button should not show on the serials tab at all, as it
+  // is unrelated" - both real write mechanisms (button-press above, and
+  // this one) now live together on the Device Address tab; the Serial tab
+  // is pure bookkeeping only (view/detect/clear).
+  const [writeBySerialBusy, setWriteBySerialBusy] = useState(false);
+  const [writeBySerialResult, setWriteBySerialResult] = useState<
+    { ok: boolean; msg: string } | null
+  >(null);
+  // Same real bug/fix as writeAddressDirect() above, 2026-08-31: this used
+  // lockedTarget.individual_address (the last SAVED project value)
+  // regardless of unsaved edits sitting in the address selectors - fixed
+  // to write newAddr (the live selector value) and persist it to the
+  // project automatically once the write is verified.
+  const writeBySerial = async () => {
+    if (!lockedTarget?.has_address || !lockedTarget?.serial_number) return;
+    if (addrConflict) {
+      setWriteBySerialResult({
+        ok: false,
+        msg: `⚠ ${newAddr} is already assigned to ${addrConflict.name} in this project — resolve the conflict before writing.`,
+      });
+      return;
+    }
+    setWriteBySerialBusy(true);
+    setWriteBySerialResult(null);
+    addLog(
+      `[${new Date().toLocaleTimeString()}] Writing (by serial) ${lockedTarget.serial_number} → ${newAddr}`,
+    );
+    try {
+      await ensureBusConnected();
+      const r = await api.busAssignAddressBySerial(
+        lockedTarget.serial_number,
+        newAddr,
+      );
+      if (!r.verified) {
+        throw new Error(
+          r.address
+            ? `Device reported ${r.address}, not ${newAddr}`
+            : 'No read-back confirmation from the device',
+        );
+      }
+      // Persist the address that was actually verified written - serial_
+      // number is resupplied in the same call to avoid the server's
+      // clear-serial-on-address-change guard wiping it (server/routes/
+      // devices.ts) - see writeAddressDirect()'s own doc comment above.
+      await updateDevice(lockedTarget.id, {
+        individual_address: newAddr,
+        serial_number: lockedTarget.serial_number,
+      });
+      setWriteBySerialResult({
+        ok: true,
+        msg: `✓ Address written to ${newAddr}`,
+      });
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Address ${newAddr} written and project updated`,
+      );
+    } catch (e: any) {
+      setWriteBySerialResult({ ok: false, msg: e.message });
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Address write failed → ${e.message}`,
+      );
+    }
+    setWriteBySerialBusy(false);
+  };
+
   const manualTarget = devices.find(
     (d) => d.id === (manualDeviceId || manualMatch?.id),
   );
@@ -263,6 +770,7 @@ export function AddressDeviceModal({
       `[${new Date().toLocaleTimeString()}] Addressing (by serial) ${manualSerial} → ${target.individual_address} (${target.name})`,
     );
     try {
+      await ensureBusConnected();
       const r = await api.busAssignAddressBySerial(
         manualSerial,
         target.individual_address,
@@ -331,59 +839,289 @@ export function AddressDeviceModal({
           </div>
 
           {lockDevice ? (
-            // ── Known-device layout: no tabs, no candidate picker at all -
-            // the target is already fixed (lockedTarget), so there is
-            // nothing to choose between. Real request 2026-08-31: what
-            // "press the programming button" should actually DO here is
-            // different from the general new-device flow too - the device
-            // already has its address, so a matching scan result has
-            // nothing to write, only a serial to confirm (see
-            // confirmSerial above). Only a scan result reporting a
-            // DIFFERENT address than expected still offers a real write
-            // (that physical unit isn't this project slot yet).
+            // ── Known-device layout, split into two tabs 2026-08-31 (real
+            // user feedback: "our popup for address/serial change is
+            // looking a bit convoluted. Please make two tabs - one for
+            // device address and one for serial number.") - no candidate
+            // picker in either tab, the target is already fixed
+            // (lockedTarget).
             <>
-              <Btn onClick={scan} disabled={scanning}>
-                {scanning ? (
-                  <>
-                    <Spinner /> Scanning…
-                  </>
-                ) : (
-                  '⟲ Press Programming Button & Scan'
-                )}
-              </Btn>
-              {detectError && (
-                <div className={styles.errorMsg}>&#x2717; {detectError}</div>
-              )}
-              {detected && detected.length === 0 && (
-                <div className={styles.emptyState}>
-                  No devices answered. Press the physical programming button
-                  on this device, then scan again.
-                </div>
-              )}
-              {detected && detected.length > 0 && (
-                <div className={styles.detectedList}>
-                  {detected.map((d) => {
-                    const busy = detectBusy[d.serial];
-                    const result = detectResult[d.serial];
-                    const canUseProgIA = detected.length === 1;
-                    // No real project address to compare against at all -
-                    // capture-only regardless of what this device
-                    // currently reports (see lockedNoAddress above).
-                    const isMatch =
-                      lockedNoAddress ||
-                      (!!lockedTarget &&
-                        d.src === lockedTarget.individual_address);
-                    return (
-                      <div key={d.serial} className={styles.detectedRow}>
-                        <div className={styles.detectedSerial}>
-                          Serial {d.serial}
+              <div className={styles.tabRow}>
+                <button
+                  className={`${styles.tabBtn} ${deviceTab === 'address' ? styles.tabBtnActive : ''}`}
+                  onClick={() => setDeviceTab('address')}
+                >
+                  Device Address
+                </button>
+                <button
+                  className={`${styles.tabBtn} ${deviceTab === 'serial' ? styles.tabBtnActive : ''}`}
+                  onClick={() => setDeviceTab('serial')}
+                >
+                  Serial Number
+                </button>
+              </div>
+
+              {deviceTab === 'address' ? (
+                <>
+                  {addrEditing ? (
+                    <>
+                      <div className={styles.row}>
+                        <div className={styles.col}>
+                          <div className={styles.fieldLabel}>AREA</div>
+                          <input
+                            type="number"
+                            min={0}
+                            max={15}
+                            className={styles.textInput}
+                            value={addrArea}
+                            onChange={(e) => setAddrArea(Number(e.target.value) || 0)}
+                          />
                         </div>
-                        {isMatch ? (
-                          <>
-                            <div className={styles.matchedTag}>
+                        <div className={styles.col}>
+                          <div className={styles.fieldLabel}>LINE</div>
+                          <input
+                            type="number"
+                            min={0}
+                            max={15}
+                            className={styles.textInput}
+                            value={addrLine}
+                            onChange={(e) => setAddrLine(Number(e.target.value) || 0)}
+                          />
+                        </div>
+                        <div className={styles.col}>
+                          <div className={styles.fieldLabel}>DEVICE</div>
+                          <input
+                            type="number"
+                            min={0}
+                            max={255}
+                            className={styles.textInput}
+                            value={addrDevNum}
+                            onChange={(e) => setAddrDevNum(Number(e.target.value) || 0)}
+                          />
+                        </div>
+                      </div>
+                      {addrConflict && (
+                        <div className={styles.errorMsg}>
+                          &#x2717; {newAddr} is already used by {addrConflict.name}
+                        </div>
+                      )}
+                      {addrError && (
+                        <div className={styles.errorMsg}>&#x2717; {addrError}</div>
+                      )}
+                      {/* Real user note, 2026-08-31: "the save button on
+                          editing the device address may be confusing.
+                          People may not recognise the distinction between
+                          saving locally and writing to device." */}
+                      <div className={styles.emptyState}>
+                        Saving only updates the project's planned address -
+                        it does not write anything to the physical device.
+                        Use ⚡ Write Address below for that.
+                      </div>
+                      <div className={styles.row}>
+                        <Btn
+                          onClick={saveAddr}
+                          disabled={addrBusy || !!addrConflict || addrUnchanged}
+                          title="Saves the planned address to the project only - does not write to the physical device"
+                        >
+                          {addrBusy ? <Spinner /> : `Save ${newAddr} (Project Only)`}
+                        </Btn>
+                        {!!lockedTarget?.has_address && (
+                          <Btn
+                            onClick={() => setAddrEditing(false)}
+                            color="var(--dim)"
+                            disabled={addrBusy}
+                          >
+                            Cancel
+                          </Btn>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <div className={styles.row}>
+                      <div className={styles.matchedTag}>
+                        DEVICE ADDRESS: {lockedTarget?.individual_address}
+                      </div>
+                      <Btn onClick={() => setAddrEditing(true)} color="var(--dim)">
+                        Edit
+                      </Btn>
+                      <Btn
+                        onClick={doUnassign}
+                        disabled={unassignBusy || !!lockedTarget?.serial_number}
+                        color="var(--red)"
+                        title={
+                          lockedTarget?.serial_number
+                            ? 'This device has a physically-confirmed serial at this address - unassigning is not supported here'
+                            : 'Revert to no project address'
+                        }
+                      >
+                        {unassignBusy ? <Spinner /> : 'Unassign'}
+                      </Btn>
+                    </div>
+                  )}
+
+                  <div className={styles.row}>
+                    <Btn
+                      onClick={
+                        writeAddrWaiting ? cancelWriteAddress : writeAddressDirect
+                      }
+                      disabled={
+                        (writeAddrBusy && !writeAddrWaiting) ||
+                        !lockedTarget?.has_address
+                      }
+                      color={writeAddrWaiting ? 'var(--red)' : undefined}
+                      title={
+                        writeAddrWaiting
+                          ? 'Cancel — stop waiting for a device in programming mode'
+                          : lockedTarget?.has_address
+                            ? `Write ${newAddr} via the programming-mode broadcast — press the physical programming button on the device first, real-hardware confirmed. Writes whatever is shown in the address fields above, saved or not, and updates the project automatically once confirmed.`
+                            : 'Save a project address above first'
+                      }
+                    >
+                      {writeAddrWaiting ? (
+                        'Cancel'
+                      ) : writeAddrBusy ? (
+                        <>
+                          <Spinner /> Writing…
+                        </>
+                      ) : (
+                        `⚡ Write ${newAddr}`
+                      )}
+                    </Btn>
+                    <Btn
+                      onClick={writeBySerial}
+                      disabled={
+                        writeBySerialBusy ||
+                        !lockedTarget?.has_address ||
+                        !lockedTarget?.serial_number
+                      }
+                      color="var(--amber)"
+                      title={
+                        !lockedTarget?.serial_number
+                          ? 'No serial recorded — record one on the Serial Number tab first'
+                          : `Write ${newAddr} by targeting this exact serial number — not yet confirmed on real hardware. Writes whatever is shown in the address fields above, saved or not, and updates the project automatically once confirmed.`
+                      }
+                    >
+                      {writeBySerialBusy ? (
+                        <Spinner />
+                      ) : (
+                        <>
+                          Write by Serial{' '}
+                          <span className={styles.experimentalBadge}>
+                            Experimental
+                          </span>
+                        </>
+                      )}
+                    </Btn>
+                  </div>
+                  {writeAddrStatus && (
+                    <div className={styles.pressPromptBadge}>
+                      {writeAddrStatus}
+                    </div>
+                  )}
+                  {writeAddrResult && (
+                    <div
+                      className={
+                        writeAddrResult.ok ? styles.successMsg : styles.errorMsg
+                      }
+                    >
+                      {writeAddrResult.msg}
+                    </div>
+                  )}
+                  {writeBySerialResult && (
+                    <div
+                      className={
+                        writeBySerialResult.ok
+                          ? styles.successMsg
+                          : styles.errorMsg
+                      }
+                    >
+                      {writeBySerialResult.msg}
+                    </div>
+                  )}
+                </>
+              ) : (
+                // ── Serial tab, redesigned 2026-08-31: real user feedback
+                // ("just show the number in the edit box... Clear to its
+                // right... Detect... on one line") - the recorded serial IS
+                // the manual-entry box now, pre-filled instead of a
+                // separate read-only display; write actions (button-press
+                // AND by-serial) both moved to the Device Address tab -
+                // this tab is pure bookkeeping (view/detect/clear) only.
+                <>
+                  <div className={styles.row}>
+                    <input
+                      className={styles.serialTopInput}
+                      value={manualSerial}
+                      onChange={(e) => setManualSerial(e.target.value.trim())}
+                      onKeyDown={(e) => {
+                        if (
+                          e.key === 'Enter' &&
+                          manualSerialValid &&
+                          !manualNoChange
+                        ) {
+                          confirmSerial(manualSerial);
+                        }
+                      }}
+                      placeholder="12 hex chars"
+                      title="Recorded serial number — edit and press Enter to save"
+                    />
+                    <Btn
+                      onClick={clearSerial}
+                      disabled={clearSerialBusy || !lockedTarget?.serial_number}
+                      color="var(--red)"
+                      className={styles.serialSideBtn}
+                      title="Clear the recorded serial from the project - no bus interaction"
+                    >
+                      {clearSerialBusy ? <Spinner /> : 'Clear'}
+                    </Btn>
+                    <Btn
+                      onClick={scan}
+                      disabled={scanning}
+                      className={styles.serialSideBtn}
+                      title="Detect the serial via the device's physical programming button"
+                    >
+                      {scanning ? <Spinner /> : 'Detect'}
+                    </Btn>
+                  </div>
+                  {manualSerial && !manualSerialValid && (
+                    <div className={styles.errorMsg}>
+                      Serial must be exactly 12 hex characters (6 bytes).
+                    </div>
+                  )}
+                  {scanStatus && (
+                    <div className={styles.pressPromptBadge}>{scanStatus}</div>
+                  )}
+                  {detectError && (
+                    <div className={styles.errorMsg}>&#x2717; {detectError}</div>
+                  )}
+                  {detected && detected.length === 0 && (
+                    <div className={styles.emptyState}>
+                      No devices answered. Press the physical programming button
+                      on this device, then scan again.
+                    </div>
+                  )}
+                  {detected && detected.length > 0 && (
+                    <div className={styles.detectedList}>
+                      {detected.map((d) => {
+                        // No real project address to compare against at
+                        // all - capture-only regardless of what this
+                        // device currently reports (see lockedNoAddress
+                        // above).
+                        const isMatch =
+                          lockedNoAddress ||
+                          (!!lockedTarget &&
+                            d.src === lockedTarget.individual_address);
+                        return (
+                          <div key={d.serial} className={styles.detectedRow}>
+                            <div className={styles.detectedSerial}>
+                              Serial {d.serial}
+                            </div>
+                            <div className={isMatch ? styles.matchedTag : styles.unmatchedTag}>
                               {lockedNoAddress
-                                ? 'No project address assigned yet — nothing to write, just capture the serial.'
-                                : `Already reports ${lockedTarget!.individual_address} — nothing to write, just confirm the serial.`}
+                                ? 'No project address assigned yet.'
+                                : isMatch
+                                  ? `Already reports ${lockedTarget!.individual_address}.`
+                                  : `Reports ${d.src || 'no address'}, not ${lockedTarget?.individual_address}.`}
                             </div>
                             <Btn
                               onClick={() => confirmSerial(d.serial)}
@@ -397,146 +1135,12 @@ export function AddressDeviceModal({
                                 'Confirm Serial'
                               )}
                             </Btn>
-                          </>
-                        ) : (
-                          <>
-                            <div className={styles.unmatchedTag}>
-                              Reports {d.src || 'no address'}, not{' '}
-                              {lockedTarget?.individual_address} — writing
-                              will re-address this physical unit.
-                            </div>
-                            <div className={styles.row}>
-                              {canUseProgIA && (
-                                <Btn
-                                  onClick={() =>
-                                    writeDetected(
-                                      d.serial,
-                                      true,
-                                      lockedTarget ?? undefined,
-                                    )
-                                  }
-                                  disabled={busy || !lockedTarget}
-                                  title="Write via the programming-mode broadcast — real-hardware confirmed, safe here since exactly one device answered"
-                                >
-                                  {busy ? <Spinner /> : '⚡ Write Address'}
-                                </Btn>
-                              )}
-                              <Btn
-                                onClick={() =>
-                                  writeDetected(
-                                    d.serial,
-                                    false,
-                                    lockedTarget ?? undefined,
-                                  )
-                                }
-                                disabled={busy || !lockedTarget}
-                                color="var(--amber)"
-                                title="Write by targeting this exact serial number — not yet confirmed on real hardware"
-                              >
-                                {busy ? (
-                                  <Spinner />
-                                ) : (
-                                  <>
-                                    Write by Serial{' '}
-                                    <span className={styles.experimentalBadge}>
-                                      Experimental
-                                    </span>
-                                  </>
-                                )}
-                              </Btn>
-                            </div>
-                          </>
-                        )}
-                        {result && (
-                          <div
-                            className={
-                              result.ok ? styles.successMsg : styles.errorMsg
-                            }
-                          >
-                            {result.msg}
                           </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              <div className={styles.orDivider}>OR</div>
-
-              <div className={styles.row}>
-                <div className={styles.col}>
-                  <div className={styles.fieldLabel}>SERIAL NUMBER (12 hex chars)</div>
-                  <input
-                    className={styles.textInput}
-                    value={manualSerial}
-                    onChange={(e) => setManualSerial(e.target.value.trim())}
-                    placeholder="e.g. 00fa1234abcd"
-                  />
-                </div>
-              </div>
-              {manualSerial && !manualSerialValid && (
-                <div className={styles.errorMsg}>
-                  Serial must be exactly 12 hex characters (6 bytes).
-                </div>
-              )}
-              {lockedTarget && (
-                <div className={styles.matchedTag}>
-                  {lockedNoAddress
-                    ? `Recording serial for: ${lockedTarget.name}`
-                    : `Addressing: ${lockedTarget.individual_address} — ${lockedTarget.name}`}
-                </div>
-              )}
-              {lockedNoAddress ? (
-                <Btn
-                  onClick={() => confirmSerial(manualSerial)}
-                  disabled={
-                    confirmBusy || !manualSerialValid || manualNoChange
-                  }
-                  title={
-                    manualNoChange
-                      ? 'No change — this is already the recorded serial for this device'
-                      : 'Record this serial number — no bus write, there is no project address yet to write it to'
-                  }
-                >
-                  {confirmBusy ? <Spinner /> : 'Use This Serial'}
-                </Btn>
-              ) : (
-                <Btn
-                  onClick={writeManual}
-                  disabled={
-                    manualBusy ||
-                    !manualSerialValid ||
-                    !(manualDeviceId || manualMatch) ||
-                    manualNoChange
-                  }
-                  color="var(--amber)"
-                  title={
-                    manualNoChange
-                      ? 'No change — this is already the recorded serial for this device'
-                      : 'Write by targeting this exact serial number — not yet confirmed on real hardware'
-                  }
-                >
-                  {manualBusy ? (
-                    <Spinner />
-                  ) : (
-                    <>
-                      Write Address{' '}
-                      <span className={styles.experimentalBadge}>
-                        Experimental
-                      </span>
-                    </>
+                        );
+                      })}
+                    </div>
                   )}
-                </Btn>
-              )}
-              {manualResult && (
-                <div
-                  className={
-                    manualResult.ok ? styles.successMsg : styles.errorMsg
-                  }
-                >
-                  {manualResult.msg}
-                </div>
+                </>
               )}
             </>
           ) : (

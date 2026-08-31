@@ -113,6 +113,19 @@
 .select {
   composes: textInput;
 }
+/* Serial tab's compact one-line layout, 2026-08-31 - real user feedback:
+   "everything on one line", reduced-width serial box, Clear and Detect
+   the same width as each other, immediately to its right. */
+.serialTopInput {
+  composes: textInput;
+  width: 130px;
+  flex: 0 0 auto;
+}
+.serialSideBtn {
+  flex: 0 0 auto;
+  width: 60px;
+  justify-content: center;
+}
 .row {
   display: flex;
   gap: 10px;
@@ -175,6 +188,28 @@
   border-radius: 999px;
   padding: 1px 7px;
   white-space: nowrap;
+}
+/* "Press the programming button now" prompt - real user request, 2026-08-31:
+   "the notice to press prog should be in an amber badge - slightly
+   flashing?" Used for both the Detect scan (scanStatus) and the
+   Write Address detect-first flow (writeAddrStatus) - same underlying
+   "go press the button" moment in both places. */
+@keyframes pressPromptFlash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.pressPromptBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
+  border-radius: 999px;
+  padding: 5px 12px;
+  animation: pressPromptFlash 1.1s ease-in-out infinite;
 }
 .checkboxRow {
   display: flex;

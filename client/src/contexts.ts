@@ -72,6 +72,7 @@ export interface ProjectActions {
     deviceId: number,
     patch: Record<string, unknown>,
   ) => Promise<void>;
+  unassignDevice: (deviceId: number) => Promise<void>;
   updateSpace: (
     spaceId: number,
     patch: Record<string, unknown>,

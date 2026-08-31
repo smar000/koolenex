@@ -313,12 +313,17 @@ interface DeviceAddrProps {
  *
  * A real address with no recorded serial number gets its own distinct
  * amber "pending" color, not the normal accent - added 2026-08-30 after a
- * real gap: assigning/changing a device's planned address (see
- * AssignProjectAddressModal) only updates our project record, not the
+ * real gap: assigning/changing a device's planned address (AddressDeviceModal's
+ * own project-address section, merged in 2026-08-31 - see that
+ * component's doc comment) only updates our project record, not the
  * physical device - nothing has actually been written to hardware until a
- * real addressing write happens (AddressDeviceModal) and records a serial
- * against it. Without this, a freshly (re)planned address looked
- * indistinguishable from one already confirmed on real hardware.
+ * real addressing write happens and records a serial against it. Without
+ * this, a freshly (re)planned address looked indistinguishable from one
+ * already confirmed on real hardware. That same gap also let a STALE
+ * serial from a prior, unrelated address survive a project address
+ * change and misleadingly count as "confirmed" for the new one - fixed
+ * server-side, 2026-08-31 (server/routes/devices.ts clears serial_number
+ * whenever individual_address genuinely changes).
  */
 export function DeviceAddr({
   device,

@@ -436,6 +436,134 @@ describe('Device validation', () => {
     assert.equal(status, 400);
   });
 
+  // Real bug found live, 2026-08-31: a stale serial_number left over from
+  // an unrelated earlier address (e.g. carried through a project
+  // reimport) survived a genuine address change and misleadingly counted
+  // as "physically confirmed" for the NEW address - the address badge
+  // went straight to its "confirmed" color the moment a project address
+  // was assigned, even though nothing had been written to hardware yet.
+  it('PUT individual_address clears a stale serial_number when the address genuinely changes', async () => {
+    db.run('UPDATE devices SET serial_number=? WHERE id=?', [
+      '00a625401d94',
+      did,
+    ]);
+    const { status, data } = await req(
+      'PUT',
+      `/projects/${pid}/devices/${did}`,
+      { individual_address: '1.1.6' },
+    );
+    assert.equal(status, 200);
+    assert.equal(data.individual_address, '1.1.6');
+    assert.equal(data.serial_number, '');
+  });
+
+  it('PUT individual_address does NOT clear serial_number when the address is unchanged', async () => {
+    const { data: before } = await req(
+      'PUT',
+      `/projects/${pid}/devices/${did}`,
+      { individual_address: '1.1.7' },
+    );
+    db.run('UPDATE devices SET serial_number=? WHERE id=?', [
+      '00a625401d94',
+      did,
+    ]);
+    const { status, data } = await req(
+      'PUT',
+      `/projects/${pid}/devices/${did}`,
+      { individual_address: before.individual_address },
+    );
+    assert.equal(status, 200);
+    assert.equal(data.serial_number, '00a625401d94');
+  });
+
+  it('PUT individual_address does not clobber a serial_number sent in the same request', async () => {
+    const { status, data } = await req(
+      'PUT',
+      `/projects/${pid}/devices/${did}`,
+      { individual_address: '1.1.8', serial_number: '00a625401d95' },
+    );
+    assert.equal(status, 200);
+    assert.equal(data.individual_address, '1.1.8');
+    assert.equal(data.serial_number, '00a625401d95');
+  });
+
+  // Real user request, 2026-08-31: "we need to be able to unassign to a
+  // device whose address has not yet been written" - PUT could only ever
+  // set has_address=1, never back to 0.
+  describe('PATCH .../unassign', () => {
+    it('reverts has_address to 0 with a synthetic placeholder address, when no serial is recorded', async () => {
+      db.run(
+        'UPDATE devices SET has_address=1, individual_address=?, serial_number=? WHERE id=?',
+        ['1.1.30', '', did],
+      );
+      const { status, data } = await req(
+        'PATCH',
+        `/projects/${pid}/devices/${did}/unassign`,
+      );
+      assert.equal(status, 200);
+      assert.equal(data.has_address, 0);
+      assert.equal(data.status, 'unassigned');
+      // did's area/line are 1/1 (set at creation, PUT never changes them) -
+      // the synthetic placeholder reuses them, at the first free
+      // 256+ device number.
+      assert.match(data.individual_address, /^1\.1\.\d+$/);
+      assert.ok(Number(data.individual_address.split('.')[2]) >= 256);
+    });
+
+    it('picks a placeholder number that does not collide with another device', async () => {
+      db.run(
+        'UPDATE devices SET has_address=1, individual_address=?, serial_number=? WHERE id=?',
+        ['1.1.31', '', did],
+      );
+      const { data: other } = await req('POST', `/projects/${pid}/devices`, {
+        individual_address: '1.1.256',
+        name: 'Occupies the first synthetic slot',
+        area: 1,
+        line: 1,
+      });
+      const { status, data } = await req(
+        'PATCH',
+        `/projects/${pid}/devices/${did}/unassign`,
+      );
+      assert.equal(status, 200);
+      assert.notEqual(data.individual_address, '1.1.256');
+      await req('DELETE', `/projects/${pid}/devices/${other.id}`);
+    });
+
+    it('refuses (409) when the device has a physically-confirmed serial', async () => {
+      db.run(
+        'UPDATE devices SET has_address=1, individual_address=?, serial_number=? WHERE id=?',
+        ['1.1.32', '00a625401d94', did],
+      );
+      const { status, data } = await req(
+        'PATCH',
+        `/projects/${pid}/devices/${did}/unassign`,
+      );
+      assert.equal(status, 409);
+      assert.equal(data.error, 'already_written');
+      const row = db.get('SELECT has_address FROM devices WHERE id=?', [did]);
+      assert.equal(row.has_address, 1);
+    });
+
+    it('refuses (400) when the device has no address to unassign', async () => {
+      db.run('UPDATE devices SET has_address=0 WHERE id=?', [did]);
+      const { status, data } = await req(
+        'PATCH',
+        `/projects/${pid}/devices/${did}/unassign`,
+      );
+      assert.equal(status, 400);
+      assert.equal(data.error, 'not_assigned');
+    });
+
+    it('returns 404 for a non-existent device', async () => {
+      const { status } = await req(
+        'PATCH',
+        `/projects/${pid}/devices/999999/unassign`,
+      );
+      assert.equal(status, 404);
+    });
+  });
+
   it('PATCH status returns the updated device', async () => {
     const { status, data } = await req(
       'PATCH',

@@ -377,6 +377,7 @@ export default function App() {
       updateGA: projectHandlers.handleUpdateGA,
       renameGAGroup: projectHandlers.handleRenameGAGroup,
       updateDevice: projectHandlers.handleUpdateDevice,
+      unassignDevice: projectHandlers.handleUnassignDevice,
       updateSpace: projectHandlers.handleUpdateSpace,
       createTopology: projectHandlers.handleCreateTopology,
       updateTopology: projectHandlers.handleUpdateTopology,

@@ -131,8 +131,10 @@ async function req<T = unknown>(
   path: string,
   body?: unknown,
   isFormData = false,
+  signal?: AbortSignal,
 ): Promise<T> {
   const opts: RequestInit = { method, headers: {} };
+  if (signal) opts.signal = signal;
   if (body && !isFormData) {
     (opts.headers as Record<string, string>)['Content-Type'] =
       'application/json';
@@ -145,8 +147,15 @@ async function req<T = unknown>(
     res = await fetch(BASE + path, opts);
   } catch (e) {
     // fetch() rejects with TypeError on network failure, abort, or browser
-    // socket timeout — surfacing the original message as "Failed to fetch"
-    // tells the user nothing. Wrap it so the cause is at least named.
+    // socket timeout - and with a DOMException named AbortError when a
+    // passed-in `signal` was aborted (e.g. the user cancelling a real-
+    // hardware wait, 2026-08-31 - see busReadSerialsInProgrammingMode).
+    // Surface that distinctly rather than the generic network-error text.
+    if ((e as { name?: string }).name === 'AbortError') {
+      const abortErr = new ApiError('Cancelled');
+      abortErr.code = 'aborted';
+      throw abortErr;
+    }
     throw new ApiError(
       `Network error or request timed out (${(e as Error).message}). Check the server console for details.`,
     );
@@ -192,6 +201,8 @@ export const api = {
     req<Device>('POST', `/projects/${pid}/devices`, body),
   updateDevice: (pid: number, did: number, body: Record<string, unknown>) =>
     req<Device>('PUT', `/projects/${pid}/devices/${did}`, body),
+  unassignDevice: (pid: number, did: number) =>
+    req<Device>('PATCH', `/projects/${pid}/devices/${did}/unassign`, {}),
   setDeviceStatus: (pid: number, did: number, status: string) =>
     req<{ ok: boolean }>('PATCH', `/projects/${pid}/devices/${did}/status`, {
       status,
@@ -388,28 +399,44 @@ export const api = {
   busDeviceInfo: (deviceAddress: string) =>
     req<Record<string, unknown>>('POST', '/bus/device-info', { deviceAddress }),
   busProgramIA: (newAddr: string) =>
-    req<{ ok: boolean; newAddr: string }>('POST', '/bus/program-ia', {
-      newAddr,
-    }),
+    req<{ ok: boolean; newAddr: string; restarted: boolean }>(
+      'POST',
+      '/bus/program-ia',
+      { newAddr },
+    ),
   // Read-side counterpart to busProgramIA - detects a device currently held
   // in physical programming mode by its address (A_IndividualAddress_Read/
   // _Response), without needing to know its serial or address ahead of time.
   // Only safe to write against (busProgramIA) when exactly one device is in
   // programming mode - see busReadSerialsInProgrammingMode below for the
   // multi-device-safe alternative.
-  busCheckProgrammingMode: (timeoutMs?: number) =>
-    req<{ address: string | null }>('POST', '/bus/check-programming-mode', {
-      timeoutMs,
-    }),
+  busCheckProgrammingMode: (timeoutMs?: number, signal?: AbortSignal) =>
+    req<{ address: string | null }>(
+      'POST',
+      '/bus/check-programming-mode',
+      { timeoutMs },
+      false,
+      signal,
+    ),
   // Collects every device currently in programming mode by serial number
   // (not just the first to answer) - server/knx-connection.ts's
   // readSerialNumbersInProgrammingMode(), real-hardware confirmed
   // 2026-08-30 to disambiguate multiple simultaneous devices cleanly.
-  busReadSerialsInProgrammingMode: (timeoutMs?: number) =>
+  // `signal` (2026-08-31): lets a caller give up on a long real-hardware
+  // wait early - a real timing complaint from live testing ("this needs to
+  // be at least 30 seconds or more as it will take time for people to go
+  // to the device to set prog mode... We should have a cancel write option
+  // to stop the search"). Aborting only stops the CLIENT from waiting on
+  // this response; the server-side scan still runs to its own timeout
+  // server-side (nothing physically dangerous keeps happening - it's a
+  // passive read), the result is just discarded.
+  busReadSerialsInProgrammingMode: (timeoutMs?: number, signal?: AbortSignal) =>
     req<{ devices: Array<{ serial: string; src: string }> }>(
       'POST',
       '/bus/read-serials-in-programming-mode',
       { timeoutMs },
+      false,
+      signal,
     ),
   // Address a device purely by its serial number - no programming-button
   // press needed. See docs/knx-device-write-protocol.md §9 (koolenex repo):
@@ -418,11 +445,12 @@ export const api = {
   // confirmation yet - surface that to the user, don't present it as
   // equally proven to busProgramIA.
   busAssignAddressBySerial: (serial: string, newAddress: string) =>
-    req<{ ok: boolean; verified: boolean; address: string | null }>(
-      'POST',
-      '/bus/assign-address-by-serial',
-      { serial, newAddress },
-    ),
+    req<{
+      ok: boolean;
+      verified: boolean;
+      address: string | null;
+      restarted: boolean;
+    }>('POST', '/bus/assign-address-by-serial', { serial, newAddress }),
   busProgramDevice: (
     deviceAddress: string,
     projectId: number,

@@ -428,6 +428,21 @@ class KnxBusManager extends EventEmitter {
     return this.connection!.checkProgrammingMode(timeoutMs);
   }
 
+  // Direct A_Restart trigger, no address write involved - added 2026-08-31
+  // as a real diagnostic tool to isolate the "no visible reboot" question
+  // (docs/knx-device-write-protocol.md §9.5) from the write path itself:
+  // lets a Restart be sent against a device that's already correctly
+  // addressed, with nothing else in flight, to see in isolation whether
+  // this specific device visibly reboots on A_Restart at all.
+  async restartDevice(
+    deviceAddr: string,
+    settleMs?: number,
+    postRestartDelayMs?: number,
+  ): Promise<void> {
+    await this._ensureConnected();
+    return this.connection!.restartDevice(deviceAddr, settleMs, postRestartDelayMs);
+  }
+
   async readSerialNumbersInProgrammingMode(
     timeoutMs?: number,
   ): Promise<Array<{ serial: string; src: string }>> {

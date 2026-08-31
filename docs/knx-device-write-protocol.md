@@ -736,6 +736,62 @@ This capture directly validates koolenex's own `assignIndividualAddressBySerial(
 restart-after-write sequence (write → verify → Restart → wait → disconnect), added the same day
 this capture was taken, in the same order real ETS uses.
 
+### 9.5 koolenex's own detect-before-write UI flow, live-tested end-to-end on a second manufacturer 🟢
+
+Real, live-hardware testing session, 2026-08-31, against the §9.3/9.4 device (HDL `M/AG40B.1`,
+mask `07b0`) via koolenex's own UI (`AddressDeviceModal.tsx`'s "Write Address" button), not a
+direct protocol capture of ETS. Three real bugs found and fixed in the process, plus one real,
+still-open behavioral gap:
+
+- **`readSerialNumbersInProgrammingMode()` alone got zero replies from this device, even with the
+  physical button genuinely held** - cross-checked directly against §9.4's own real ETS capture
+  taken the same day against the same physical unit, which shows ETS itself using
+  `checkProgrammingMode()`'s mechanism (`A_IndividualAddress_Read`) instead, not the
+  `A_SystemNetworkParameter_Read`-based one. **This is a real per-manufacturer/mask gap, not a bug
+  in either service** - both remain independently real-hardware confirmed (§9.2 for
+  `readSerialNumbersInProgrammingMode()` on the Albrecht Jung devices tested there; this section
+  for `checkProgrammingMode()` on HDL). Fixed at the call site (`AddressDeviceModal.tsx`'s
+  `writeAddressDirect()`), not in either service itself: both are now run concurrently and their
+  results merged by responding address, covering either manufacturer without slowing down the one
+  that answers the faster/richer service.
+- **A one-shot broadcast only catches a device already in programming mode at the exact instant
+  it's sent** - a telegram can't retroactively be seen by a device that enters programming mode
+  moments later. Real ETS itself (§9.3/9.4 captures) re-sends its own equivalent broadcast roughly
+  every 3s for its *entire* wait window, not once. Both `checkProgrammingMode()` and
+  `readSerialNumbersInProgrammingMode()` (`server/knx-connection.ts`) previously sent their
+  broadcast exactly once at call time; both now re-send every 3s for the full `timeoutMs`,
+  matching ETS's own cadence, via a `setInterval` alongside the existing timeout/listener.
+- **Combining the two services with `Promise.all` on two full-length (30s) calls made every write
+  take the full 30 seconds even when the device answered within a few seconds** -
+  `readSerialNumbersInProgrammingMode()` deliberately never resolves early (by design, so it can
+  collect replies from more than one simultaneous device - see §9.1); `Promise.all` doesn't resolve
+  until *both* promises settle, so it stayed blocked on that one regardless of how fast
+  `checkProgrammingMode()`'s own early-resolve-on-match fired. Fixed client-side: `writeAddressDirect()` now polls in short (3s) rounds instead of one long call, breaking out of the loop the
+  instant either service reports a device - same overall ~30s budget for someone to physically
+  reach the device, but a real response within a few seconds of an actual press, matching ETS.
+- **🟢 RESOLVED, 2026-08-31 (later the same day): no visible physical reboot (screen/IP display) on
+  the HDL device is real device-specific behavior, not a koolenex bug.** Isolated via a new
+  diagnostic-only endpoint (`POST /bus/restart-device`, `server/routes/bus.ts` +
+  `KnxBusManager.restartDevice()`, `server/knx-bus.ts`) that sends nothing but a real `A_Restart` to
+  an already-addressed device, with no write/detect/read-back around it - added specifically to
+  test this question in isolation. Two back-to-back real tests, same code path, same session:
+  against the HDL device (`1.1.21`, this section's `M/AG40B.1`), sent twice, confirmed no visible
+  screen/IP change either time; immediately after, against `1.1.10` (the Albrecht Jung LED actuator
+  from §1-§8, a genuinely different manufacturer/product) with its status light left on beforehand -
+  the same `A_Restart` call turned the light off, confirmed by direct observation. Identical
+  trigger, identical code, two real devices, opposite outcomes - this is conclusive: `A_Restart` is
+  being sent and accepted correctly in both cases (as the earlier capture evidence already showed),
+  but this specific HDL device/firmware genuinely does not perform a visible reboot in response to
+  it, while the Albrecht Jung device does. Not a koolenex defect, and nothing further to chase here
+  for either device - the "missing identity reads" hypothesis this superseded (see `restartDevice()`'s
+  own doc comment) remains correctly retired as the explanation.
+
+Net result: the full detect → validate-exactly-one-device → write → restart → read-back-confirm →
+serial-capture flow is now confirmed working end-to-end, live, on a **second** manufacturer (HDL,
+in addition to Albrecht Jung) - the "only one manufacturer tested" gap noted elsewhere in this
+document is resolved for the addressing path specifically (mask/System-B-family coverage is
+unchanged - both real testbed devices remain System B).
+
 ## Sources
 
 Real capture files backing every 🟢-tagged claim above live in this project's `docs/data/

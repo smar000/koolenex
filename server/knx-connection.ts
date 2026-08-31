@@ -443,27 +443,54 @@ export class KnxConnection extends EventEmitter {
 
   /**
    * Sends a connection-oriented device Restart (A_Restart) on its own - opens
-   * a fresh management session (T_Connect) to `deviceAddr`, sends Restart,
-   * waits, then disconnects. This is the exact same mechanism
-   * downloadDevice() already uses at the end of a RelSegment-driven content
-   * download (see its own doc comment, further down this file) - reused
-   * here for the address-write paths below, per real user question,
-   * 2026-08-31: "ETS restarts the device after updating its address. I
-   * don't think we are as yet." Confirmed correct on inspection: neither
-   * programIA() nor assignIndividualAddressBySerial() sent one.
+   * a fresh management session (T_Connect) to `deviceAddr`, reads its
+   * identity, sends Restart, waits, then disconnects. Reused by the
+   * address-write paths below, per real user question, 2026-08-31: "ETS
+   * restarts the device after updating its address. I don't think we are
+   * as yet." Confirmed correct on inspection: neither programIA() nor
+   * assignIndividualAddressBySerial() sent one.
    *
-   * 🟢 Using Restart specifically after an ADDRESS write is now real-
-   * hardware-confirmed: a real tshark capture of ETS performing "Download
-   * Individual Address" (2026-08-31,
-   * docs/data/captures/2026-08-31_ets_address_write_hdl_real.pcapng) shows
-   * the exact same Connect → identify → Restart → wait → Disconnect
-   * sequence this method implements - including the ~3s gap between
-   * Restart and Disconnect (postRestartDelayMs below), confirmed from that
-   * same capture (80.60s Restart, 83.60s Disconnect - exactly 3.0s). A
-   * brief settle delay is still given before connecting, since the device
-   * has just adopted a new address it may not be immediately ready to
-   * accept a T_Connect at - that part is not calibrated against a real
-   * capture, a conservative guess.
+   * 🔴 Real bug, found live 2026-08-31 (a real HDL device's physical
+   * confirmation of a genuine restart - its screen lighting up and
+   * displaying its IP - did NOT happen after this method's first version):
+   * that first version sent a bare Connect -> Restart with nothing in
+   * between, timed at ~110ms apart in the real capture. A real tshark
+   * capture of ETS performing the SAME "Download Individual Address"
+   * operation (docs/data/captures/2026-08-31_ets_address_write_hdl_real.
+   * pcapng) shows ETS does NOT do that - it reads DeviceDescriptor plus
+   * two properties (P=56, P=11) BEFORE Restart, roughly half a second of
+   * real exchange, not an immediate bare Restart. This method now mirrors
+   * that real sequence. Every read here is best-effort (failure logged/
+   * swallowed, not fatal) - the goal is mirroring ETS's real session shape
+   * for whatever the device expects from it, not the specific property
+   * values themselves.
+   *
+   * 🟢 Real live retry, 2026-08-31: the missing-identity-reads hypothesis
+   * above is DISCONFIRMED as the explanation for the earlier "device did
+   * not reboot" report - the real cause is now RESOLVED, not merely open.
+   * With this fuller sequence in place, a real write+Restart against the
+   * same device was captured showing A_Restart genuinely sent and
+   * .con-acknowledged, the correct ~3s wait, then a fresh connection
+   * reading the device back successfully a few seconds later - the device
+   * is unambiguously alive and correctly addressed - but still no visible
+   * screen/IP reboot. A dedicated isolated-restart diagnostic
+   * (POST /bus/restart-device, no write/detect around it at all) then
+   * sent the SAME A_Restart, same code path, against a genuinely different
+   * device (1.1.10, Albrecht Jung) with its status light left on
+   * beforehand - the light turned off, confirming a real reboot. Identical
+   * trigger, identical code, opposite outcomes on two real devices: this
+   * device/firmware (HDL) simply does not perform a visible reboot on
+   * A_Restart, while the Albrecht Jung device does. Not a koolenex defect.
+   * This fix (the fuller ETS-mirroring session shape) is real and correct
+   * regardless, and is kept. Full writeup: docs/knx-device-write-protocol.
+   * md §9.5.
+   *
+   * The ~3s gap between Restart and Disconnect (postRestartDelayMs below)
+   * is real-capture-confirmed (80.60s Restart, 83.60s Disconnect - exactly
+   * 3.0s, same capture). A brief settle delay is still given before
+   * connecting, since the device has just adopted a new address it may
+   * not be immediately ready to accept a T_Connect at - that part is not
+   * calibrated against a real capture, a conservative guess.
    */
   async restartDevice(
     deviceAddr: string,
@@ -471,10 +498,43 @@ export class KnxConnection extends EventEmitter {
     postRestartDelayMs: number = 3000,
   ): Promise<void> {
     if (settleMs > 0) await delay(settleMs);
-    await this.managementSession(deviceAddr, async ({ sendData }) => {
-      await sendData('Restart');
-      if (postRestartDelayMs > 0) await delay(postRestartDelayMs);
-    });
+    await this.managementSession(
+      deviceAddr,
+      async ({ sendData, waitResponse, nextSeq }) => {
+        const propRead = async (
+          objIdx: number,
+          propId: number,
+        ): Promise<void> => {
+          try {
+            const seq = nextSeq();
+            const apdu = apduPropertyValueRead(seq, objIdx, propId);
+            const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+            await this.sendCEMI(cemi);
+            await waitResponse('OTHER', 2000);
+          } catch (e) {
+            logger.warn(
+              'knx',
+              'restartDevice: identity read before Restart failed (continuing anyway)',
+              { deviceAddr, objIdx, propId, error: (e as Error).message },
+            );
+          }
+        };
+        try {
+          await sendData('DeviceDescriptor_Read');
+          await waitResponse('DeviceDescriptor_Response', 2000);
+        } catch (e) {
+          logger.warn(
+            'knx',
+            'restartDevice: DeviceDescriptor_Read before Restart failed (continuing anyway)',
+            { deviceAddr, error: (e as Error).message },
+          );
+        }
+        await propRead(0, 56);
+        await propRead(0, 11);
+        await sendData('Restart');
+        if (postRestartDelayMs > 0) await delay(postRestartDelayMs);
+      },
+    );
   }
 
   // ── Individual address programming ────────────────────────────────────────────
@@ -567,10 +627,12 @@ export class KnxConnection extends EventEmitter {
         });
         if (cemi.apciName !== 'PhysicalAddress_Response') return;
         clearTimeout(timer);
+        clearInterval(repeat);
         this.off('_mgmt', onMgmt);
         resolve({ address: cemi.src });
       };
       const timer = setTimeout(() => {
+        clearInterval(repeat);
         this.off('_mgmt', onMgmt);
         resolve({ address: null });
       }, timeoutMs);
@@ -583,14 +645,29 @@ export class KnxConnection extends EventEmitter {
       const cemi = buildCEMI(this.localAddr, '0/0/0', apdu, true, {
         priority: 'system',
       });
-      logger.info('knx', 'checkProgrammingMode: sending broadcast', {
-        cemiHex: cemi.toString('hex'),
-      });
-      this.sendCEMI(cemi).catch((err: Error) => {
-        clearTimeout(timer);
-        this.off('_mgmt', onMgmt);
-        reject(err);
-      });
+      const send = (): void => {
+        logger.info('knx', 'checkProgrammingMode: sending broadcast', {
+          cemiHex: cemi.toString('hex'),
+        });
+        this.sendCEMI(cemi).catch((err: Error) => {
+          clearTimeout(timer);
+          clearInterval(repeat);
+          this.off('_mgmt', onMgmt);
+          reject(err);
+        });
+      };
+      // Real live-test finding, 2026-08-31: a single one-shot broadcast at
+      // the start of the wait window only catches a device that is
+      // ALREADY in programming mode at that exact instant - a broadcast
+      // telegram can't retroactively be "seen" by a device that enters
+      // programming mode moments later. Real ETS itself, captured against
+      // this same real HDL device the same day, re-sends its own
+      // equivalent broadcast roughly every 3s for the WHOLE wait window
+      // (docs/knx-device-write-protocol.md §9.4) - matched here so an
+      // operator walking to a device and pressing its button partway
+      // through the window still gets caught, not just one sent at t=0.
+      send();
+      const repeat = setInterval(send, 3000);
     });
   }
 
@@ -633,6 +710,7 @@ export class KnxConnection extends EventEmitter {
         found.set(resp.value.slice(0, 6).toString('hex'), cemi.src);
       };
       const timer = setTimeout(() => {
+        clearInterval(repeat);
         this.off('_mgmt', onMgmt);
         resolve(
           [...found.entries()].map(([serial, src]) => ({ serial, src })),
@@ -643,11 +721,20 @@ export class KnxConnection extends EventEmitter {
       const cemi = buildCEMI(this.localAddr, '0/0/0', apdu, true, {
         priority: 'system',
       });
-      this.sendCEMI(cemi).catch((err: Error) => {
-        clearTimeout(timer);
-        this.off('_mgmt', onMgmt);
-        reject(err);
-      });
+      const send = (): void => {
+        this.sendCEMI(cemi).catch((err: Error) => {
+          clearTimeout(timer);
+          clearInterval(repeat);
+          this.off('_mgmt', onMgmt);
+          reject(err);
+        });
+      };
+      // Same real-hardware finding as checkProgrammingMode() above
+      // (2026-08-31): a one-shot broadcast only catches a device already
+      // in programming mode at the instant it's sent. Re-sent every 3s for
+      // the whole wait window, matching real ETS's own repeat cadence.
+      send();
+      const repeat = setInterval(send, 3000);
     });
   }
 

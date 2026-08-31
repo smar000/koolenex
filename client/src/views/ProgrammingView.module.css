@@ -115,6 +115,21 @@
   color: var(--dim);
   font-size: 9px;
 }
+/* STATUS cell's own stacked layout (badge on top, last-download date
+   underneath) - same visual language as .devNameCol/.mfrLabel above, real
+   request 2026-08-31: "display last download date on the Programming
+   page... Maybe inside the Status badge, in small text?" */
+.statusCol {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+.lastDownloadLabel {
+  color: var(--dim);
+  font-size: 9px;
+  white-space: nowrap;
+}
 /* Address pill, folded into the DEVICE cell in place of its own column
    (see .table's min-width comment). Small/monospace/accent, same visual
    language as .accentMono used to be, just pill-shaped so it doesn't read

@@ -187,6 +187,24 @@ export function useProjectHandlers(
     [state.activeProjectId, state.projectData, pushUndo],
   );
 
+  // Reverts a device's project address back to "unassigned" - real user
+  // request, 2026-08-31, after live testing surfaced the gap: an address
+  // could be assigned but there was no way back short of manually typing
+  // over it. Server refuses (409) if the device already has a physically-
+  // confirmed serial at that address - see the route's own doc comment.
+  const handleUnassignDevice = useCallback(
+    async (deviceId: number) => {
+      if (!state.activeProjectId) return;
+      const updated = await api.unassignDevice(state.activeProjectId, deviceId);
+      dispatch({
+        type: 'PATCH_DEVICE',
+        id: deviceId,
+        patch: updated as Partial<Device>,
+      });
+    },
+    [state.activeProjectId],
+  );
+
   const handleUpdateSpace = useCallback(
     async (spaceId: number, patch: Record<string, unknown>) => {
       if (!state.activeProjectId) return;
@@ -560,6 +578,7 @@ export function useProjectHandlers(
     handleUpdateGA,
     handleRenameGAGroup,
     handleUpdateDevice,
+    handleUnassignDevice,
     handleUpdateSpace,
     handleCreateTopology,
     handleUpdateTopology,

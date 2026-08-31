@@ -13,6 +13,7 @@ import {
   MAX_UPLOAD_BYTES,
   markDeviceModifiedIfProgrammed,
 } from './shared.ts';
+import type { Device } from '../../shared/types.ts';
 
 const router = express.Router();
 const upload = multer({
@@ -151,9 +152,30 @@ router.put(
       track('installation_hints', b.installation_hints);
     if (b.serial_number !== undefined)
       track('serial_number', b.serial_number.trim());
-    if (b.individual_address !== undefined) {
+    if (
+      b.individual_address !== undefined &&
+      b.individual_address !== old.individual_address
+    ) {
       track('individual_address', b.individual_address);
       sets.push('has_address=1');
+      // Real bug found live, 2026-08-31: the address badge went straight
+      // to "blue" (has_address + a non-empty serial_number - see
+      // DeviceAddr, primitives.tsx) the moment a project address was
+      // assigned, even though nothing had been physically written yet.
+      // Root cause: serial_number can carry a real, genuinely-captured
+      // value from a PRIOR, unrelated address/session (this project's own
+      // stated invariant on the write-side, see AddressDeviceModal's own
+      // comment: "separate from whatever value the imported project
+      // itself carried - a canary template can arrive with a real prior
+      // villa's serial baked in") - that old serial is not evidence
+      // anything was ever confirmed at THIS new address. Whenever the
+      // project address genuinely changes, the previously-recorded serial
+      // stops being trustworthy for it and must be cleared, not carried
+      // forward silently.
+      if (!b.serial_number) {
+        sets.push('serial_number=?');
+        vals.push('');
+      }
     }
     if (b.floor_x !== undefined) {
       sets.push('floor_x=?');
@@ -187,6 +209,81 @@ router.put(
       'device',
       (old.individual_address as string) || String(did),
       diffs.join('; ') || 'Updated position',
+    );
+    db.scheduleSave();
+    res.json(db.get('SELECT * FROM devices WHERE id=?', [did]));
+  },
+);
+
+// Reverts a device's project address back to "unassigned" - real user
+// request, 2026-08-31, made explicit after live testing surfaced the gap:
+// the address-assign route (above) can only ever set has_address=1, never
+// back to 0, so a project address picked in error (or one you've simply
+// changed your mind about before writing it anywhere) had no way back.
+// Deliberately refuses to touch a device that's already been physically
+// confirmed (a non-empty serial_number - see the address-change branch
+// above for why that field is trustworthy evidence of a real write) -
+// unassigning a device that's actually live on the bus at that address
+// would silently orphan real commissioning data; that's a different,
+// not-yet-built operation, not this one.
+router.patch(
+  '/projects/:pid/devices/:did/unassign',
+  (req: Request, res: Response): void => {
+    const pid = paramId(req, 'pid');
+    const did = paramId(req, 'did');
+    const dev = db.get<Device>(
+      'SELECT * FROM devices WHERE id=? AND project_id=?',
+      [did, pid],
+    );
+    if (!dev) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    if (!dev.has_address) {
+      res.status(400).json({
+        error: 'not_assigned',
+        message: 'This device has no project address to unassign.',
+      });
+      return;
+    }
+    if (dev.serial_number) {
+      res.status(409).json({
+        error: 'already_written',
+        message:
+          'This device has a physically-confirmed serial at this address - unassigning would orphan real commissioning data. Not supported here.',
+      });
+      return;
+    }
+    // Synthetic placeholder, same convention ets-parser.ts uses for a
+    // device imported with no address at all (device number starting at
+    // 256, past the real 0-255 KNX range, so it can never collide with a
+    // real address) - reuses the device's own current area/line rather
+    // than reconstructing wherever it originally lived in the topology,
+    // and picks the first number in that range not already in use by any
+    // OTHER device in the project (has_address=0 placeholders still
+    // occupy the unique individual_address column, same as a real one).
+    const used = new Set(
+      db
+        .all<{ individual_address: string }>(
+          'SELECT individual_address FROM devices WHERE project_id=? AND area=? AND line=? AND id!=?',
+          [pid, dev.area, dev.line, did],
+        )
+        .map((r) => r.individual_address),
+    );
+    let n = 256;
+    while (used.has(`${dev.area}.${dev.line}.${n}`)) n++;
+    const placeholder = `${dev.area}.${dev.line}.${n}`;
+
+    db.run(
+      'UPDATE devices SET has_address=0, individual_address=?, status=? WHERE id=?',
+      [placeholder, 'unassigned', did],
+    );
+    db.audit(
+      pid,
+      'update',
+      'device',
+      dev.individual_address,
+      `unassigned (was "${dev.individual_address}") on "${dev.name || did}"`,
     );
     db.scheduleSave();
     res.json(db.get('SELECT * FROM devices WHERE id=?', [did]));

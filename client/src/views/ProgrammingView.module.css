@@ -397,6 +397,38 @@
   width: 104px;
   font-size: 9px;
   text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+/* Gentle left-to-right "flow" while a Verify/Program is running - real
+   request 2026-08-31, replacing the global `pulse` class (whole-button
+   opacity fade, global.css) which read as too harsh/flashing on a large
+   filled button. A soft shine band sweeps across the button's own area on
+   a loop, independent of the percentage-fill gradient set inline per-row
+   (that gradient stays on the button's own `background`; this is a
+   separate ::before layer on top of it, not a replacement). */
+.actionBtnRunning::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 40%,
+    color-mix(in srgb, var(--text) 25%, transparent) 50%,
+    transparent 60%
+  );
+  background-size: 60% 100%;
+  background-repeat: no-repeat;
+  animation: actionBtnFlow 1.6s linear infinite;
+  pointer-events: none;
+}
+@keyframes actionBtnFlow {
+  from {
+    background-position: -60% 0;
+  }
+  to {
+    background-position: 160% 0;
+  }
 }
 /* Fixed-width slot for the View/clear-cache icon pair so Verify/Program
    always line up at the same x across rows, whether or not a row has a

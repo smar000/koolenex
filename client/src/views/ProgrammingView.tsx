@@ -710,7 +710,7 @@ export function ProgrammingView() {
                         </div>
                         <div className={styles.verifyBtnWrap}>
                           <Btn
-                            className={`${styles.actionBtn}${verifying ? ' pulse' : ''}`}
+                            className={`${styles.actionBtn}${verifying ? ' ' + styles.actionBtnRunning : ''}`}
                             onClick={() =>
                               verifyDevice(d.id, d.individual_address)
                             }
@@ -775,7 +775,7 @@ export function ProgrammingView() {
                           }}
                         >
                         <Btn
-                          className={`${styles.actionBtn}${prog?.state === 'running' ? ' pulse' : ''}`}
+                          className={`${styles.actionBtn}${prog?.state === 'running' ? ' ' + styles.actionBtnRunning : ''}`}
                           onClick={() => {
                             // Real request 2026-08-30: only offer the
                             // Full/Partial choice when there's something a
@@ -834,11 +834,14 @@ export function ProgrammingView() {
                           // explicit request, replacing that column
                           // entirely. `style` is spread last inside Btn, so
                           // this overrides its usual disabled-state gray.
-                          // The `pulse` class (global.css) and `wait`
-                          // cursor make clear the download is still active
-                          // during a real, long, percentage-static stretch
-                          // late in a write (observed live: ~20s+ sitting
-                          // at 80% before jumping to 100%) rather than
+                          // The `actionBtnRunning` flow animation (below,
+                          // this module's own CSS - not the global `pulse`
+                          // whole-button opacity fade, found too harsh on a
+                          // filled button, real request 2026-08-31) and
+                          // `wait` cursor make clear the download is still
+                          // active during a real, long, percentage-static
+                          // stretch late in a write (observed live: ~20s+
+                          // sitting at 80% before jumping to 100%) rather than
                           // reading as stalled.
                           style={
                             prog?.state === 'running'

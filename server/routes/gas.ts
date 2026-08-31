@@ -6,6 +6,7 @@ import { buildGAMaps } from '../../shared/ga-maps.ts';
 import { validateBody, paramId } from '../validate.ts';
 import { makeUpdateBuilder } from './shared.ts';
 import { invalidateGaDptCache } from './bus.ts';
+import { buildFlags } from '../ets-parser.ts';
 import type {
   GroupAddress,
   GaGroupName,
@@ -272,6 +273,100 @@ router.patch(
       ga_send: gaSend,
       ga_receive: gaRecv,
     });
+  },
+);
+
+// Update Object 3 (Group Object Table) flags/priority/read-on-init on a com
+// object. Writes the dedicated raw columns (read/write/comm/tx/upd/
+// read_on_init/priority) that bus.ts's buildDeviceProgramming() already
+// reads directly when constructing the real device write - see that
+// function's groupObjectTable comment. `flags` (the composite display
+// string, e.g. "CWTU") is recomputed here via the same buildFlags() helper
+// ets-parser.ts uses when first importing a project, so the two stay in
+// sync; `flags` itself is never read back for a device write (see its own
+// "lossy" doc comment on ComObject) - it's display-only.
+router.patch(
+  '/projects/:pid/comobjects/:coid/flags',
+  (req: Request, res: Response): void => {
+    const pid = paramId(req, 'pid');
+    const coid = paramId(req, 'coid');
+    const co = db.get<ComObjectWithDevice>(
+      'SELECT * FROM com_objects WHERE id=? AND project_id=?',
+      [coid, pid],
+    );
+    if (!co) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    const b = validateBody(
+      req,
+      z.object({
+        read: z.boolean().optional(),
+        write: z.boolean().optional(),
+        comm: z.boolean().optional(),
+        tx: z.boolean().optional(),
+        upd: z.boolean().optional(),
+        read_on_init: z.boolean().optional(),
+        priority: z.enum(['low', 'alarm', 'high', 'system']).optional(),
+      }),
+    );
+
+    const next = {
+      read: b.read ?? !!co.read,
+      write: b.write ?? !!co.write,
+      comm: b.comm ?? !!co.comm,
+      tx: b.tx ?? !!co.tx,
+      upd: b.upd ?? !!co.upd,
+      read_on_init: b.read_on_init ?? !!co.read_on_init,
+      priority: b.priority ?? (co.priority as string) ?? 'low',
+    };
+    const nextFlags = buildFlags({
+      read: next.read,
+      write: next.write,
+      comm: next.comm,
+      tx: next.tx,
+      u: next.upd,
+    });
+
+    db.run(
+      `UPDATE com_objects SET read=?, write=?, comm=?, tx=?, upd=?, read_on_init=?, priority=?, flags=? WHERE id=?`,
+      [
+        next.read ? 1 : 0,
+        next.write ? 1 : 0,
+        next.comm ? 1 : 0,
+        next.tx ? 1 : 0,
+        next.upd ? 1 : 0,
+        next.read_on_init ? 1 : 0,
+        next.priority,
+        nextFlags,
+        co.id,
+      ],
+    );
+
+    const oldFlags = (co.flags as string) || '';
+    const oldPriority = (co.priority as string) || 'low';
+    const oldReadOnInit = !!co.read_on_init;
+    const changeParts: string[] = [];
+    if (oldFlags !== nextFlags)
+      changeParts.push(`flags: "${oldFlags}" → "${nextFlags}"`);
+    if (oldPriority !== next.priority)
+      changeParts.push(`priority: "${oldPriority}" → "${next.priority}"`);
+    if (oldReadOnInit !== next.read_on_init)
+      changeParts.push(
+        `read_on_init: ${oldReadOnInit} → ${next.read_on_init}`,
+      );
+    if (changeParts.length) {
+      db.audit(
+        pid,
+        'update',
+        'com_object',
+        `CO ${co.object_number}`,
+        `${changeParts.join(', ')} on "${(co.name as string) || co.object_number}"`,
+      );
+      db.scheduleSave();
+    }
+
+    res.json({ ...co, ...next, flags: nextFlags });
   },
 );
 

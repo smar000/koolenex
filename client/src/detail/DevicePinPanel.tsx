@@ -38,6 +38,7 @@ interface DevicePinPanelProps {
   onUpdateDevice: any;
   onAddDevice: any;
   onUpdateComObjectGAs: any;
+  onUpdateComObjectFlags?: any;
   activeProjectId: any;
 }
 
@@ -58,6 +59,7 @@ export function DevicePinPanel({
   onUpdateDevice,
   onAddDevice,
   onUpdateComObjectGAs,
+  onUpdateComObjectFlags,
   activeProjectId,
 }: DevicePinPanelProps) {
   const pin = useContext(PinContext);
@@ -634,7 +636,10 @@ export function DevicePinPanel({
                         </span>
                       </TD>
                       <TD>
-                        <span className={styles.dimMono}>{co.flags}</span>
+                        <ComObjectFlagsCell
+                          co={co}
+                          onUpdateComObjectFlags={onUpdateComObjectFlags}
+                        />
                       </TD>
                       <TD>
                         <span className={styles.gaCellWrap}>
@@ -810,6 +815,104 @@ function ComObjectGAAdder({ co, gaMap, onAdd }: ComObjectGAAdderProps) {
         <div className={styles.gaAdderEmpty}>No matching GAs</div>
       )}
     </div>
+  );
+}
+
+// Object 3 (Group Object Table) flags/priority editing - a click on the
+// FLAGS cell opens the checkboxes + priority editor. Every change saves
+// immediately (no separate Save button), matching this panel's existing
+// GA-link editing convention (ComObjectGAAdder above). These are the same
+// raw columns bus.ts's buildDeviceProgramming() reads when constructing a
+// real Object 3 write - see server/routes/gas.ts's flags-route comment -
+// so an edit here takes effect on the device on the next Program/Verify,
+// same as a parameter or GA-link edit.
+const CO_FLAG_FIELDS: { key: 'comm' | 'read' | 'write' | 'tx' | 'upd'; label: string }[] = [
+  { key: 'comm', label: 'Communication' },
+  { key: 'read', label: 'Read' },
+  { key: 'write', label: 'Write' },
+  { key: 'tx', label: 'Transmit' },
+  { key: 'upd', label: 'Update' },
+];
+const CO_PRIORITIES = ['low', 'alarm', 'high', 'system'] as const;
+
+interface ComObjectFlagsCellProps {
+  co: any;
+  onUpdateComObjectFlags?: (coId: number, body: Record<string, unknown>) => void;
+}
+
+function ComObjectFlagsCell({ co, onUpdateComObjectFlags }: ComObjectFlagsCellProps) {
+  const [open, setOpen] = useState(false);
+
+  if (!onUpdateComObjectFlags) {
+    return <span className={styles.dimMono}>{co.flags}</span>;
+  }
+
+  return (
+    <span className={styles.flagsCellWrap}>
+      <span
+        onClick={() => setOpen((o) => !o)}
+        className={styles.flagsCellClickable}
+        title="Click to edit flags, priority and Read-On-Init"
+      >
+        {co.flags}
+      </span>
+      {open && (
+        <>
+          <div
+            className={styles.flagsPopoverOverlay}
+            onClick={() => setOpen(false)}
+          />
+          <div className={styles.flagsPopover}>
+            <div className={styles.flagsPopoverLabel}>FLAGS</div>
+            <div className={styles.flagsPopoverGrid}>
+              {CO_FLAG_FIELDS.map(({ key, label }) => (
+                <label key={key} className={styles.flagsCheckRow}>
+                  <input
+                    type="checkbox"
+                    checked={!!co[key]}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                      onUpdateComObjectFlags(co.id, {
+                        [key]: e.target.checked,
+                      })
+                    }
+                    className={styles.flagsCheckbox}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            <label className={styles.flagsCheckRow}>
+              <input
+                type="checkbox"
+                checked={!!co.read_on_init}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  onUpdateComObjectFlags(co.id, {
+                    read_on_init: e.target.checked,
+                  })
+                }
+                className={styles.flagsCheckbox}
+              />
+              Read On Init
+            </label>
+            <div className={styles.flagsPopoverDivider} />
+            <div className={styles.flagsPopoverLabel}>PRIORITY</div>
+            <select
+              value={co.priority || 'low'}
+              onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+                onUpdateComObjectFlags(co.id, { priority: e.target.value })
+              }
+              className={styles.flagsPrioritySelect}
+            >
+              {CO_PRIORITIES.map((p) => (
+                <option key={p} value={p}>
+                  {p[0]!.toUpperCase() + p.slice(1)}
+                </option>
+              ))}
+            </select>
+          </div>
+        </>
+      )}
+    </span>
   );
 }
 

@@ -387,6 +387,7 @@ export default function App() {
       deleteGA: projectHandlers.handleDeleteGA,
       addDevice: projectHandlers.handleAddDevice,
       updateComObjectGAs: projectHandlers.handleUpdateComObjectGAs,
+      updateComObjectFlags: projectHandlers.handleUpdateComObjectFlags,
       addScannedDevice: projectHandlers.handleAddScannedDevice,
     }),
     [projectHandlers],

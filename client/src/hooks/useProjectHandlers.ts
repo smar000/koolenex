@@ -389,6 +389,41 @@ export function useProjectHandlers(
     [state.activeProjectId],
   );
 
+  const handleUpdateComObjectFlags = useCallback(
+    async (coId: number, body: any) => {
+      if (!state.activeProjectId) return;
+      const updated = (await api.updateComObjectFlags(
+        state.activeProjectId,
+        coId,
+        body,
+      )) as {
+        read: number;
+        write: number;
+        comm: number;
+        tx: number;
+        upd: number;
+        read_on_init: number;
+        priority: string;
+        flags: string;
+      };
+      dispatch({
+        type: 'PATCH_COMOBJECT',
+        id: coId,
+        patch: {
+          read: updated.read,
+          write: updated.write,
+          comm: updated.comm,
+          tx: updated.tx,
+          upd: updated.upd,
+          read_on_init: updated.read_on_init,
+          priority: updated.priority,
+          flags: updated.flags,
+        },
+      });
+    },
+    [state.activeProjectId],
+  );
+
   const handleAddScannedDevice = useCallback(
     async (address: string) => {
       if (!state.activeProjectId) return;
@@ -428,6 +463,7 @@ export function useProjectHandlers(
     handleDeleteGA,
     handleAddDevice,
     handleUpdateComObjectGAs,
+    handleUpdateComObjectFlags,
     handleAddScannedDevice,
   };
 }

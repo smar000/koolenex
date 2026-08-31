@@ -88,6 +88,7 @@ export interface ProjectActions {
   deleteGA: (gaId: number) => Promise<void>;
   addDevice: (body: Record<string, unknown>) => Promise<unknown>;
   updateComObjectGAs: (coId: number, body: unknown) => Promise<void>;
+  updateComObjectFlags: (coId: number, body: unknown) => Promise<void>;
   addScannedDevice: (address: string) => Promise<void>;
 }
 

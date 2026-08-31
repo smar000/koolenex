@@ -1723,6 +1723,97 @@ describe('Com Objects Listing', () => {
   });
 });
 
+// ── Com Object Flags/Priority (Object 3) ────────────────────────────────────
+
+describe('Com Object Flags', () => {
+  let pid, devId, coId;
+
+  before(async () => {
+    const { data: proj } = await req('POST', '/projects', {
+      name: 'CO Flags Tests',
+    });
+    pid = proj.id;
+    const { data: dev } = await req('POST', `/projects/${pid}/devices`, {
+      individual_address: '1.1.1',
+      name: 'Test Actuator',
+      area: 1,
+      line: 1,
+    });
+    devId = dev.id;
+    coId = db.run(
+      'INSERT INTO com_objects (project_id, device_id, object_number, name, read, write, comm, tx, upd, read_on_init, priority, flags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+      [pid, devId, 0, 'Switch Output 1', 0, 1, 1, 1, 0, 0, 'low', 'CWT'],
+    ).lastInsertRowid;
+  });
+
+  after(async () => {
+    await req('DELETE', `/projects/${pid}`);
+  });
+
+  it('PATCH flips a single flag and recomputes the composite flags string', async () => {
+    const { status, data } = await req(
+      'PATCH',
+      `/projects/${pid}/comobjects/${coId}/flags`,
+      { read: true },
+    );
+    assert.equal(status, 200);
+    assert.equal(data.read, true);
+    assert.equal(data.flags, 'CRWT');
+
+    const row = db.get(
+      'SELECT read, write, comm, tx, upd, flags FROM com_objects WHERE id=?',
+      [coId],
+    );
+    assert.equal(row.read, 1);
+    assert.equal(row.flags, 'CRWT');
+  });
+
+  it('PATCH updates priority independently of the flag bits', async () => {
+    const { status, data } = await req(
+      'PATCH',
+      `/projects/${pid}/comobjects/${coId}/flags`,
+      { priority: 'alarm' },
+    );
+    assert.equal(status, 200);
+    assert.equal(data.priority, 'alarm');
+    const row = db.get('SELECT priority FROM com_objects WHERE id=?', [coId]);
+    assert.equal(row.priority, 'alarm');
+  });
+
+  it('PATCH toggles read_on_init', async () => {
+    const { status, data } = await req(
+      'PATCH',
+      `/projects/${pid}/comobjects/${coId}/flags`,
+      { read_on_init: true },
+    );
+    assert.equal(status, 200);
+    assert.equal(data.read_on_init, true);
+    const row = db.get(
+      'SELECT read_on_init FROM com_objects WHERE id=?',
+      [coId],
+    );
+    assert.equal(row.read_on_init, 1);
+  });
+
+  it('rejects an unknown priority value', async () => {
+    const { status } = await req(
+      'PATCH',
+      `/projects/${pid}/comobjects/${coId}/flags`,
+      { priority: 'urgent' },
+    );
+    assert.equal(status, 400);
+  });
+
+  it('404s for a com object that does not belong to the project', async () => {
+    const { status } = await req(
+      'PATCH',
+      `/projects/${pid}/comobjects/99999/flags`,
+      { read: true },
+    );
+    assert.equal(status, 404);
+  });
+});
+
 // ── Audit Log ────────────────────────────────────────────────────────────────
 
 describe('Audit Log', () => {

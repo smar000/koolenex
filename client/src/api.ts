@@ -274,6 +274,16 @@ export const api = {
       `/projects/${pid}/comobjects/${coid}/gas`,
       body,
     ),
+  updateComObjectFlags: (
+    pid: number,
+    coid: number,
+    body: Record<string, unknown>,
+  ) =>
+    req<ComObjectWithDevice>(
+      'PATCH',
+      `/projects/${pid}/comobjects/${coid}/flags`,
+      body,
+    ),
 
   // Catalog
   getCatalog: (pid: number) =>

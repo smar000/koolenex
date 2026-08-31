@@ -40,6 +40,15 @@ export function ProgrammingView() {
     router: 'var(--router)',
     generic: 'var(--muted)',
   };
+  // Real request 2026-08-31: the device-type icon's color had no
+  // explanation on hover - operators had to be told, rather than being
+  // able to see, what amber/blue/green meant.
+  const DEVICE_TYPE_LABEL: Record<string, string> = {
+    actuator: 'Actuator',
+    sensor: 'Sensor',
+    router: 'Router',
+    generic: 'Generic device',
+  };
   const [progress, setProgress] = useState<Record<string, { state: string }>>(
     {},
   );
@@ -599,6 +608,10 @@ export function ProgrammingView() {
                           style={{
                             color: COLMAP[d.device_type] || 'var(--muted)',
                           }}
+                          title={
+                            DEVICE_TYPE_LABEL[d.device_type] ||
+                            'Generic device'
+                          }
                         />
                         <DeviceAddr
                           device={d}
@@ -1037,6 +1050,10 @@ export function ProgrammingView() {
                     color:
                       COLMAP[slideOverDevice.device_type] || 'var(--muted)',
                   }}
+                  title={
+                    DEVICE_TYPE_LABEL[slideOverDevice.device_type] ||
+                    'Generic device'
+                  }
                 />
                 {slideOverDevice.has_address
                   ? slideOverDevice.individual_address

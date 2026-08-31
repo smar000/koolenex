@@ -98,12 +98,19 @@ interface DeviceTypeIconProps {
   type?: string;
   size?: number;
   style?: React.CSSProperties;
+  // Real request 2026-08-31: the icon's own color (actuator=blue,
+  // sensor=green, router=amber - see COLMAP call sites) had no
+  // explanation on hover, so the meaning had to be told rather than
+  // discovered. Optional so callers that don't want a tooltip (or
+  // already wrap this in their own) aren't forced into one.
+  title?: string;
 }
 
 export function DeviceTypeIcon({
   type,
   size = 13,
   style,
+  title,
 }: DeviceTypeIconProps) {
   // detail = SVG elements drawn inside the panel area (x 1.5-8.5, y 3.8-8.0)
   let detail: React.ReactNode;
@@ -195,7 +202,7 @@ export function DeviceTypeIcon({
     );
   }
   return (
-    <span style={style}>
+    <span style={style} title={title}>
       <IconDinBase size={size} detail={detail} />
     </span>
   );

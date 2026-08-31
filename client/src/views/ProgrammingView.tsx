@@ -1182,7 +1182,7 @@ function DownloadModePopover({
       <div className={styles.downloadModeHeader}>DOWNLOAD MODE</div>
       <button
         type="button"
-        className={styles.downloadModeOption}
+        className={`${styles.downloadModeOption} ${styles.downloadModeOptionFull}`}
         onClick={() => onChoose('full')}
       >
         <span
@@ -1199,7 +1199,7 @@ function DownloadModePopover({
       </button>
       <button
         type="button"
-        className={styles.downloadModeOption}
+        className={`${styles.downloadModeOption} ${styles.downloadModeOptionPartial}`}
         onClick={() => onChoose('partial')}
         disabled={partialDisabled}
         title={

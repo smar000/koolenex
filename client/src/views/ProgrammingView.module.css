@@ -546,7 +546,10 @@
   padding: 4px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  /* 3px -> 6px alongside the option rows gaining their own visible tinted
+     background/border (above) - the tighter gap read fine against plain
+     rows, but crowded two now-bordered rows together. */
+  gap: 6px;
   /* Guards against a transient frame where `pos` was computed from a
      stale/zero rect (e.g. right after mount, before layout settles) -
      keeps the popover fully offscreen rather than flashing at (0,0). */
@@ -571,7 +574,7 @@
 .downloadModeOption {
   text-align: left;
   background: none;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 8px;
   padding: 11px 10px;
   cursor: pointer;
@@ -580,12 +583,32 @@
   align-items: flex-start;
   gap: 12px;
 }
-.downloadModeOption:hover:not(:disabled) {
-  background: var(--bg);
-}
 .downloadModeOption:disabled {
   cursor: not-allowed;
   opacity: 0.4;
+}
+/* Real request 2026-08-31: each row's own background now carries the same
+   color its icon chip already did, rather than the icon being the only
+   colored element on an otherwise flat row - same tint-percentage
+   convention the app already uses elsewhere for a semantic row/badge
+   (e.g. App.module.css's .busConnected/.busDisconnected: ~9% bg,
+   ~19% border), not a new pattern invented for this popover. Hover
+   strengthens the same tint rather than switching to a flat neutral
+   background, so the row's color identity doesn't disappear right when
+   it's actually being considered. */
+.downloadModeOptionFull {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.downloadModeOptionFull:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.downloadModeOptionPartial {
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+  border-color: color-mix(in srgb, var(--amber) 18%, transparent);
+}
+.downloadModeOptionPartial:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--amber) 15%, transparent);
 }
 /* Icon chip color reflects each mode's own character, not just a shared
    accent tint - Full is the safe/thorough option (blue, same language the

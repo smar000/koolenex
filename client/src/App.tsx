@@ -389,6 +389,7 @@ export default function App() {
       updateComObjectGAs: projectHandlers.handleUpdateComObjectGAs,
       updateComObjectFlags: projectHandlers.handleUpdateComObjectFlags,
       addScannedDevice: projectHandlers.handleAddScannedDevice,
+      applyDeviceStatus: projectHandlers.applyDeviceStatus,
     }),
     [projectHandlers],
   );

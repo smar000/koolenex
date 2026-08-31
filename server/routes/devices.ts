@@ -11,6 +11,7 @@ import {
   APPS_DIR,
   makeUpdateBuilder,
   MAX_UPLOAD_BYTES,
+  markDeviceModifiedIfProgrammed,
 } from './shared.ts';
 
 const router = express.Router();
@@ -410,8 +411,12 @@ router.patch(
       diffs.join('; ') ||
         `Updated parameters on "${(devPV.name as string) || String(did)}"`,
     );
+    let deviceStatus: string | null = null;
+    if (diffs.length) {
+      deviceStatus = markDeviceModifiedIfProgrammed(pid, did);
+    }
     db.scheduleSave();
-    res.json({ ok: true });
+    res.json({ ok: true, ...(deviceStatus ? { device_status: deviceStatus } : {}) });
   },
 );
 

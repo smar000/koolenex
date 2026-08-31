@@ -221,7 +221,7 @@ export const api = {
     did: number,
     values: Record<string, unknown>,
   ) =>
-    req<{ ok: boolean }>(
+    req<{ ok: boolean; device_status?: string }>(
       'PATCH',
       `/projects/${pid}/devices/${did}/param-values`,
       values,

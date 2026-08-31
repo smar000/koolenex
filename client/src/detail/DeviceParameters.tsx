@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api.ts';
-import { useDpt } from '../contexts.ts';
+import { useDpt, useProjectActions } from '../contexts.ts';
 import { PinAddr, TH, TD, coGAs } from '../primitives.tsx';
 import styles from './DeviceParameters.module.css';
 
@@ -115,6 +115,7 @@ export function DeviceParameters({ dev, projectId }: DeviceParametersProps) {
   const [comObjects, setComObjects] = useState<any[]>([]);
 
   const devId = dev.id;
+  const { applyDeviceStatus } = useProjectActions();
 
   // Related communication objects (and their GA links) grouped by channel -
   // parameters and com objects are separate KNX concepts with no direct
@@ -190,7 +191,14 @@ export function DeviceParameters({ dev, projectId }: DeviceParametersProps) {
     setSaving(true);
     setSaveErr(null);
     try {
-      await api.saveParamValues(projectId, devId, values);
+      const result = await api.saveParamValues(projectId, devId, values);
+      // Server flips devices.status 'programmed' -> 'modified' when a
+      // parameter genuinely changed on an already-programmed device - see
+      // markDeviceModifiedIfProgrammed() (server/routes/shared.ts). Applied
+      // locally (not another api.setDeviceStatus round trip - the server
+      // already wrote and audited it) so the Programming page's badge
+      // reflects the edit immediately, not only after the next Verify.
+      if (result?.device_status) applyDeviceStatus(devId, result.device_status);
       setDirty(false);
     } catch (e: any) {
       setSaveErr(e.message || 'Save failed');

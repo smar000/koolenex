@@ -3,6 +3,7 @@ import fs from 'fs';
 import { XMLParser } from 'fast-xml-parser';
 import type { DptInfoEntry } from '../../shared/types.ts';
 import { logger } from '../log.ts';
+import * as db from '../db.ts';
 
 /** Max upload size for .knxproj / .knxprod / floor-plan files (200 MB). */
 export const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
@@ -190,6 +191,43 @@ export function makeUpdateBuilder<T extends object>(old: T): UpdateBuilder {
     diffs.push(`${col}: "${rec[col] ?? ''}" → "${newVal}"`);
   };
   return { track, sets, vals, diffs };
+}
+
+// Real request, 2026-08-31: editing a com object's flags/priority, GA
+// links, or parameter values previously left the device's own PROGRAMMED/
+// MODIFIED badge untouched - that badge (devices.status) was only ever
+// written by an explicit Verify/Program call, so a local edit that a
+// Verify hadn't yet run against sat silently unreflected in the UI. User
+// feedback, verbatim: "If we make a change, we need to indicate this
+// somehow" - waiting for a live Verify to reveal the drift isn't good
+// enough; the moment we know a target diverges from the last-known-good
+// state, the UI should say so. Called from every route that edits data
+// feeding into a real device write (com-object flags, GA links, param
+// values) right after it confirms a genuine change was made. Only flips
+// 'programmed' -> 'modified' - 'unassigned'/other statuses are left alone
+// (nothing to mark dirty if the device was never programmed in the first
+// place), and it's a no-op (no audit spam) if the device is already
+// 'modified'. Returns the resulting status so the caller can include it
+// in its response for the frontend to dispatch SET_DEVICE_STATUS.
+export function markDeviceModifiedIfProgrammed(
+  pid: number,
+  deviceId: number,
+): string | null {
+  const dev = db.get<{ status: string; name: string; individual_address: string }>(
+    'SELECT status, name, individual_address FROM devices WHERE id=? AND project_id=?',
+    [deviceId, pid],
+  );
+  if (!dev) return null;
+  if (dev.status !== 'programmed') return dev.status;
+  db.run('UPDATE devices SET status=? WHERE id=?', ['modified', deviceId]);
+  db.audit(
+    pid,
+    'update',
+    'device',
+    dev.individual_address || String(deviceId),
+    `status: "programmed" → "modified" on "${dev.name || deviceId}" (edited while programmed)`,
+  );
+  return 'modified';
 }
 
 export function saveModelsAndMasterXml(

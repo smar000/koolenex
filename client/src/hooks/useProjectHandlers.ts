@@ -375,7 +375,13 @@ export function useProjectHandlers(
         state.activeProjectId,
         coId,
         body,
-      )) as { ga_address: string; ga_send: string; ga_receive: string };
+      )) as {
+        ga_address: string;
+        ga_send: string;
+        ga_receive: string;
+        device_id: number;
+        device_status?: string;
+      };
       dispatch({
         type: 'PATCH_COMOBJECT',
         id: coId,
@@ -385,6 +391,21 @@ export function useProjectHandlers(
           ga_receive: updated.ga_receive,
         },
       });
+      // Server flips devices.status 'programmed' -> 'modified' when a GA
+      // link genuinely changed on an already-programmed device - see
+      // markDeviceModifiedIfProgrammed() (server/routes/shared.ts). Applied
+      // here as a local dispatch (not another api.setDeviceStatus round
+      // trip - the server already wrote and audited it) so the
+      // Programming page's badge reflects the edit immediately, not only
+      // after the next Verify. Real user feedback, 2026-08-31: "If we make
+      // a change, we need to indicate this somehow."
+      if (updated.device_status) {
+        dispatch({
+          type: 'SET_DEVICE_STATUS',
+          deviceId: updated.device_id,
+          status: updated.device_status as any,
+        });
+      }
     },
     [state.activeProjectId],
   );
@@ -405,6 +426,8 @@ export function useProjectHandlers(
         read_on_init: number;
         priority: string;
         flags: string;
+        device_id: number;
+        device_status?: string;
       };
       dispatch({
         type: 'PATCH_COMOBJECT',
@@ -420,9 +443,22 @@ export function useProjectHandlers(
           flags: updated.flags,
         },
       });
+      // See the matching comment in handleUpdateComObjectGAs above - same
+      // server-side markDeviceModifiedIfProgrammed() mechanism.
+      if (updated.device_status) {
+        dispatch({
+          type: 'SET_DEVICE_STATUS',
+          deviceId: updated.device_id,
+          status: updated.device_status as any,
+        });
+      }
     },
     [state.activeProjectId],
   );
+
+  const applyDeviceStatus = useCallback((deviceId: number, status: string) => {
+    dispatch({ type: 'SET_DEVICE_STATUS', deviceId, status: status as any });
+  }, []);
 
   const handleAddScannedDevice = useCallback(
     async (address: string) => {
@@ -465,5 +501,6 @@ export function useProjectHandlers(
     handleUpdateComObjectGAs,
     handleUpdateComObjectFlags,
     handleAddScannedDevice,
+    applyDeviceStatus,
   };
 }

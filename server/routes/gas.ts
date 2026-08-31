@@ -4,7 +4,7 @@ import { z } from 'zod';
 import * as db from '../db.ts';
 import { buildGAMaps } from '../../shared/ga-maps.ts';
 import { validateBody, paramId } from '../validate.ts';
-import { makeUpdateBuilder } from './shared.ts';
+import { makeUpdateBuilder, markDeviceModifiedIfProgrammed } from './shared.ts';
 import { invalidateGaDptCache } from './bus.ts';
 import { buildFlags } from '../ets-parser.ts';
 import type {
@@ -266,12 +266,17 @@ router.patch(
       `CO ${co.object_number}`,
       `ga_address: "${oldGAs}" → "${newGAs}" on "${(co.name as string) || co.object_number}"`,
     );
+    let deviceStatus: string | null = null;
+    if (oldGAs !== newGAs) {
+      deviceStatus = markDeviceModifiedIfProgrammed(pid, co.device_id as number);
+    }
     db.scheduleSave();
     res.json({
       ...co,
       ga_address: gaAddr.join(' '),
       ga_send: gaSend,
       ga_receive: gaRecv,
+      ...(deviceStatus ? { device_status: deviceStatus } : {}),
     });
   },
 );
@@ -355,6 +360,7 @@ router.patch(
       changeParts.push(
         `read_on_init: ${oldReadOnInit} → ${next.read_on_init}`,
       );
+    let deviceStatus: string | null = null;
     if (changeParts.length) {
       db.audit(
         pid,
@@ -363,10 +369,16 @@ router.patch(
         `CO ${co.object_number}`,
         `${changeParts.join(', ')} on "${(co.name as string) || co.object_number}"`,
       );
+      deviceStatus = markDeviceModifiedIfProgrammed(pid, co.device_id as number);
       db.scheduleSave();
     }
 
-    res.json({ ...co, ...next, flags: nextFlags });
+    res.json({
+      ...co,
+      ...next,
+      flags: nextFlags,
+      ...(deviceStatus ? { device_status: deviceStatus } : {}),
+    });
   },
 );
 

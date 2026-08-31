@@ -90,6 +90,13 @@ export interface ProjectActions {
   updateComObjectGAs: (coId: number, body: unknown) => Promise<void>;
   updateComObjectFlags: (coId: number, body: unknown) => Promise<void>;
   addScannedDevice: (address: string) => Promise<void>;
+  // Local-only store update (no API call - the caller already got this
+  // status from a server response that persisted it, e.g.
+  // api.saveParamValues's device_status field). Lets components outside
+  // useProjectHandlers.ts (DeviceParameters.tsx) reflect a server-side
+  // markDeviceModifiedIfProgrammed() flip immediately without a redundant
+  // second PATCH /devices/:id/status round trip.
+  applyDeviceStatus: (deviceId: number, status: string) => void;
 }
 
 export const ProjectActionsCtx = createContext<ProjectActions | null>(null);

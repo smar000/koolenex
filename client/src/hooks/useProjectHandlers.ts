@@ -152,19 +152,35 @@ export function useProjectHandlers(
       if (!prev) return;
       const prevPatch = prevSnapshot(prev, patch);
       const detail = diffDetail(prev, patch);
-      await api.updateDevice(state.activeProjectId, deviceId, patch);
+      // Dispatch the server's actual returned row, not the raw local
+      // `patch` we sent - real bug, found live 2026-08-31: PUT
+      // /devices/:id has a real server-side side effect
+      // (individual_address set => has_address forced to 1, see
+      // server/routes/devices.ts) the caller never explicitly asked for
+      // in its own patch object. Dispatching the stale local `patch`
+      // (which never mentions has_address at all) left the client's own
+      // devices array believing has_address was still 0 even though the
+      // DB genuinely had it as 1 - reproduced via
+      // AssignProjectAddressModal: address saved correctly server-side
+      // (confirmed via the DB/audit log), but the UI kept showing an
+      // empty address badge and a disabled Program button.
+      const updated = await api.updateDevice(
+        state.activeProjectId,
+        deviceId,
+        patch,
+      );
       dispatch({
         type: 'PATCH_DEVICE',
         id: deviceId,
-        patch: patch as Partial<Device>,
+        patch: updated as Partial<Device>,
       });
       const pid = state.activeProjectId;
       pushUndo(`Edit device ${prev.individual_address}`, detail, async () => {
-        await api.updateDevice(pid, deviceId, prevPatch);
+        const reverted = await api.updateDevice(pid, deviceId, prevPatch);
         dispatch({
           type: 'PATCH_DEVICE',
           id: deviceId,
-          patch: prevPatch as Partial<Device>,
+          patch: reverted as Partial<Device>,
         });
       });
     },

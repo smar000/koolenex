@@ -649,6 +649,59 @@ take effect on real hardware (a device moved from its factory-default address to
 address) even before this correction; the correction fixes its own read-verify step, which had
 been silently failing due to the wrong response-payload decode above.
 
+### 9.3 Real ETS Factory Reset procedure, confirmed byte-for-byte 🟢
+
+Not yet implemented in koolenex — captured as reference for a future factory-reset feature.
+Sourced from a real tshark capture of ETS performing "Factory Reset" against an HDL actuator
+(`M/AG40B.1`, app `M-0073_A-20A9-10-EAA5`) on this project's own testbed, real-hardware button
+press required (ETS did not know the device's serial number beforehand). Full sequence, in order:
+
+1. **Discovery**: broadcast `A_IndividualAddress_Read` (`PhysicalAddress_Read`, APCI `0x0004`)
+   every ~3s until the device (button held) answers with `A_IndividualAddress_Response`
+   (`0x0005`), carrying its *current* address as the reply's cEMI source.
+2. **Identify**: point-to-point `T_Connect` to that address, `A_DeviceDescriptor_Read` (confirms
+   mask version), `A_PropertyValue_Read` on `PID_LOAD_STATE_CONTROL`-family property 56.
+3. **Authorize**: `A_Authorize_Request` (APCI `0x03D1`) with key `FFFFFFFF` — the standard
+   default/no-security key — unlocks write access. Response `A_Authorize_Response` (`0x03D2`).
+4. **Per-channel reset sweep**: `A_PropertyValue_Write` (APCI `0x03D7`), same property ID (5),
+   same 10-byte payload `04 00 00 00 00 00 00 00 00 00`, **repeated once per functional channel
+   with Object Index incrementing 1→2→3→4→5** (this device has 5 channel-family interface
+   objects) — each acknowledged individually. Reads `PID_ORDER_INFO`-family property 11
+   afterward (unchanged, identity confirmation only).
+5. **Exit programming mode, explicitly**: `A_PropertyValue_Write` on **Object Index 0, PID 54
+   (`PID_PROGMODE`) = `0x00`** — a real, separate command, not an implicit side effect of the
+   later Restart/address-write. This is the mechanism a future koolenex factory-reset (or
+   address-write) implementation should call to make the device visibly leave programming mode,
+   matching real ETS.
+6. **Disconnect** the point-to-point session.
+7. **Address reset via serial**: broadcast `A_IndividualAddressSerialNumber_Write` (`0x03DE`) —
+   `[serial(6)][newAddr(2)][4 reserved zero bytes]`, using the serial ETS just learned from step 4
+   (`00733c005b42` in this capture) — **newAddr = `15.15.255`**, the standard KNX
+   factory/unassigned individual address. This step, not the button-press mechanism, is what
+   actually resets the *address* — steps 1–6 handle programming-mode discovery and application/
+   parameter content, not addressing.
+8. **Verify**: `A_IndividualAddressSerialNumber_Read` (`0x03DC`) by the same serial, retried once
+   after a ~3s timeout with no answer; the eventual `A_IndividualAddressSerialNumber_Response`
+   (`0x03DD`) carries cEMI source `15.15.255`, confirming the reset took effect.
+
+Two real findings worth carrying into a future implementation:
+
+- **Real ETS Factory Reset is three distinct things** (per-channel parameter reset, explicit
+  programming-mode exit, address reset to `15.15.255`), not just an address change — a koolenex
+  "factory reset" feature that only reset the address would leave real device-side application
+  state behind.
+- **A device can retain its individual address indefinitely if never explicitly addressed back to
+  `15.15.255`** — confirmed directly: this same device answered a later, unrelated discovery
+  broadcast still claiming a stale address (`1.1.11`) left over from an *earlier, unrelated*
+  koolenex test days before, with no koolenex-side record of it (`has_address: 0` in the
+  project DB) - the device's own real state and koolenex's DB view of it had silently diverged.
+  koolenex has no equivalent "reset the address back to default" capability yet - `writeIndividualAddressBySerial()`/`programIA()` can only assign a new specific address, not restore
+  the KNX factory default.
+
+Capture files: `docs/data/captures/2026-08-31_ets_address_write_hdl_reference.pcapng` (the
+preceding, address-check-only session showing no write occurred — the address already matched)
+and `docs/data/captures/2026-08-31_ets_factory_reset_hdl.pcapng` (the full reset sequence above).
+
 ## Sources
 
 Real capture files backing every 🟢-tagged claim above live in this project's `docs/data/
@@ -658,7 +711,10 @@ and association table formats (§6.2–§6.3), the per-communication-object flag
 bit-mapping (§6.4), the content-status/checksum mechanism and its safety-net rewrite trigger
 (§7), and the tshark address-mis-display gotcha (§8). §9's 🟢 claims are sourced from live tests
 against real hardware via this app's own routes, plus a real tshark capture of ETS's own
-commissioning traffic (factory reset + full download) that settled the exact wire format. The
+commissioning traffic (factory reset + full download) that settled the exact wire format. §9.3's
+factory-reset procedure is sourced from a separate, dedicated capture of ETS's real "Factory
+Reset" command against an HDL device (2026-08-31) - see that subsection's own capture-file
+references. The
 dated files under `docs/follow-ups/*.md` consolidate the full investigation narrative,
 including dead ends and exact chronology, for anyone who wants the "how this was found" story
 rather than just the current facts above.

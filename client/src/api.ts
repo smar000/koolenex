@@ -23,6 +23,14 @@ interface BusStatusResponse {
   type?: string;
   port?: number;
   path?: string;
+  // Real bug, found live 2026-08-31: previously only ever arrived via a
+  // live 'knx:reconnect-failed' WebSocket event - a plain status refresh
+  // (page reload, or the client's own WebSocket reconnecting mid-session)
+  // had no way to learn a standing reconnect failure was real, and
+  // silently read back to a calm "Idle" instead of "Disconnected". Now
+  // tracked server-side (server/knx-bus.ts's _needsAttention) and included
+  // in every /bus/status response.
+  needsAttention?: boolean;
 }
 
 /** Object 3 (Group Object Table) row only - structured flags for the compact per-flag chip

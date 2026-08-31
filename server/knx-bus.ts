@@ -39,7 +39,21 @@ class KnxBusManager extends EventEmitter {
   _wss: WebSocketServer | null;
   _remapFn: ((telegram: Telegram) => Telegram) | null;
   _reconnecting: Promise<{ host: string; port: number; type: 'udp' | 'tcp' }> | null;
+  _forceReconnecting: Promise<void> | null;
+  _connecting: Promise<{ host: string; port: number; type: 'udp' | 'tcp' }> | null;
   _keepAliveRefs: number;
+  // Real bug, found live 2026-08-31: "needsAttention" (the badge's
+  // Idle-vs-Disconnected distinction) previously lived ONLY as a live
+  // 'knx:reconnect-failed' WebSocket event, never in server-side state at
+  // all - a real, standing reconnect failure was completely invisible to
+  // any client that (re)connects afterward, including a plain browser
+  // reload or even just the WebSocket itself reconnecting mid-session
+  // (client's own syncBusStatus() replaces busStatus wholesale from
+  // /bus/status, which never carried this at all). Tracked here now, so a
+  // genuine "last reconnect attempt failed" state survives and is reported
+  // to every client that asks, not just the one that happened to be
+  // listening at the exact moment it happened.
+  _needsAttention: boolean;
 
   constructor() {
     super();
@@ -52,7 +66,10 @@ class KnxBusManager extends EventEmitter {
     this._wss = null;
     this._remapFn = null;
     this._reconnecting = null;
+    this._forceReconnecting = null;
+    this._connecting = null;
     this._keepAliveRefs = 0;
+    this._needsAttention = false;
   }
 
   /** Set a function that remaps telegram src/dst addresses (for demo mode) */
@@ -152,19 +169,49 @@ class KnxBusManager extends EventEmitter {
     projectId?: number | string | null,
     protocol: IpTransportProtocol = 'auto',
   ): Promise<{ host: string; port: number; type: 'udp' | 'tcp' }> {
+    // Real bug, found live 2026-08-31: connect() had NO reentrancy guard of
+    // its own at all. Two overlapping calls (e.g. a user clicking "Connect"
+    // on the badge while a bus operation's own forceReconnect()/
+    // _ensureConnected() is independently mid-flight after an unexpected
+    // drop) each run this synchronous prefix - `if (this.connection)
+    // this.disconnect()` - before EITHER call's own conn.connect() has
+    // resolved and actually set `this.connection`. So the second call never
+    // sees the first one's (still-pending) connection to tear down, and
+    // both independently open a brand-new physical KNXnet/IP tunnel to the
+    // same router. Whichever resolves second then silently overwrites
+    // `this.connection`, orphaning the first - a real leaked tunnel channel
+    // the router never gets told to close. This exactly matches a real
+    // capture from live testing the same day: two "Connected" log lines
+    // under 2 seconds apart, then the connection closing again half a
+    // second later - the router very plausibly reacting to the leaked/
+    // orphaned channel, or simply running low on its own limited tunnel
+    // slots. A single shared in-flight guard, reused by ANY caller
+    // (`/bus/connect` directly, `_ensureConnected()`, `forceReconnect()`,
+    // `_autoReconnect()`), closes this at the one place all of them
+    // actually go through.
+    if (this._connecting) return this._connecting;
+    // disconnect() (which also clears this.host/this.type - see its own
+    // body) must run BEFORE these are set below, not after - real
+    // ordering bug caught while writing this fix: moving the old
+    // `if (this.connection) this.disconnect()` prefix into the async body
+    // below it would otherwise clobber this.host back to null right after
+    // setting it, since disconnect() runs after the assignment instead of
+    // before.
     if (this.connection) this.disconnect();
-
     this.host = host;
     const resolvedPort = port || 3671;
     this.port = resolvedPort;
     this.projectId = projectId ?? null;
 
-    const conn = new KnxIpConnection();
-    this._attachEvents(conn);
-
-    return conn.connect(host, resolvedPort, undefined, protocol).then(() => {
+    this._connecting = (async () => {
+      const conn = new KnxIpConnection();
+      this._attachEvents(conn);
+      await conn.connect(host, resolvedPort, undefined, protocol);
       this.connection = conn;
       this.connected = true;
+      // A genuine successful connect clears any standing "needs
+      // attention" state - whatever the earlier failure was, it's over.
+      this._needsAttention = false;
       // Reflects what connect() actually negotiated ('auto' may have
       // resolved to either) - see knx-protocol.ts's TCP-first/UDP-fallback
       // logic.
@@ -180,7 +227,35 @@ class KnxBusManager extends EventEmitter {
         connectionType: negotiated,
       });
       return { host, port: resolvedPort, type: negotiated };
-    });
+    })()
+      .catch((err: Error) => {
+        // Real gap, found live 2026-08-31 right after the fix above: the
+        // three _ensureConnected()/forceReconnect()/_autoReconnect() sites
+        // that set _needsAttention on failure don't cover a DIRECT failed
+        // connect attempt via this method (e.g. /bus/connect with a wrong
+        // host) - that's arguably the most deserving case of all, and a
+        // real user directly noticed it wasn't flipping the badge. Setting
+        // it here, in connect() itself, covers every caller uniformly at
+        // the one place they all actually go through - the three call-site
+        // assignments upstream become redundant but harmless (idempotent).
+        // Also broadcast live, same as the other three sites - a real user
+        // finding, immediately after the state-only version of this fix:
+        // an already-open tab has no other way to learn this happened
+        // (it only re-fetches /bus/status on its own mount/WS-reconnect,
+        // neither of which a direct failed connect triggers on its own) -
+        // "showing idle at my end" despite the server-side state already
+        // being correct. This may double-broadcast alongside
+        // forceReconnect()/_ensureConnected()'s own catch (they call this
+        // method, so both fire for the same failure) - harmless, the
+        // client-side handler is idempotent.
+        this._needsAttention = true;
+        this.broadcast('knx:reconnect-failed', { error: err.message });
+        throw err;
+      })
+      .finally(() => {
+        this._connecting = null;
+      });
+    return this._connecting;
   }
 
   connectUsb(
@@ -231,6 +306,12 @@ class KnxBusManager extends EventEmitter {
     this.connected = false;
     this.host = null;
     this.type = null;
+    // A deliberate disconnect (explicit user action, or connect()'s own
+    // teardown-before-reconnect) isn't a failure state - whatever
+    // "needsAttention" meant before no longer applies to a bus with no
+    // configured host at all. Matches the client's existing calm-by-
+    // default reading for a genuinely idle bus (AppShell.tsx's badge).
+    this._needsAttention = false;
   }
 
   /**
@@ -259,23 +340,52 @@ class KnxBusManager extends EventEmitter {
    */
   async forceReconnect(): Promise<void> {
     if (!this.host || this.type === 'usb') return;
+    // Real live-test finding, 2026-08-31: this previously called
+    // this.connect() completely unconditionally, with no awareness of an
+    // already-in-flight reconnect from _ensureConnected()/_autoReconnect()
+    // (this._reconnecting) or of a second, concurrent forceReconnect()
+    // call. connect() unconditionally tears down `this.connection` first
+    // (disconnect() then a fresh socket) - two connect() calls racing each
+    // other against the same physical router is a real, concrete way to
+    // turn a normally-fast reconnect into a much longer, confusing stall
+    // (each attempt's fresh socket getting torn down by the other before
+    // it finishes negotiating), which matches a real report the same day:
+    // a partial download sat at 0% for "30 seconds plus" right after an
+    // idle-timeout drop. Not yet confirmed as the exact cause of that
+    // specific stall (no live repro capture exists proving it), but this
+    // coordination gap is real regardless and worth closing on its own
+    // merits - piggyback on an already-in-flight reconnect (of either
+    // kind) instead of starting a second one alongside it.
+    if (this._reconnecting) {
+      await this._reconnecting;
+      return;
+    }
+    if (this._forceReconnecting) {
+      await this._forceReconnecting;
+      return;
+    }
     const host = this.host;
     const port = this.port ?? 3671;
     const projectId = this.projectId;
     const protocol = this.type as IpTransportProtocol;
-    try {
-      await this.connect(host, port, projectId, protocol);
-    } catch (err) {
-      // Same "needs manual attention" signal _ensureConnected() sends on a
-      // real failure (see its own doc comment) - a Program/Verify's own
-      // forced reconnect failing is exactly as real a failure as any
-      // other, and would otherwise never surface on the connection badge
-      // at all (this method bypasses _ensureConnected() entirely).
-      this.broadcast('knx:reconnect-failed', {
-        error: err instanceof Error ? err.message : String(err),
+    this._forceReconnecting = this.connect(host, port, projectId, protocol)
+      .then(() => undefined)
+      .catch((err: Error) => {
+        // Same "needs manual attention" signal _ensureConnected() sends on
+        // a real failure (see its own doc comment) - a Program/Verify's
+        // own forced reconnect failing is exactly as real a failure as any
+        // other, and would otherwise never surface on the connection badge
+        // at all (this method bypasses _ensureConnected() entirely).
+        this._needsAttention = true;
+        this.broadcast('knx:reconnect-failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      })
+      .finally(() => {
+        this._forceReconnecting = null;
       });
-      throw err;
-    }
+    await this._forceReconnecting;
   }
 
   /**
@@ -314,6 +424,7 @@ class KnxBusManager extends EventEmitter {
       )
         .catch((err: Error) => {
           if (broadcastFailure) {
+            this._needsAttention = true;
             this.broadcast('knx:reconnect-failed', { error: err.message });
           }
           throw err;
@@ -357,6 +468,7 @@ class KnxBusManager extends EventEmitter {
           // calm "idle" reading stops applying; something needs a look
           // (wrong IP, router down, etc.), not just "nobody's using it
           // right now".
+          this._needsAttention = true;
           this.broadcast('knx:reconnect-failed', { error: err.message });
         }
       });
@@ -577,6 +689,7 @@ class KnxBusManager extends EventEmitter {
     host: string | null;
     port: number | null;
     hasLib: boolean;
+    needsAttention: boolean;
   } {
     return {
       connected: this.connected,
@@ -584,6 +697,7 @@ class KnxBusManager extends EventEmitter {
       host: this.host,
       port: this.port,
       hasLib: true,
+      needsAttention: this._needsAttention,
     };
   }
 }

@@ -606,6 +606,30 @@ export function IconOffline({ size = 14 }: SizeOnlyProps) {
   );
 }
 
+export function IconAttentionOffline({ size = 14 }: SizeOnlyProps) {
+  // A genuine "needs attention" state (a real reconnect attempt failed) -
+  // real request 2026-08-31: IconOffline's own calm, non-alarm reading
+  // (see its doc comment) made a real failed-reconnect state visually
+  // indistinguishable from ordinary "nothing's using the bus right now"
+  // idle - "let's pick a different icon for Idle, as that looks same as
+  // disconnected". A warning triangle - the deliberately alarming glyph
+  // IconOffline's own comment explicitly moved away from for the calm
+  // case - is the right one to reserve for here instead.
+  return (
+    <_SvgIcon size={size}>
+      <path
+        d="M7 1.6 L12.6 11.4 A0.9 0.9 0 0 1 11.8 12.8 L2.2 12.8 A0.9 0.9 0 0 1 1.4 11.4 Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinejoin="round"
+      />
+      <rect x="6.4" y="5.4" width="1.2" height="3.4" rx="0.5" fill="currentColor" />
+      <rect x="6.4" y="9.8" width="1.2" height="1.2" rx="0.5" fill="currentColor" />
+    </_SvgIcon>
+  );
+}
+
 export function IconSerial({ size = 14 }: SizeOnlyProps) {
   // Barcode glyph - per-device row indicator for whether a real physical
   // unit's serial number has been recorded against this address (see

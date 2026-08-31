@@ -111,6 +111,47 @@ async function start(): Promise<void> {
     logger.info('api', `koolenex started on port ${String(PORT)}`);
   });
 
+  // Real bug, found live 2026-08-31: KnxBusManager's connection state is
+  // purely in-memory - every server restart lost it entirely, even though
+  // the last-used host/port/protocol were already being persisted to the
+  // settings table on every successful /bus/connect (server/routes/bus.ts)
+  // and just never read back. A fresh process reported connected=false,
+  // needsAttention=false ("Idle", the calm default) - genuinely correct
+  // for a project that's never been connected to a bus at all, but
+  // actively misleading right after a restart when there WAS a real,
+  // working connection moments before: a live device write/verify
+  // attempted right then fails outright ("Not connected to KNX bus"),
+  // directly contradicting the calm badge - a real user finding the same
+  // day ("So it is definitely disconnected, but showing Idle... investigate
+  // and resolve"). Auto-reconnecting to the last known target on boot (when
+  // one is on record at all) closes this at the source: either it
+  // succeeds and the operator never has to manually reconnect after a
+  // restart, or it fails and needsAttention/the 'knx:reconnect-failed'
+  // broadcast (both already wired into connect() itself) correctly flip
+  // the badge to "Disconnected" instead of a misleading "Idle". Fire-and-
+  // forget - must not block server startup on a real network round trip.
+  const lastHost = db.get<{ value: string }>(
+    "SELECT value FROM settings WHERE key='knxip_host'",
+  )?.value;
+  if (lastHost) {
+    const lastPort = Number(
+      db.get<{ value: string }>(
+        "SELECT value FROM settings WHERE key='knxip_port'",
+      )?.value || 3671,
+    );
+    const lastProtocol =
+      (db.get<{ value: string }>(
+        "SELECT value FROM settings WHERE key='knxip_protocol'",
+      )?.value as 'udp' | 'tcp' | 'auto' | undefined) || 'auto';
+    bus.connect(lastHost, lastPort, undefined, lastProtocol).catch((err: Error) => {
+      logger.warn('knx', 'Auto-reconnect to last known host failed on boot', {
+        host: lastHost,
+        port: lastPort,
+        error: err.message,
+      });
+    });
+  }
+
   // Real bug, found live 2026-08-30: this process had no shutdown handler
   // at all - every restart during development (Ctrl+C, a normal `kill`, a
   // supervisor restart) let the Node process just vanish, abandoning

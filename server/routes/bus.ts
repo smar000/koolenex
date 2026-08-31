@@ -5,7 +5,7 @@ import fs from 'fs';
 import { z } from 'zod';
 import * as db from '../db.ts';
 import { APPS_DIR, getDptInfo } from './shared.ts';
-import { logger, safeError } from '../log.ts';
+import { logger, safeErrorOrConnection } from '../log.ts';
 import { resolveRelmemBases } from '../knx-segment-base.ts';
 import { validateBody } from '../validate.ts';
 import {
@@ -400,7 +400,7 @@ router.post('/bus/connect', async (req: Request, res: Response) => {
   } catch (e) {
     res
       .status(502)
-      .json({ error: safeError('bus', 'Bus connection failed', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Bus connection failed', e) });
   }
 });
 
@@ -413,7 +413,7 @@ router.get('/bus/usb-devices', (_req: Request, res: Response) => {
   } catch (e) {
     res
       .status(500)
-      .json({ error: safeError('bus', 'Failed to list USB devices', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Failed to list USB devices', e) });
   }
 });
 
@@ -426,7 +426,7 @@ router.get('/bus/usb-devices/all', (_req: Request, res: Response) => {
   } catch (e) {
     res
       .status(500)
-      .json({ error: safeError('bus', 'Failed to list HID devices', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Failed to list HID devices', e) });
   }
 });
 
@@ -447,7 +447,7 @@ router.post('/bus/connect-usb', async (req: Request, res: Response) => {
   } catch (e) {
     res
       .status(502)
-      .json({ error: safeError('bus', 'USB connection failed', e) });
+      .json({ error: safeErrorOrConnection('bus', 'USB connection failed', e) });
   }
 });
 
@@ -513,7 +513,7 @@ router.post('/bus/write', (req: Request, res: Response) => {
     }
     res.json(result);
   } catch (e) {
-    res.status(502).json({ error: safeError('bus', 'Bus write failed', e) });
+    res.status(502).json({ error: safeErrorOrConnection('bus', 'Bus write failed', e) });
   }
 });
 
@@ -524,7 +524,7 @@ router.post('/bus/read', async (req: Request, res: Response) => {
   try {
     res.json(await b.read(body.ga));
   } catch (e) {
-    res.status(502).json({ error: safeError('bus', 'Bus read failed', e) });
+    res.status(502).json({ error: safeErrorOrConnection('bus', 'Bus read failed', e) });
   }
 });
 
@@ -547,7 +547,7 @@ router.post('/bus/ping', async (req: Request, res: Response) => {
     const msg = e instanceof Error ? e.message : String(e);
     res
       .status(msg.includes('Not connected') ? 409 : 502)
-      .json({ error: safeError('bus', 'Ping failed', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Ping failed', e) });
   }
 });
 
@@ -567,7 +567,7 @@ router.post('/bus/identify', async (req: Request, res: Response) => {
     const msg = e instanceof Error ? e.message : String(e);
     res
       .status(msg.includes('Not connected') ? 409 : 502)
-      .json({ error: safeError('bus', 'Identify failed', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Identify failed', e) });
   }
 });
 
@@ -630,7 +630,7 @@ router.post('/bus/device-info', async (req: Request, res: Response) => {
     const msg = e instanceof Error ? e.message : String(e);
     res
       .status(msg.includes('Not connected') ? 409 : 500)
-      .json({ error: safeError('bus', 'Failed to read device info', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Failed to read device info', e) });
   }
 });
 
@@ -679,7 +679,7 @@ router.post('/bus/read-memory', async (req: Request, res: Response) => {
     const msg = e instanceof Error ? e.message : String(e);
     res
       .status(msg.includes('Not connected') ? 409 : 502)
-      .json({ error: safeError('bus', 'Memory read failed', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Memory read failed', e) });
   }
 });
 
@@ -762,7 +762,7 @@ router.post('/bus/write-memory', async (req: Request, res: Response) => {
     const msg = e instanceof Error ? e.message : String(e);
     res
       .status(msg.includes('Not connected') ? 409 : 502)
-      .json({ error: safeError('bus', 'Memory write failed', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Memory write failed', e) });
   }
 });
 
@@ -791,7 +791,7 @@ router.post('/bus/replay-frames', async (req: Request, res: Response) => {
     await b.replayFrames(deviceAddress, buffers, delayMs);
     res.json({ deviceAddress, frameCount: buffers.length });
   } catch (e) {
-    res.status(502).json({ error: safeError('bus', 'Frame replay failed', e) });
+    res.status(502).json({ error: safeErrorOrConnection('bus', 'Frame replay failed', e) });
   }
 });
 
@@ -826,7 +826,7 @@ router.post('/bus/read-property', async (req: Request, res: Response) => {
     const msg = e instanceof Error ? e.message : String(e);
     res
       .status(msg.includes('Not connected') ? 409 : 502)
-      .json({ error: safeError('bus', 'Property read failed', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Property read failed', e) });
   }
 });
 
@@ -845,7 +845,7 @@ router.post('/bus/program-ia', async (req: Request, res: Response) => {
     const msg = e instanceof Error ? e.message : String(e);
     res
       .status(msg.includes('Not connected') ? 409 : 502)
-      .json({ error: safeError('bus', 'Program IA failed', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Program IA failed', e) });
   }
 });
 
@@ -872,7 +872,7 @@ router.post('/bus/restart-device', async (req: Request, res: Response) => {
     const msg = e instanceof Error ? e.message : String(e);
     res
       .status(msg.includes('Not connected') ? 409 : 502)
-      .json({ error: safeError('bus', 'Restart device failed', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Restart device failed', e) });
   }
 });
 
@@ -896,7 +896,7 @@ router.post(
       const msg = e instanceof Error ? e.message : String(e);
       res
         .status(msg.includes('Not connected') ? 409 : 502)
-        .json({ error: safeError('bus', 'Check programming mode failed', e) });
+        .json({ error: safeErrorOrConnection('bus', 'Check programming mode failed', e) });
     }
   },
 );
@@ -927,7 +927,7 @@ router.post(
       res
         .status(msg.includes('Not connected') ? 409 : 502)
         .json({
-          error: safeError('bus', 'Read serials in programming mode failed', e),
+          error: safeErrorOrConnection('bus', 'Read serials in programming mode failed', e),
         });
     }
   },
@@ -966,7 +966,7 @@ router.post(
       const msg = e instanceof Error ? e.message : String(e);
       res
         .status(msg.includes('Not connected') ? 409 : 502)
-        .json({ error: safeError('bus', 'Assign address by serial failed', e) });
+        .json({ error: safeErrorOrConnection('bus', 'Assign address by serial failed', e) });
     }
   },
 );
@@ -1266,7 +1266,7 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     const msg = e instanceof Error ? e.message : String(e);
     return res
       .status(msg.includes('Not connected') ? 409 : 502)
-      .json({ error: safeError('bus', 'Failed to reconnect before programming', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Failed to reconnect before programming', e) });
   }
 
   // A download can run long enough for the gateway's own idle timeout to
@@ -1314,7 +1314,7 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     });
     res
       .status(errMsg.includes('Not connected') ? 409 : 502)
-      .json({ error: safeError('bus', 'Device programming failed', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Device programming failed', e) });
   } finally {
     releaseKeepAlive();
   }
@@ -1382,7 +1382,7 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
     const msg = e instanceof Error ? e.message : String(e);
     return res
       .status(msg.includes('Not connected') ? 409 : 502)
-      .json({ error: safeError('bus', 'Failed to reconnect before verifying', e) });
+      .json({ error: safeErrorOrConnection('bus', 'Failed to reconnect before verifying', e) });
   }
 
   // See the matching comment in /bus/program-device above -
@@ -1414,7 +1414,7 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
         const msg = e instanceof Error ? e.message : String(e);
         res
           .status(msg.includes('Not connected') ? 409 : 502)
-          .json({ error: safeError('bus', 'Device verify failed', e) });
+          .json({ error: safeErrorOrConnection('bus', 'Device verify failed', e) });
         return;
       }
     }

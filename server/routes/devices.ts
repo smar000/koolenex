@@ -383,8 +383,23 @@ router.patch(
         diffs.push(`${k}: "${ov ?? ''}" → "${nv}"`);
       }
     }
+    // Merged into the existing values, not a full replace - real request
+    // 2026-08-31: DeviceParameters.tsx (the only caller so far) always
+    // sends its complete current value set anyway, so merging vs.
+    // replacing produces the same result for it (a merge of the full set
+    // is a superset-equal union, not a partial one) - but replace made
+    // any FUTURE single-key caller (e.g. a compare-page inline edit)
+    // unsafe by construction, silently wiping every other parameter's
+    // value. Merging removes that trap without changing today's behavior,
+    // with one genuine, deliberate difference: a key present in the OLD
+    // blob but genuinely absent from a full resend (e.g. a parameter that
+    // became inactive under a Dynamic condition since last save) no
+    // longer gets garbage-collected on save - it stays in the JSON blob,
+    // unused but harmless (nothing currently reads a key that isn't also
+    // resolved as active).
+    const mergedVals = { ...oldVals, ...newVals };
     db.run('UPDATE devices SET param_values=? WHERE id=?', [
-      JSON.stringify(newVals),
+      JSON.stringify(mergedVals),
       did,
     ]);
     db.audit(

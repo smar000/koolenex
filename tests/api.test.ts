@@ -238,17 +238,22 @@ describe('Devices', () => {
     assert.equal(vals['ref-2'], 'hello');
   });
 
-  it('PATCH param-values overwrites previous values', async () => {
+  it('PATCH param-values merges into previous values, not a full replace', async () => {
+    // Real change 2026-08-31: replace-only semantics made any future
+    // single-key caller (e.g. a compare-page inline edit) unsafe by
+    // construction - it would silently wipe every other parameter's
+    // value. DeviceParameters.tsx (the only caller so far) always sends
+    // its complete current value set, so this is a no-op change for it.
     await req('PATCH', `/projects/${pid}/devices/${did}/param-values`, {
       'ref-1': 99,
     });
     const row = db.get('SELECT param_values FROM devices WHERE id=?', [did]);
     const vals = JSON.parse(row.param_values);
-    assert.equal(vals['ref-1'], 99);
+    assert.equal(vals['ref-1'], 99, 'the sent key is updated');
     assert.equal(
       vals['ref-2'],
-      undefined,
-      'previous keys should be gone (full replace)',
+      'hello',
+      'a key not present in this PATCH is preserved (merge, not replace)',
     );
   });
 

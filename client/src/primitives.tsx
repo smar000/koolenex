@@ -356,7 +356,7 @@ export function DeviceAddr({
         wtype={wtype}
         className={className}
         style={{ color: 'var(--amber)', ...style }}
-        title={`${device.individual_address} — assigned in the project, but not yet written to a physical device (no serial recorded)`}
+        title={`${device.individual_address} — assigned in the project, but not yet written to a physical device (no serial recorded). Click to view/edit this device's details, parameters, and group address links.`}
       />
     );
   }
@@ -366,6 +366,12 @@ export function DeviceAddr({
       wtype={wtype}
       className={className}
       style={style}
+      // Real request 2026-08-31: this badge already opens the device
+      // detail page (DevicePinPanel.tsx), which has real parameter and
+      // GA-link editing (DeviceParameters.tsx / onUpdateComObjectGAs) -
+      // that wasn't obvious from PinAddr's own generic default tooltip
+      // ("Pin X"), which says nothing about what's actually there.
+      title={`${device.individual_address} — click to view/edit this device's details, parameters, and group address links`}
     />
   );
 }

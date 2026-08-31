@@ -444,28 +444,36 @@ export class KnxConnection extends EventEmitter {
   /**
    * Sends a connection-oriented device Restart (A_Restart) on its own - opens
    * a fresh management session (T_Connect) to `deviceAddr`, sends Restart,
-   * then disconnects. This is the exact same mechanism downloadDevice()
-   * already uses at the end of a RelSegment-driven content download (see
-   * its own doc comment, further down this file) - reused here for the
-   * address-write paths below, per real user question, 2026-08-31: "ETS
-   * restarts the device after updating its address. I don't think we are
-   * as yet." Confirmed correct on inspection: neither programIA() nor
-   * assignIndividualAddressBySerial() sent one.
+   * waits, then disconnects. This is the exact same mechanism
+   * downloadDevice() already uses at the end of a RelSegment-driven content
+   * download (see its own doc comment, further down this file) - reused
+   * here for the address-write paths below, per real user question,
+   * 2026-08-31: "ETS restarts the device after updating its address. I
+   * don't think we are as yet." Confirmed correct on inspection: neither
+   * programIA() nor assignIndividualAddressBySerial() sent one.
    *
-   * 🟡 The RESTART MECHANISM ITSELF (connection-oriented A_Restart via
-   * T_Connect) is real-hardware-confirmed for the content-download case.
-   * Using it specifically after an ADDRESS write has not been
-   * independently verified against a real ETS capture of that exact
-   * sequence in this project - flagged, not assumed proven, same as this
-   * file's existing convention elsewhere. A brief settle delay is given
-   * before connecting, since the device has just adopted a new address it
-   * may not be immediately ready to accept a T_Connect at - not calibrated
-   * against a real capture either, a conservative guess.
+   * 🟢 Using Restart specifically after an ADDRESS write is now real-
+   * hardware-confirmed: a real tshark capture of ETS performing "Download
+   * Individual Address" (2026-08-31,
+   * docs/data/captures/2026-08-31_ets_address_write_hdl_real.pcapng) shows
+   * the exact same Connect → identify → Restart → wait → Disconnect
+   * sequence this method implements - including the ~3s gap between
+   * Restart and Disconnect (postRestartDelayMs below), confirmed from that
+   * same capture (80.60s Restart, 83.60s Disconnect - exactly 3.0s). A
+   * brief settle delay is still given before connecting, since the device
+   * has just adopted a new address it may not be immediately ready to
+   * accept a T_Connect at - that part is not calibrated against a real
+   * capture, a conservative guess.
    */
-  async restartDevice(deviceAddr: string, settleMs: number = 300): Promise<void> {
+  async restartDevice(
+    deviceAddr: string,
+    settleMs: number = 300,
+    postRestartDelayMs: number = 3000,
+  ): Promise<void> {
     if (settleMs > 0) await delay(settleMs);
     await this.managementSession(deviceAddr, async ({ sendData }) => {
       await sendData('Restart');
+      if (postRestartDelayMs > 0) await delay(postRestartDelayMs);
     });
   }
 

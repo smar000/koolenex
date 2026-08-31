@@ -702,6 +702,40 @@ Capture files: `docs/data/captures/2026-08-31_ets_address_write_hdl_reference.pc
 preceding, address-check-only session showing no write occurred — the address already matched)
 and `docs/data/captures/2026-08-31_ets_factory_reset_hdl.pcapng` (the full reset sequence above).
 
+### 9.4 Real ETS "Download Individual Address" write, confirmed byte-for-byte 🟢
+
+A second, genuine capture (the §9.3 device's factory-reset state made this possible - the earlier
+§9.1/9.2 findings were sourced from a device that already matched its target, so no write ever
+actually occurred there) - `docs/data/captures/2026-08-31_ets_address_write_hdl_real.pcapng`.
+Sequence:
+
+1. ETS probes its **target** address directly first (`Connect` + `DeviceDescriptor_Read`) — no
+   answer, confirming the address is genuinely free before attempting to claim it.
+2. Broadcast `A_IndividualAddress_Read` polling (button press required) until the device answers
+   from `15.15.255` (the factory-default address from the §9.3 reset).
+3. **`A_IndividualAddress_Write`** (`PhysicalAddress_Write`, APCI `0x0003`) broadcast to `0/0/0` -
+   the actual write. Payload is the raw 2-byte encoded address only (no serial, no reserved
+   bytes) - the button-press service, distinct from the serial-based
+   `IndividualAddressSerialNumber_Write` (§9.1).
+4. Broadcast `A_IndividualAddress_Read` verification poll - device answers from its **new**
+   address, confirming the write took effect immediately.
+5. Connect P2P to the new address, `DeviceDescriptor_Read`, and reads of properties 56/11 (same
+   identity-confirmation pattern as every other session in this document).
+6. **`A_Restart`** — sent, then a **real ~3.0s wait** (80.60s → 83.60s in the capture, exact),
+   *then* `T_Disconnect`. Confirms `restartDevice()`'s own `postRestartDelayMs` (added
+   2026-08-31, default 3000ms) against a real capture, not a guess - see that method's own doc
+   comment.
+7. A separate KNXnet/IP Tunnel-level `DisconnectReq`/`Resp` a couple seconds later - the whole IP
+   session closing, not device-specific.
+
+**No `PID_PROGMODE=0` write appears anywhere in this capture** - unlike §9.3's Factory Reset, a
+plain address write relies on the Restart alone to end programming mode. Confirms that finding
+was specific to Factory Reset, not a general property of every address-related ETS operation.
+
+This capture directly validates koolenex's own `assignIndividualAddressBySerial()`/`programIA()`
+restart-after-write sequence (write → verify → Restart → wait → disconnect), added the same day
+this capture was taken, in the same order real ETS uses.
+
 ## Sources
 
 Real capture files backing every 🟢-tagged claim above live in this project's `docs/data/
@@ -712,8 +746,8 @@ bit-mapping (§6.4), the content-status/checksum mechanism and its safety-net re
 (§7), and the tshark address-mis-display gotcha (§8). §9's 🟢 claims are sourced from live tests
 against real hardware via this app's own routes, plus a real tshark capture of ETS's own
 commissioning traffic (factory reset + full download) that settled the exact wire format. §9.3's
-factory-reset procedure is sourced from a separate, dedicated capture of ETS's real "Factory
-Reset" command against an HDL device (2026-08-31) - see that subsection's own capture-file
+factory-reset procedure and §9.4's real address-write sequence are each sourced from a separate,
+dedicated capture against an HDL device (2026-08-31) - see those subsections' own capture-file
 references. The
 dated files under `docs/follow-ups/*.md` consolidate the full investigation narrative,
 including dead ends and exact chronology, for anyone who wants the "how this was found" story

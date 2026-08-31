@@ -523,9 +523,27 @@
   z-index: 200;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
-  padding: 8px;
+  /* Real bug, found live via a screenshot 2026-08-31: this popover renders
+     through a React portal straight into document.body (see the file
+     comment above for why), which takes it outside .appShell's DOM
+     subtree entirely - the app's monospace font ('DM Mono', set on
+     .appShell in App.module.css, not on html/body) never reaches it, so
+     every label/description here silently fell back to the browser's
+     default serif font instead, looking like a different, inconsistent
+     component. Inherited by every child below (none override
+     font-family), so this one declaration fixes the whole popover. */
+  font-family: 'DM Mono', monospace;
+  /* Matched to AppShell's busStatusPopover (App.module.css) - the app's
+     one other options/status popover - radius, shadow, and outer padding
+     all previously drifted from it (12px/14-36-0.5/8px vs its 8px/
+     8-24-0.4/4px), reading as a visually distinct component rather than
+     the same kind of popover. `position: fixed` (vs that one's plain
+     `absolute`) and the entrance animation below are kept - real,
+     necessary differences, not drift - see the file comment above for
+     why this one needs a portal + fixed coordinates. */
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 4px;
   display: flex;
   flex-direction: column;
   gap: 3px;

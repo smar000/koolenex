@@ -1465,16 +1465,50 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       // so this doesn't rely on a single attempt succeeding.
       await b.programIA(deviceAddress);
       onProgress({ msg: `Confirming device at ${deviceAddress}…` });
+      // Real user observation, 2026-08-31: "I have seen ETS wait between 9
+      // seconds and 19 seconds at times" for a device to come back up and
+      // answer again after an address write - the previous fixed 3-
+      // attempt/2s-spacing budget (~7-9s total, on top of programIA()'s
+      // own ~3.3s built-in settle+Restart+postRestartDelay wait) sat right
+      // at the LOW end of that and could give up on a device that was
+      // still genuinely rebooting, not actually gone. Budgeted generously
+      // past the observed range (35s) rather than a number that only just
+      // covers today's evidence - this is real device-reboot variance,
+      // not something a fixed small retry count should be gambling on.
+      // Deadline-based (not a fixed attempt count) so the spacing stays
+      // 2s regardless of how long the budget ends up needing to be - same
+      // pattern as the programming-mode detection loop above.
+      const confirmStart = Date.now();
+      const confirmDeadlineMs = 35000;
       let confirmedInfo: { serialNumber?: string } | null = null;
-      for (let attempt = 1; attempt <= 3 && !aborted; attempt++) {
+      let attempt = 0;
+      let lastHeartbeatMs = 0;
+      while (
+        !confirmedInfo &&
+        Date.now() - confirmStart < confirmDeadlineMs &&
+        !aborted
+      ) {
+        attempt++;
         if (attempt > 1) await delay(2000);
+        const elapsedMs = Date.now() - confirmStart;
+        // Heartbeat every ~5s so a long real wait doesn't read as "stuck"
+        // in the log panel - real prior lesson this session (the progress-
+        // bar-stuck-at-0% saga) was exactly this: a genuinely-still-
+        // working wait with no visible sign of life looks indistinguishable
+        // from a hang.
+        if (elapsedMs - lastHeartbeatMs >= 5000) {
+          lastHeartbeatMs = elapsedMs;
+          onProgress({
+            msg: `Still waiting for ${deviceAddress} to come back up after restart… (${Math.round(elapsedMs / 1000)}s)`,
+          });
+        }
         try {
           confirmedInfo = await b.readDeviceInfo(deviceAddress);
-          break;
         } catch (e) {
           logger.warn('knx', 'Post-address-write confirmation read failed', {
             deviceAddress,
             attempt,
+            elapsedMs,
             error: e instanceof Error ? e.message : String(e),
           });
         }

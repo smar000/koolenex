@@ -119,6 +119,14 @@ export interface DownloadProgress {
   msg: string;
   pct?: number;
   done?: boolean;
+  // Real request, 2026-08-31: a dedicated "press the button" modal on the
+  // client (Cancel-only, auto-dismisses once the wait resolves) needs a
+  // reliable way to tell THIS specific progress message apart from every
+  // other one - see /bus/program-device's own pre-flight, server/routes/
+  // bus.ts. Only ever true on the single message announcing the wait;
+  // every subsequent message (found, ambiguous, written, confirmed, or a
+  // real error) omits it, which is the client's own cue to dismiss.
+  awaitingButton?: boolean;
 }
 
 /** Extra context needed to plan an AbsoluteSegment (MDT-style) download. */

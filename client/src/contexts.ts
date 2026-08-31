@@ -233,6 +233,11 @@ export interface ProgramProgress {
   pct?: number;
   done?: boolean;
   error?: boolean;
+  // Real request, 2026-08-31: mirrors DownloadProgress.awaitingButton
+  // (server/knx-connection.ts) - true only on the single message
+  // announcing /bus/program-device's own "waiting for the programming
+  // button" pre-flight wait; the client's cue to show a dedicated modal.
+  awaitingButton?: boolean;
 }
 
 export interface VerifyCache {

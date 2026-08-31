@@ -23,6 +23,7 @@ import {
 import { DeviceCompareResults, displaySectionName } from './DeviceCompareResults.tsx';
 import { AddressDeviceModal } from '../AddressDeviceModal.tsx';
 import styles from './ProgrammingView.module.css';
+import primStyles from '../primitives.module.css';
 
 export function ProgrammingView() {
   const { projectData: data } = useAppData();
@@ -67,6 +68,11 @@ export function ProgrammingView() {
   // cause: never let the DISPLAYED value move backward mid-run - track the
   // max seen per device, reset only when a new run starts.
   const programPctMaxRef = useRef<Record<string, number>>({});
+  // Keyed by deviceId - lets the "press the button" modal's own Cancel
+  // button reach the specific in-flight programDevice() call it belongs
+  // to. Real request, 2026-08-31: "somewhere to display the press prog
+  // button. Maybe a modal pop-up with just a cancel button."
+  const programAbortRef = useRef<Record<string, AbortController>>({});
   const { entries: log, add: addLog, clear: clearLog } = useProgrammingLog();
   const [verifyingIds, setVerifyingIds] = useState<Set<number>>(new Set());
   const [slideOverDevice, setSlideOverDevice] = useState<any | null>(null);
@@ -233,16 +239,37 @@ export function ProgrammingView() {
     addLog(
       `[${new Date().toLocaleTimeString()}] Downloading (${mode}) → ${devAddr}`,
     );
+    const controller = new AbortController();
+    programAbortRef.current[deviceId] = controller;
     try {
       const pid = data?.project?.id;
-      const result = await api.busProgramDevice(devAddr, pid!, deviceId, mode);
+      const result = await api.busProgramDevice(
+        devAddr,
+        pid!,
+        deviceId,
+        mode,
+        controller.signal,
+      );
       setProgress((p) => ({ ...p, [deviceId]: { state: 'done' } }));
       // Real request, 2026-08-31: "the log doesn't say that the download
       // was successful. We should show this in the logs, including
       // serial number of the device, and the number of bytes written."
+      //
+      // Real follow-up, same day: "given that [the post-download serial]
+      // retries failed, why is log saying successful?" - the download
+      // itself genuinely did succeed (independently confirmed - status/
+      // last_download really updated, the write itself completed
+      // normally) - the serial read-back is a separate, deliberately
+      // non-fatal best-effort step AFTER the write, not part of it. But
+      // silently omitting the serial clause when that step fails reads as
+      // "everything's fine" rather than being honest that a real step
+      // didn't complete - say so explicitly instead of going quiet about
+      // it.
       addLog(
         `[${new Date().toLocaleTimeString()}] ✓ Download successful (${mode}) → ${devAddr}` +
-          (result.serialNumber ? `, serial ${result.serialNumber}` : '') +
+          (result.serialNumber
+            ? `, serial ${result.serialNumber}`
+            : ' (could not confirm serial — device unresponsive after restart)') +
           `, ${result.totalBytes} bytes written`,
       );
       onDeviceStatus(deviceId, 'programmed');
@@ -278,11 +305,32 @@ export function ProgrammingView() {
       // verified" rather than silently-stale data.
       clearVerifyResult(deviceId);
     } catch (err: any) {
-      setProgress((p) => ({ ...p, [deviceId]: { state: 'error' } }));
-      addLog(
-        `[${new Date().toLocaleTimeString()}] Download failed (${mode}) → ${devAddr} — ${err.message}`,
-      );
+      if (err.code === 'aborted') {
+        // Reverts the button to its normal (non-error) state, based on
+        // the device's own real `status` - a cancel isn't a failure, so
+        // it shouldn't leave a "Retry" button behind.
+        setProgress((p) => {
+          const next = { ...p };
+          delete next[deviceId];
+          return next;
+        });
+        addLog(
+          `[${new Date().toLocaleTimeString()}] Cancelled → ${devAddr} — no address was written, nothing else attempted`,
+        );
+      } else {
+        setProgress((p) => ({ ...p, [deviceId]: { state: 'error' } }));
+        addLog(
+          `[${new Date().toLocaleTimeString()}] Download failed (${mode}) → ${devAddr} — ${err.message}`,
+        );
+      }
     }
+    delete programAbortRef.current[deviceId];
+  };
+
+  // Wired to the "press the button" modal's own Cancel button (see the
+  // modal's own render block below) - real request, 2026-08-31.
+  const cancelProgramDevice = (deviceId: any) => {
+    programAbortRef.current[deviceId]?.abort();
   };
 
   const verifyDevice = async (deviceId: any, devAddr: string) => {
@@ -1224,6 +1272,48 @@ export function ProgrammingView() {
           />,
           document.body,
         )}
+      {/* "Press the programming button" modal - real request, 2026-08-31:
+          "somewhere to display the press prog button. Maybe a modal
+          pop-up with just a cancel button, which automatically
+          disappears once the device is found." Driven entirely by
+          programProgress[address].awaitingButton (see ProgramProgress's
+          own doc comment, contexts.ts) - true only for the one message
+          announcing the wait; any later message for the same device
+          (found, ambiguous, written, confirmed, or an error) clears it,
+          which is what makes this auto-dismiss with no extra state of
+          its own. Cancel wired to the same AbortController the fetch
+          itself carries (programAbortRef) - a genuine cancellation, not
+          just hiding the modal. */}
+      {Object.keys(progress)
+        .filter((idStr) => progress[idStr]?.state === 'running')
+        .map((idStr) => {
+          const d = devices.find((dev: any) => String(dev.id) === idStr);
+          if (!d) return null;
+          const pp = programProgress[d.individual_address];
+          if (!pp?.awaitingButton) return null;
+          return (
+            <div key={idStr} className={primStyles.modalOverlay}>
+              <div className={primStyles.modalBox}>
+                <div className={primStyles.modalTitle}>
+                  Press the programming button
+                </div>
+                <div className={primStyles.modalBody}>
+                  <Spinner /> Waiting for a device to identify itself for{' '}
+                  {d.individual_address} ({d.name})…
+                  <div style={{ marginTop: 8, opacity: 0.7 }}>{pp.msg}</div>
+                </div>
+                <div className={primStyles.modalActions}>
+                  <Btn
+                    onClick={() => cancelProgramDevice(d.id)}
+                    color="var(--red)"
+                  >
+                    Cancel
+                  </Btn>
+                </div>
+              </div>
+            </div>
+          );
+        })}
     </div>
   );
 }

@@ -562,6 +562,21 @@ class KnxBusManager extends EventEmitter {
     return this.connection!.readSerialNumbersInProgrammingMode(timeoutMs);
   }
 
+  // Real request, 2026-08-31: "can you confirm this yourself via a bus
+  // query" (verifying a real ETS Factory Reset actually took effect) - the
+  // same real mechanism ETS's own Factory Reset uses for its own final
+  // verify step (docs/knx-device-write-protocol.md §9.3): ask by serial
+  // "whatever address you're at, report it" - no guessing an address, and
+  // no programming-mode button-press needed (unlike checkProgrammingMode()/
+  // readSerialNumbersInProgrammingMode() above).
+  async readIndividualAddressBySerial(
+    serial: Buffer,
+    timeoutMs?: number,
+  ): Promise<{ address: string } | null> {
+    await this._ensureConnected();
+    return this.connection!.readIndividualAddressBySerial(serial, timeoutMs);
+  }
+
   async assignIndividualAddressBySerial(
     serial: Buffer,
     newAddr: string,

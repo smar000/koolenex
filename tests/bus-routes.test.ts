@@ -142,16 +142,53 @@ class MockBus extends EventEmitter {
     this._scanAbort = true;
   }
 
+  // serialNumber default matches seedDevice()'s own default serial_number
+  // (see that function) - real request, 2026-08-31, verbatim: "ETS when it
+  // does a full download ALWAYS writes the address first, reboots and
+  // then the params... We should first check if we have the serial
+  // number. If so we should then check if that device address exists on
+  // the bus... validate the serial number". /bus/program-device's new
+  // pre-flight now calls this FIRST, before downloadDevice() - matching
+  // by default means every existing test's seeded device passes that
+  // check immediately (addressConfirmed=true) without needing its own
+  // programming-mode/address-write simulation, keeping every test that
+  // isn't specifically about the pre-flight itself unaffected beyond one
+  // extra logged call. Override via deviceInfoSerialOverride for a test
+  // that specifically wants a mismatch/no-serial scenario.
+  deviceInfoSerialOverride: string | null | undefined = undefined;
   async readDeviceInfo(deviceAddr: string): Promise<any> {
     this.calls.push({ method: 'readDeviceInfo', args: [deviceAddr] });
     if (!this.connected) throw new Error('Not connected to KNX bus');
-    return { descriptor: '07b0', address: deviceAddr };
+    return {
+      descriptor: '07b0',
+      address: deviceAddr,
+      serialNumber:
+        this.deviceInfoSerialOverride !== undefined
+          ? this.deviceInfoSerialOverride
+          : 'aabbccddeeff',
+    };
   }
 
   async programIA(newAddr: string): Promise<{ ok: boolean; newAddr: string }> {
     this.calls.push({ method: 'programIA', args: [newAddr] });
     if (!this.connected) throw new Error('Not connected to KNX bus');
     return { ok: true, newAddr };
+  }
+
+  // Configurable per-test for the pre-flight's own re-addressing branch
+  // (see readDeviceInfo's own comment) - empty by default, since most
+  // tests never reach this call at all (a matching readDeviceInfo serial
+  // short-circuits the whole re-addressing flow before this would run).
+  serialsInProgrammingMode: Array<{ serial: string; src: string }> = [];
+  async readSerialNumbersInProgrammingMode(
+    timeoutMs?: number,
+  ): Promise<Array<{ serial: string; src: string }>> {
+    this.calls.push({
+      method: 'readSerialNumbersInProgrammingMode',
+      args: [timeoutMs],
+    });
+    if (!this.connected) throw new Error('Not connected to KNX bus');
+    return this.serialsInProgrammingMode;
   }
 
   async checkProgrammingMode(
@@ -1095,8 +1132,13 @@ function seedDevice(
   coRows: { object_number: number; ga_address: string }[],
 ): number {
   dbmod.run(
-    `INSERT INTO devices (project_id, individual_address, name, app_ref, param_values) VALUES (?,?,?,?,?)`,
-    [projectId, addr, `dev-${addr}`, appRef, '{}'],
+    // serial_number matches MockBus.readDeviceInfo()'s own default - see
+    // that method's doc comment - so /bus/program-device's pre-flight
+    // address-confirmation check (added 2026-08-31) passes immediately
+    // for every test using this helper, without needing its own
+    // programming-mode simulation.
+    `INSERT INTO devices (project_id, individual_address, name, app_ref, param_values, serial_number) VALUES (?,?,?,?,?,?)`,
+    [projectId, addr, `dev-${addr}`, appRef, '{}', 'aabbccddeeff'],
   );
   const dev = dbmod.get<{ id: number }>(
     'SELECT id FROM devices WHERE project_id=? AND individual_address=?',
@@ -1705,8 +1747,10 @@ describe('POST /bus/program-device — builds and passes a real Object 3 (Group 
       `SELECT id FROM projects WHERE name='program-obj3'`,
     )!.id;
     ts.db.run(
-      `INSERT INTO devices (project_id, individual_address, name, app_ref, param_values) VALUES (?,?,?,?,?)`,
-      [projectId, deviceAddr, `dev-${deviceAddr}`, OBJ3_APP, '{}'],
+      // serial_number matches MockBus.readDeviceInfo()'s own default - see
+      // seedDevice()'s identical comment above.
+      `INSERT INTO devices (project_id, individual_address, name, app_ref, param_values, serial_number) VALUES (?,?,?,?,?,?)`,
+      [projectId, deviceAddr, `dev-${deviceAddr}`, OBJ3_APP, '{}', 'aabbccddeeff'],
     );
     const dev = ts.db.get<{ id: number }>(
       'SELECT id FROM devices WHERE project_id=? AND individual_address=?',
@@ -1863,8 +1907,10 @@ describe('POST /bus/verify-device — Object 3 (Group Object Table) fallback', (
     ts.db.run(`INSERT INTO projects (name) VALUES ('verify-obj3')`);
     projectId = ts.db.get<{ id: number }>(`SELECT id FROM projects WHERE name='verify-obj3'`)!.id;
     ts.db.run(
-      `INSERT INTO devices (project_id, individual_address, name, app_ref, param_values) VALUES (?,?,?,?,?)`,
-      [projectId, deviceAddr, `dev-${deviceAddr}`, OBJ3_APP, '{}'],
+      // serial_number matches MockBus.readDeviceInfo()'s own default - see
+      // seedDevice()'s identical comment above.
+      `INSERT INTO devices (project_id, individual_address, name, app_ref, param_values, serial_number) VALUES (?,?,?,?,?,?)`,
+      [projectId, deviceAddr, `dev-${deviceAddr}`, OBJ3_APP, '{}', 'aabbccddeeff'],
     );
     const dev = ts.db.get<{ id: number }>(
       'SELECT id FROM devices WHERE project_id=? AND individual_address=?',

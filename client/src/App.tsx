@@ -256,8 +256,25 @@ export default function App() {
             pct: msg.pct as number | undefined,
             done: msg.done as boolean | undefined,
             error: msg.error as boolean | undefined,
+            // Real request, 2026-08-31: a dedicated "press the button"
+            // modal needs a reliable signal distinct from every other
+            // progress message - see /bus/program-device's own pre-
+            // flight (server/routes/bus.ts) and DownloadProgress's own
+            // doc comment (server/knx-connection.ts) for why this is only
+            // ever true on the one message announcing the wait.
+            awaitingButton: msg.awaitingButton as boolean | undefined,
           },
         }));
+        // Real request, 2026-08-31: "each step should also show in the
+        // log, with reasonable details" - every program:progress message
+        // previously only ever updated the button's own inline text/
+        // percentage, never the actual log panel.
+        setProgrammingLogEntries((l) =>
+          [
+            `[${new Date().toLocaleTimeString()}] ${deviceAddress}: ${msg.msg as string}`,
+            ...l,
+          ].slice(0, PROGRAMMING_LOG_CAP),
+        );
       } else if (msg.type === 'scan:progress') {
         dispatch({
           type: 'SCAN_PROGRESS',

@@ -972,6 +972,41 @@ router.post(
   },
 );
 
+// Real-only-read counterpart to /bus/assign-address-by-serial above - ask
+// by serial "whatever address you're at, report it", no address guess and
+// no programming-mode button-press needed. Real request, 2026-08-31:
+// verifying a real ETS Factory Reset actually took effect, the same
+// mechanism ETS's own Factory Reset uses for its own final verify step
+// (docs/knx-device-write-protocol.md §9.3).
+router.post(
+  '/bus/read-address-by-serial',
+  async (req: Request, res: Response) => {
+    const b = requireBus(res);
+    if (!b) return;
+    const body = validateBody(
+      req,
+      z.object({
+        serial: z
+          .string()
+          .regex(/^[0-9a-fA-F]{12}$/, 'serial must be 12 hex chars (6 bytes)'),
+        timeoutMs: z.number().int().min(100).max(30000).optional(),
+      }),
+    );
+    try {
+      const result = await b.readIndividualAddressBySerial(
+        Buffer.from(body.serial, 'hex'),
+        body.timeoutMs,
+      );
+      res.json(result ?? { address: null });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res
+        .status(msg.includes('Not connected') ? 409 : 502)
+        .json({ error: safeErrorOrConnection('bus', 'Read address by serial failed', e) });
+    }
+  },
+);
+
 interface DeviceModel {
   appId?: string;
   loadProcedures?: Array<{
@@ -1187,6 +1222,30 @@ export const _buildDeviceProgramming = buildDeviceProgramming;
 router.post('/bus/program-device', async (req: Request, res: Response) => {
   const b = requireBus(res);
   if (!b) return;
+  // Real request, 2026-08-31: a modal "press the button" prompt (client-
+  // side) needs a real Cancel action, and this route's own pre-flight can
+  // now genuinely wait up to 30s for a physical button press - checked at
+  // each polling round below rather than only at the very start, so
+  // cancelling actually stops the wait promptly instead of only being
+  // honored before the first round begins.
+  //
+  // Real bug, caught before ever reaching real hardware: req.on('close')
+  // is NOT a reliable "the client disconnected" signal in Express - it
+  // can fire once the REQUEST body has been fully read, which can happen
+  // well before a response is sent, even while the client is still very
+  // much there waiting. Using it made every test suddenly think it had
+  // been cancelled instantly, hitting the new `if (aborted) return;`
+  // guards with no response ever sent - hanging every test client
+  // indefinitely (confirmed live: the whole test file, previously a ~3.4s
+  // run, exceeded a 45s timeout with zero output). res.on('close'),
+  // gated on res.writableEnded, is the standard, correct pattern - it
+  // fires when the underlying connection actually closes, and
+  // writableEnded distinguishes "closed because we already finished
+  // responding normally" from a genuine client-side disconnect.
+  let aborted = false;
+  res.on('close', () => {
+    if (!res.writableEnded) aborted = true;
+  });
   const body = validateBody(
     req,
     z.object({
@@ -1274,9 +1333,175 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
   // never actually apply mid-write (real traffic is flowing throughout),
   // but hold a keep-alive ref regardless for the duration - protects any
   // real pause between steps against an unexpected drop interrupting the
-  // download partway through. See KnxBusManager.addKeepAliveRef().
+  // download partway through. See KnxBusManager.addKeepAliveRef(). Now
+  // also covers the address pre-flight below (moved up here from just
+  // before downloadDevice()) - that phase can itself run for up to 30s
+  // waiting on a real programming-button press, and deserves the same
+  // protection.
   const releaseKeepAlive = b.addKeepAliveRef();
   try {
+    // Real root-cause fix, 2026-08-31 - the user's own exact diagnosis,
+    // verbatim: "Our Write is assuming that the device [...] already has
+    // an address - it does not. That address is only in our DB... ETS
+    // when it does a full download ALWAYS writes the address first,
+    // reboots and then the params etc. We just go straight into the
+    // params, without bothering to verify whether the address exists or
+    // not." Confirmed the hard way, same session: a genuinely factory-
+    // reset device (independently verified via a real bus query to be at
+    // 15.15.255) was given a project address purely as a DB record, with
+    // no write ever sent to the physical device - the subsequent Full
+    // Download still reported "successful", because the per-chunk
+    // WriteRelMem loop is deliberately fault-tolerant (a missing response
+    // is logged and continued, not a hard failure - see that loop's own
+    // comment) - it had been writing into the void the whole time, and
+    // koolenex's own "successful" claim was never independently confirmed
+    // by anything the device itself said.
+    //
+    // Mirrors real ETS's own Full Download procedure exactly, per the
+    // user's own spec: if a serial is on record, confirm a REAL device
+    // answering at deviceAddress actually carries that same serial before
+    // touching anything else. If it doesn't (no answer, a different
+    // serial, or no serial on record at all), there is no way around a
+    // real physical programming-button press to identify and (re)address
+    // the device first - exactly what ETS itself requires, and exactly
+    // the same detect-before-write safety gate already proven in the
+    // client's own addressing flow (AddressDeviceModal.tsx), reused here
+    // server-side: both broadcast mechanisms (serial scan +
+    // legacy address broadcast - a non-Albrecht-Jung device may only
+    // answer one of the two, see docs/knx-device-write-protocol.md §9.5),
+    // and a hard refusal if zero or more than one device answers - this
+    // is a real write, the same ambiguity hazard applies here as there.
+    let addressConfirmed = false;
+    if (dev.serial_number) {
+      try {
+        const info = await b.readDeviceInfo(deviceAddress);
+        if (
+          info.serialNumber &&
+          info.serialNumber.toLowerCase() === dev.serial_number.toLowerCase()
+        ) {
+          addressConfirmed = true;
+          onProgress({
+            msg: `Confirmed device at ${deviceAddress} (serial ${info.serialNumber})`,
+          });
+        } else {
+          onProgress({
+            msg: info.serialNumber
+              ? `Device at ${deviceAddress} reports a different serial (${info.serialNumber}) - re-addressing required`
+              : `Device at ${deviceAddress} answered but reported no serial - re-addressing required`,
+          });
+        }
+      } catch {
+        onProgress({
+          msg: `No device answered at ${deviceAddress} - re-addressing required`,
+        });
+      }
+    } else {
+      onProgress({
+        msg: 'No serial on record for this device - re-addressing required',
+      });
+    }
+
+    if (!addressConfirmed) {
+      // `awaitingButton: true` is the client's cue to show a dedicated
+      // modal (Cancel-only, auto-dismisses once the wait resolves either
+      // way) rather than just updating the button's own inline text -
+      // real request, 2026-08-31: "somewhere to display the press prog
+      // button. Maybe a modal pop-up with just a cancel button, which
+      // automatically disappears once the device is found."
+      onProgress({
+        msg: 'Press the programming button on the device now…',
+        awaitingButton: true,
+      });
+      const roundMs = 3000;
+      const deadline = Date.now() + 30000;
+      const bySrc = new Map<string, string>(); // src -> serial ('' if unknown)
+      while (bySrc.size === 0 && Date.now() < deadline && !aborted) {
+        const thisRound = Math.min(
+          roundMs,
+          Math.max(deadline - Date.now(), 100),
+        );
+        const [serialScan, addrCheck] = await Promise.all([
+          b.readSerialNumbersInProgrammingMode(thisRound),
+          b.checkProgrammingMode(thisRound),
+        ]);
+        for (const d of serialScan) bySrc.set(d.src, d.serial);
+        if (addrCheck.address && !bySrc.has(addrCheck.address)) {
+          bySrc.set(addrCheck.address, '');
+        }
+      }
+      // The client already disconnected (Cancel) - res.json() below would
+      // throw on a destroyed socket; nothing left to do or respond to.
+      if (aborted) return;
+      if (bySrc.size === 0) {
+        return res.status(409).json({
+          error: 'no_device_in_programming_mode',
+          message:
+            'No device answered the programming-mode scan - press and release the programming button on the target device, then try again.',
+        });
+      }
+      if (bySrc.size > 1) {
+        const ids = [...bySrc.entries()]
+          .map(([addr, serial]) => (serial ? `${serial} @ ${addr}` : addr))
+          .join(', ');
+        return res.status(409).json({
+          error: 'ambiguous_programming_mode',
+          message: `${bySrc.size} devices are in programming mode at once (${ids}) - this write would be ambiguous. Press the button on only the one device you mean to program, then try again.`,
+        });
+      }
+      // This message (no awaitingButton flag) is the client's cue to
+      // dismiss the modal - a real device was found, the wait is over.
+      const [foundAddr, foundSerial] = [...bySrc.entries()][0]!;
+      onProgress({
+        msg: `Identified device ${foundSerial || foundAddr} in programming mode - writing address ${deviceAddress}…`,
+      });
+      // programIA() already restarts the device internally
+      // (KnxConnection.restartDevice(), including its own real-capture-
+      // confirmed ~3s post-Restart settle wait) - real request, 2026-08-31:
+      // "Don't forget the device reboot that ETS does once address is
+      // written, waiting till the device is back up". The retry below is
+      // on TOP of that built-in wait, not instead of it - real live-test
+      // finding the same day: even after a full settle wait, a first
+      // confirmation attempt can still genuinely fail ("did not respond"),
+      // so this doesn't rely on a single attempt succeeding.
+      await b.programIA(deviceAddress);
+      onProgress({ msg: `Confirming device at ${deviceAddress}…` });
+      let confirmedInfo: { serialNumber?: string } | null = null;
+      for (let attempt = 1; attempt <= 3 && !aborted; attempt++) {
+        if (attempt > 1) await delay(2000);
+        try {
+          confirmedInfo = await b.readDeviceInfo(deviceAddress);
+          break;
+        } catch (e) {
+          logger.warn('knx', 'Post-address-write confirmation read failed', {
+            deviceAddress,
+            attempt,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+      if (aborted) return;
+      if (!confirmedInfo) {
+        return res.status(502).json({
+          error: 'address_write_unconfirmed',
+          message: `Address ${deviceAddress} was written, but the device did not answer afterward - the write could not be confirmed, so the rest of the download was not attempted.`,
+        });
+      }
+      if (confirmedInfo.serialNumber) {
+        db.run(
+          'UPDATE devices SET serial_number=?, has_address=1 WHERE id=?',
+          [confirmedInfo.serialNumber, dev.id],
+        );
+        onProgress({
+          msg: `Confirmed device at ${deviceAddress}, serial ${confirmedInfo.serialNumber} - rebooted, continuing with the rest of the download`,
+        });
+      } else {
+        onProgress({
+          msg: `Device answered at ${deviceAddress} but reported no serial - continuing anyway`,
+        });
+      }
+    }
+    if (aborted) return;
+
     await b.downloadDevice(
       deviceAddress,
       steps,

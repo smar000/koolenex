@@ -459,11 +459,18 @@ export const api = {
       address: string | null;
       restarted: boolean;
     }>('POST', '/bus/assign-address-by-serial', { serial, newAddress }),
+  // `signal` (2026-08-31): the route's own address pre-flight can now
+  // genuinely wait up to 30s for a physical programming-button press -
+  // lets a caller give up early (the "press the button" modal's own
+  // Cancel button) rather than being stuck waiting the full window. See
+  // busReadSerialsInProgrammingMode's own doc comment for the identical
+  // pattern used there first.
   busProgramDevice: (
     deviceAddress: string,
     projectId: number,
     deviceId: number,
     mode?: 'full' | 'partial',
+    signal?: AbortSignal,
   ) =>
     req<{
       ok: boolean;
@@ -477,7 +484,13 @@ export const api = {
       // part of this download's plan).
       serialNumber?: string;
       totalBytes: number;
-    }>('POST', '/bus/program-device', { deviceAddress, projectId, deviceId, mode }),
+    }>(
+      'POST',
+      '/bus/program-device',
+      { deviceAddress, projectId, deviceId, mode },
+      false,
+      signal,
+    ),
 
   // Read-only: compare a device's actual memory to the computed image (no writes)
   busVerifyDevice: (

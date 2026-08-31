@@ -368,6 +368,34 @@ export function useProjectHandlers(
     [state.activeProjectId, pushUndo],
   );
 
+  // Re-runs a cached verify comparison's PROJECT/expected side against
+  // fresh DB state, reusing the already-cached DEVICE/actual side - no bus
+  // access. No-ops (matching the old CLEAR_VERIFY_RESULT behavior it
+  // replaces) when there's no cache entry for this device to recompute
+  // against - nothing stale to fix in that case. Real user feedback,
+  // 2026-08-31: "If we have previously verified the device and have its
+  // data in cache, why make it stale when DB items are modified? ... no
+  // real gain in forcing a re-read of device memory. Better we just re-run
+  // the comparison of our modified DB values against the previously cached
+  // device values." Swallows its own errors (logged, not thrown) - a
+  // failed recompute shouldn't surface as if the edit itself (which
+  // already succeeded and was already dispatched) had failed; worst case
+  // the compare view is left showing the pre-edit cached comparison, same
+  // as before this feature existed.
+  const refreshVerifyCache = useCallback(
+    async (deviceId: number) => {
+      const prior = state.verifyCache[deviceId];
+      if (!prior) return;
+      try {
+        const result = await api.busRecomputeVerify(deviceId, prior.result);
+        dispatch({ type: 'RECOMPUTE_VERIFY_RESULT', deviceId, result });
+      } catch (e) {
+        console.error('Failed to recompute cached verify result', e);
+      }
+    },
+    [state.verifyCache],
+  );
+
   const handleUpdateComObjectGAs = useCallback(
     async (coId: number, body: any) => {
       if (!state.activeProjectId) return;
@@ -409,19 +437,20 @@ export function useProjectHandlers(
         // slide-over both read the SAME cached verify result
         // (state.verifyCache[deviceId]) - its "project" column is a
         // snapshot of what the target looked like at the moment that
-        // Verify ran, not a live recompute. Left in place, a genuine edit
-        // silently kept showing that stale pre-edit target next to the
-        // (now also stale) device reading, with nothing indicating either
-        // side had moved. Real user feedback, 2026-08-31: "our comparison
+        // Verify ran. Left untouched, a genuine edit silently kept showing
+        // that stale pre-edit target next to the (still perfectly valid)
+        // device reading. Real user feedback, 2026-08-31: "our comparison
         // page ... is still defaulting to the original unmodified
-        // version." Dropping the cache entry (same action the
-        // Programming page's own per-row clear button already uses)
-        // forces both pages back to their real empty/"run Verify" state
-        // instead of showing a comparison that's quietly gone wrong.
-        dispatch({ type: 'CLEAR_VERIFY_RESULT', deviceId: updated.device_id });
+        // version" - followed by a direct correction on the fix (an
+        // earlier version of this comment just cleared the cache
+        // entirely): "why make it stale when DB items are modified? ...
+        // Better we just re-run the comparison of our modified DB values
+        // against the previously cached device values." See
+        // refreshVerifyCache's own doc comment above.
+        void refreshVerifyCache(updated.device_id);
       }
     },
-    [state.activeProjectId],
+    [state.activeProjectId, refreshVerifyCache],
   );
 
   const handleUpdateComObjectFlags = useCallback(
@@ -459,28 +488,32 @@ export function useProjectHandlers(
       });
       // See the matching comments in handleUpdateComObjectGAs above - same
       // server-side markDeviceModifiedIfProgrammed() mechanism, and same
-      // stale-compare-cache reasoning for the CLEAR_VERIFY_RESULT dispatch.
+      // local-recompute reasoning for the refreshVerifyCache call.
       if (updated.device_status) {
         dispatch({
           type: 'SET_DEVICE_STATUS',
           deviceId: updated.device_id,
           status: updated.device_status as any,
         });
-        dispatch({ type: 'CLEAR_VERIFY_RESULT', deviceId: updated.device_id });
+        void refreshVerifyCache(updated.device_id);
       }
     },
-    [state.activeProjectId],
+    [state.activeProjectId, refreshVerifyCache],
   );
 
-  const applyDeviceStatus = useCallback((deviceId: number, status: string) => {
-    dispatch({ type: 'SET_DEVICE_STATUS', deviceId, status: status as any });
-    // Same stale-compare-cache reasoning as handleUpdateComObjectGAs/Flags
-    // above - every caller of applyDeviceStatus (currently just
-    // DeviceParameters.tsx's save) only calls it when the server actually
-    // persisted a genuine change, so the device's cached verify result
-    // (its "project" column) is stale the moment this fires.
-    dispatch({ type: 'CLEAR_VERIFY_RESULT', deviceId });
-  }, []);
+  const applyDeviceStatus = useCallback(
+    (deviceId: number, status: string) => {
+      dispatch({ type: 'SET_DEVICE_STATUS', deviceId, status: status as any });
+      // Same local-recompute reasoning as handleUpdateComObjectGAs/Flags
+      // above - every caller of applyDeviceStatus (currently just
+      // DeviceParameters.tsx's save) only calls it when the server
+      // actually persisted a genuine change, so the device's cached
+      // verify result (its "project" column) is stale the moment this
+      // fires.
+      void refreshVerifyCache(deviceId);
+    },
+    [refreshVerifyCache],
+  );
 
   const handleAddScannedDevice = useCallback(
     async (address: string) => {

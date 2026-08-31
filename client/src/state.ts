@@ -162,7 +162,17 @@ interface BusStatus {
 
 export interface VerifyCacheEntry {
   result: VerifyDeviceResult;
+  // The last REAL bus read - never touched by RECOMPUTE_VERIFY_RESULT (see
+  // below), only by a genuine /bus/verify-device round trip.
   fetchedAt: number;
+  // Set only by RECOMPUTE_VERIFY_RESULT (never by SET_VERIFY_RESULT, a
+  // real read, which clears it back to undefined) - the last time the
+  // PROJECT/expected side was locally recomputed against fresh DB state
+  // without a new device read, added 2026-08-31 (see the matching
+  // reasoning in server/routes/bus.ts's /bus/verify-device/recompute).
+  // Lets the UI say "recomputed just now, device last read 5m ago"
+  // honestly, instead of implying a fresh bus round trip happened.
+  recomputedAt?: number;
 }
 
 export interface AppState {
@@ -235,6 +245,14 @@ export type Action =
   | { type: 'SET_DEVICE_STATUS'; deviceId: number; status: DeviceStatus }
   | {
       type: 'SET_VERIFY_RESULT';
+      deviceId: number;
+      result: VerifyDeviceResult;
+    }
+  | {
+      // Local recompute (no bus access) - see VerifyCacheEntry.recomputedAt's
+      // doc comment. No-ops (like CLEAR_VERIFY_RESULT already does) if
+      // there's no cache entry for this device to recompute against.
+      type: 'RECOMPUTE_VERIFY_RESULT';
       deviceId: number;
       result: VerifyDeviceResult;
     }
@@ -369,9 +387,26 @@ export function reducer(state: AppState, action: Action): AppState {
         ...state,
         verifyCache: {
           ...state.verifyCache,
+          // A genuine new read - clears any stale recomputedAt from a
+          // prior local recompute rather than carrying it forward.
           [action.deviceId]: { result: action.result, fetchedAt: Date.now() },
         },
       };
+    case 'RECOMPUTE_VERIFY_RESULT': {
+      const prior = state.verifyCache[action.deviceId];
+      if (!prior) return state; // nothing cached to recompute against
+      return {
+        ...state,
+        verifyCache: {
+          ...state.verifyCache,
+          [action.deviceId]: {
+            result: action.result,
+            fetchedAt: prior.fetchedAt, // the real device read time - unchanged
+            recomputedAt: Date.now(),
+          },
+        },
+      };
+    }
     case 'HYDRATE_VERIFY_CACHE':
       // Loading from IndexedDB is async, so this lands after mount - merge
       // rather than overwrite in case a verify somehow completed first.

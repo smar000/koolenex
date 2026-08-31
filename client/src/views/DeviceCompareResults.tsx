@@ -331,9 +331,22 @@ export function DeviceCompareResults({
             {cacheEntry && (
               <span
                 className={styles.cacheNote}
-                title={new Date(cacheEntry.fetchedAt).toLocaleString()}
+                title={
+                  // Honest about what actually happened, 2026-08-31: a
+                  // local edit now recomputes the PROJECT/expected side
+                  // against fresh DB state without a new bus read (see
+                  // refreshVerifyCache, useProjectHandlers.ts) - the
+                  // DEVICE/actual side shown is still only as fresh as the
+                  // last real read, so both timestamps are worth showing,
+                  // not just whichever is more recent.
+                  cacheEntry.recomputedAt
+                    ? `Device last read ${new Date(cacheEntry.fetchedAt).toLocaleString()} · project recomputed ${new Date(cacheEntry.recomputedAt).toLocaleString()}`
+                    : new Date(cacheEntry.fetchedAt).toLocaleString()
+                }
               >
-                cached · read {timeAgo(cacheEntry.fetchedAt)}
+                {cacheEntry.recomputedAt
+                  ? `recomputed ${timeAgo(cacheEntry.recomputedAt)} · device read ${timeAgo(cacheEntry.fetchedAt)}`
+                  : `cached · read ${timeAgo(cacheEntry.fetchedAt)}`}
               </span>
             )}
 

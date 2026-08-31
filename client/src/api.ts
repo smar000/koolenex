@@ -447,6 +447,20 @@ export const api = {
       deviceId,
     }),
 
+  // Re-runs a cached verify comparison's PROJECT/expected side against
+  // fresh DB state, reusing the already-cached DEVICE/actual side - no bus
+  // access at all. See server/routes/bus.ts's route doc comment for the
+  // full reasoning (real user feedback, 2026-08-31: editing a com object's
+  // flags/GA-link/param values doesn't change what's on the device, only
+  // what we now expect, so there's no reason a local edit should force a
+  // live re-read just to see an accurate comparison again).
+  busRecomputeVerify: (deviceId: number, cached: VerifyDeviceResult) =>
+    req<VerifyDeviceResult & { recomputedAt: number }>(
+      'POST',
+      '/bus/verify-device/recompute',
+      { deviceId, cached },
+    ),
+
   // Settings
   getSettings: () => req<Setting[]>('GET', '/settings'),
   saveSettings: (body: Record<string, string>) =>

@@ -1527,6 +1527,149 @@ describe('POST /bus/verify-device — GA/Association table fallback for an app t
   });
 });
 
+// ── verify-device/recompute: local (no-bus) re-diff against cached device
+// data — real user feedback, 2026-08-31: "If we have previously verified
+// the device and have its data in cache, why make it stale when DB items
+// are modified? ... Better we just re-run the comparison of our modified
+// DB values against the previously cached device values." ─────────────────
+describe('POST /bus/verify-device/recompute', () => {
+  let projectId: number;
+  let deviceId: number;
+  const deviceAddr = '1.1.34';
+  const PARAM_BASE = 0x5200;
+  const GA_BASE = 0x6200;
+  const ASSOC_BASE = 0x6300;
+  const gaTable = buildGATable(GA_LINKS);
+  const assocTable = buildAssocTable(CO_ROWS, GA_LINKS);
+  const paramMem = Buffer.from([0x01, 0x00, 0x00, 0x00]);
+
+  before(() => {
+    ts.db.run(`INSERT INTO projects (name) VALUES ('verify-recompute')`);
+    projectId = ts.db.get<{ id: number }>(
+      `SELECT id FROM projects WHERE name='verify-recompute'`,
+    )!.id;
+    deviceId = seedDevice(
+      ts.db,
+      projectId,
+      deviceAddr,
+      RELMEM_APP,
+      GA_LINKS,
+      CO_ROWS,
+    );
+  });
+
+  // Gets a genuine cached VerifyDeviceResult by running a real (mocked)
+  // /bus/verify-device against a device that currently matches exactly -
+  // the recompute tests below then edit the DB and recompute LOCALLY
+  // against this same cached result, with no further bus access.
+  async function realVerify(): Promise<any> {
+    mockBus.connected = true;
+    mockBus.propImage = new Map([
+      ['4/7', Buffer.from([0, 0, PARAM_BASE >> 8, PARAM_BASE & 0xff])],
+      ['1/7', Buffer.from([0, 0, GA_BASE >> 8, GA_BASE & 0xff])],
+      ['2/7', Buffer.from([0, 0, ASSOC_BASE >> 8, ASSOC_BASE & 0xff])],
+    ]);
+    const map = new Map<number, number>();
+    for (let i = 0; i < paramMem.length; i++) map.set(PARAM_BASE + i, paramMem[i]!);
+    for (let i = 0; i < gaTable.length; i++) map.set(GA_BASE + i, gaTable[i]!);
+    for (let i = 0; i < assocTable.length; i++)
+      map.set(ASSOC_BASE + i, assocTable[i]!);
+    mockBus.memImage = map;
+    const r = await req(ts.baseUrl, 'POST', '/bus/verify-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    mockBus.propImage = null;
+    mockBus.memImage = null;
+    assert.equal(r.status, 200);
+    assert.equal((r.data as any).match, true);
+    return r.data;
+  }
+
+  it('returns 404 for a device that does not exist', async () => {
+    const cached = await realVerify();
+    const r = await req(ts.baseUrl, 'POST', '/bus/verify-device/recompute', {
+      deviceId: 999999,
+      cached,
+    });
+    assert.equal(r.status, 404);
+  });
+
+  it('recomputes clean (no changes) with no bus calls, reusing the cached actual bytes', async () => {
+    const cached = await realVerify();
+    mockBus.calls = [];
+    const r = await req(ts.baseUrl, 'POST', '/bus/verify-device/recompute', {
+      deviceId,
+      cached,
+    });
+    assert.equal(r.status, 200);
+    const body = r.data as any;
+    assert.equal(body.match, true);
+    assert.equal(body.totalDiffering, 0);
+    assert.ok(typeof body.recomputedAt === 'number');
+    // The whole point - no bus interaction at all for a recompute.
+    assert.deepEqual(mockBus.calls, []);
+  });
+
+  it('flags a GA-link row as mismatched after the project GA link changes, without touching the device side', async () => {
+    const cached = await realVerify();
+    // Change com object 0's GA link in the DB - the device side (what's
+    // cached in `cached`) is untouched.
+    ts.db.run(
+      `UPDATE com_objects SET ga_address=?, ga_send=?, ga_receive=? WHERE device_id=? AND object_number=0`,
+      ['2/1/3', '2/1/3', '2/1/3', deviceId],
+    );
+    mockBus.calls = [];
+    const r = await req(ts.baseUrl, 'POST', '/bus/verify-device/recompute', {
+      deviceId,
+      cached,
+    });
+    assert.equal(r.status, 200);
+    const body = r.data as any;
+    assert.equal(body.match, false);
+    assert.deepEqual(mockBus.calls, []);
+    const co0 = (body.decoded ?? []).find((d: any) => d.key === 'co-0-ga');
+    assert.equal(co0.expectedValue, '2/1/3');
+    assert.equal(co0.actualValue, '2/1/2'); // unchanged - the device's own last real reading
+    assert.equal(co0.match, false);
+    // Untouched rows still report a clean match.
+    const co12 = (body.decoded ?? []).find((d: any) => d.key === 'co-12-ga');
+    assert.equal(co12.match, true);
+
+    // Restore for the next test.
+    ts.db.run(
+      `UPDATE com_objects SET ga_address=?, ga_send=?, ga_receive=? WHERE device_id=? AND object_number=0`,
+      ['2/1/2', '2/1/2', '2/1/2', deviceId],
+    );
+  });
+
+  it('flags the parameter row as mismatched after a param value changes', async () => {
+    const cached = await realVerify();
+    ts.db.run(`UPDATE devices SET param_values=? WHERE id=?`, [
+      JSON.stringify({ [`${RELMEM_APP}_P-1_R-1`]: '99' }),
+      deviceId,
+    ]);
+    mockBus.calls = [];
+    const r = await req(ts.baseUrl, 'POST', '/bus/verify-device/recompute', {
+      deviceId,
+      cached,
+    });
+    assert.equal(r.status, 200);
+    const body = r.data as any;
+    assert.equal(body.match, false);
+    assert.ok(body.totalDiffering > 0);
+    assert.deepEqual(mockBus.calls, []);
+    const paramRow = (body.decoded ?? []).find(
+      (d: any) => d.key === `${RELMEM_APP}_P-1_R-1`,
+    );
+    assert.ok(paramRow);
+    assert.equal(paramRow.match, false);
+
+    // Restore for isolation from any later test reusing this device.
+    ts.db.run(`UPDATE devices SET param_values=? WHERE id=?`, ['{}', deviceId]);
+  });
+});
+
 // ── program-device: buildDeviceProgramming() constructs a real Object 3
 // (Group Object Table) and passes it through to downloadDevice() (2026-08-29)
 // ─────────────────────────────────────────────────────────────────────────

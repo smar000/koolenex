@@ -1861,6 +1861,303 @@ async function runVerifyDevice(
   }
 }
 
+// Recomputes a verify comparison's PROJECT/expected side fresh from current
+// DB state, reusing whatever DEVICE/actual side is already cached client-
+// side from the last real bus read - deliberately NO bus access at all.
+// Real user feedback, 2026-08-31: "If we have previously verified the
+// device and have its data in cache, why make it stale when DB items are
+// modified? ... no real gain in forcing a re-read of device memory. Better
+// we just re-run the comparison of our modified DB values against the
+// previously cached device values." Correct: nothing about editing a com
+// object's flags, a GA link, or a parameter value changes what's actually
+// sitting in the device's memory - only what we now expect to find there -
+// so there's no reason a local edit should force the user back through a
+// live bus round trip just to see an accurate comparison again.
+//
+// buildDeviceProgramming(dev) and every decode helper this reuses
+// (decodeParamMem/decodeGATable/decodeAssocTable/decodeGroupObjectEntry)
+// are pure DB/model functions - none of them touch the bus, confirmed by
+// inspection: runVerifyDevice() above already calls buildDeviceProgramming
+// BEFORE resolving any live device addressing. The one thing genuinely
+// impossible without a live read is a FRESH actual/device-side reading -
+// this route never attempts that, it only re-diffs the caller's existing
+// actual bytes/values against a newly-computed expected side.
+//
+// Scope, honestly limited rather than silently wrong: the raw byte-level
+// `segments` comparison (and its derived param `decoded` rows) is only
+// recomputed for the common relmem/single-segment case this project has
+// real hardware confirmation for (see paramMemLayout gate below) - other
+// shapes (absmem/MDT-style, multi-segment) pass the cached segment through
+// unchanged rather than risk a wrong recompute for a family this project
+// has never proven the technique against. GA-link and Object 3 flag rows,
+// by contrast, are always recomputed when the device's app model supports
+// them at all - both are pure function-of-(com_objects, fresh table)
+// lookups with no family-specific memory-layout assumptions, so there's no
+// analogous gap to guard against there.
+// .passthrough() on both - the client's real segment/decoded-row shapes
+// (VerifyDeviceResult in client/src/api.ts) carry extra fields this route
+// doesn't need to touch (matching/differing/chunks on a segment; unit/
+// bitOffset/bitSize/rawValue/section/group on a decoded row) - stripping
+// them here would silently corrupt any row this route DOESN'T recompute
+// (the "can't safely recompute this shape, pass it through unchanged"
+// fallback paths below) by handing back an incomplete object in place of
+// the real one.
+const RecomputeSegmentSchema = z
+  .object({
+    label: z.string(),
+    offset: z.number(),
+    size: z.number(),
+    expectedHex: z.string(),
+    actualHex: z.string(),
+  })
+  .passthrough();
+type RecomputeSegment = z.infer<typeof RecomputeSegmentSchema> & {
+  matching?: number;
+  differing?: number;
+};
+const RecomputeDecodedSchema = z
+  .object({ key: z.string().optional() })
+  .passthrough();
+type RecomputeDecoded = z.infer<typeof RecomputeDecodedSchema> & {
+  actualValue?: unknown;
+  obj3Actual?: unknown;
+  match?: boolean | null;
+};
+
+router.post(
+  '/bus/verify-device/recompute',
+  (req: Request, res: Response): void => {
+    const body = validateBody(
+      req,
+      z.object({
+        deviceId: z.number().int(),
+        cached: z.object({
+          deviceAddress: z.string(),
+          family: z.string(),
+          totalBytes: z.number(),
+          totalDiffering: z.number(),
+          segments: z.array(RecomputeSegmentSchema),
+          props: z.array(z.record(z.string(), z.unknown())).default([]),
+          decoded: z.array(RecomputeDecodedSchema).optional(),
+          flagsTotalBytes: z.number().optional(),
+          flagsDifferingBytes: z.number().optional(),
+        }),
+      }),
+    );
+    const { deviceId, cached } = body;
+
+    const dev = db.get<Device>('SELECT * FROM devices WHERE id=?', [
+      deviceId,
+    ]);
+    if (!dev) {
+      res.status(404).json({ error: 'Device not found' });
+      return;
+    }
+
+    const built = buildDeviceProgramming(dev);
+    if (!built.ok) {
+      res.status(built.status).json(built.body);
+      return;
+    }
+    const {
+      paramMem,
+      paramMemLayout,
+      params: paramDefs,
+      gaTable,
+      assocTable,
+      groupObjectTable,
+    } = built;
+
+    let segments: RecomputeSegment[] = cached.segments;
+    let totalBytes = 0;
+    let totalDiffering = 0;
+    let paramRows: RecomputeDecoded[] | null = null;
+
+    // Only the exact shape runVerifyDevice()'s own decode gate covers
+    // (single relmem segment, a real paramMemLayout) - see this function's
+    // own doc comment above for why other shapes are left untouched.
+    const cachedSeg = cached.segments.length === 1 ? cached.segments[0] : null;
+    const cachedActualBuf = cachedSeg
+      ? Buffer.from(cachedSeg.actualHex, 'hex')
+      : null;
+    const canRecomputeParams =
+      cached.family === 'relmem' &&
+      cachedSeg &&
+      cachedActualBuf &&
+      paramMem &&
+      paramMem.length === cachedActualBuf.length &&
+      paramMemLayout &&
+      Object.keys(paramMemLayout).length > 0;
+
+    if (canRecomputeParams && cachedSeg && cachedActualBuf) {
+      const diff = diffMemory(paramMem!, cachedActualBuf, cachedSeg.offset);
+      segments = [
+        {
+          ...cachedSeg,
+          expectedHex: paramMem!.toString('hex'),
+          matching: diff.matching,
+          differing: diff.differing,
+        },
+      ];
+      totalBytes += diff.total;
+      totalDiffering += diff.differing;
+
+      const layout = paramMemLayout as Parameters<typeof decodeParamMem>[1];
+      const defs = paramDefs as Parameters<typeof decodeParamMem>[2];
+      const expectedDecoded = decodeParamMem(paramMem!, layout, defs);
+      const actualDecoded = decodeParamMem(cachedActualBuf, layout, defs);
+      const actualByKey = new Map(actualDecoded.map((d) => [d.key, d]));
+      paramRows = expectedDecoded.map(({ value, ...exp }) => {
+        const act = actualByKey.get(exp.key);
+        return {
+          ...exp,
+          expectedValue: value,
+          actualValue: act?.value ?? null,
+          match: act ? act.value === value : null,
+        };
+      });
+    } else {
+      // Can't safely recompute this shape - keep the cached segment/totals
+      // exactly as they were rather than guess.
+      totalBytes = cached.totalBytes;
+      totalDiffering = cached.totalDiffering;
+    }
+
+    const cachedDecoded: RecomputeDecoded[] = cached.decoded ?? [];
+    const priorParamRows = cachedDecoded.filter(
+      (d) => !String(d.key ?? '').startsWith('co-'),
+    );
+    const priorGaRows = new Map(
+      cachedDecoded
+        .filter((d) => String(d.key ?? '').endsWith('-ga'))
+        .map((d) => [d.key as string, d]),
+    );
+    const priorObj3Rows = new Map(
+      cachedDecoded
+        .filter((d) => String(d.key ?? '').endsWith('-obj3'))
+        .map((d) => [d.key as string, d]),
+    );
+
+    const coRows = db.all<ComObject>(
+      'SELECT * FROM com_objects WHERE device_id=? ORDER BY object_number',
+      [dev.id],
+    );
+
+    // GA-link rows - always recomputed when the app model has a GA table at
+    // all, regardless of device family (pure com_objects + fresh gaTable/
+    // assocTable lookup, no raw-byte/addressing dependency - see this
+    // function's doc comment above).
+    let gaRows: RecomputeDecoded[] = [];
+    if (gaTable && assocTable) {
+      const expectedGAs = decodeGATable(gaTable);
+      const expectedAssoc = decodeAssocTable(assocTable, expectedGAs);
+      const groupByCO = (
+        entries: Array<{ coNumber: number; ga: string | null }>,
+      ): Map<number, string> => {
+        const m = new Map<number, string[]>();
+        for (const e of entries) {
+          if (!m.has(e.coNumber)) m.set(e.coNumber, []);
+          if (e.ga) m.get(e.coNumber)!.push(e.ga);
+        }
+        return new Map([...m].map(([co, gas]) => [co, gas.join(' ')]));
+      };
+      const expectedByCO = groupByCO(expectedAssoc);
+      for (const co of coRows) {
+        const key = `co-${co.object_number}-ga`;
+        const prior = priorGaRows.get(key);
+        const expectedGA = expectedByCO.get(co.object_number) ?? null;
+        const actualGA = (prior?.actualValue as string | null) ?? null;
+        if (expectedGA == null && actualGA == null) continue;
+        gaRows.push({
+          key,
+          label: co.name || `CO ${co.object_number}`,
+          section: 'Group Addresses',
+          group: co.channel || '',
+          unit: '',
+          offset: 0,
+          bitOffset: 0,
+          bitSize: 0,
+          rawValue: '',
+          expectedValue: expectedGA ?? '(none)',
+          actualValue: actualGA,
+          match: expectedGA === actualGA,
+        });
+      }
+    }
+
+    // Object 3 rows - same reasoning, always recomputed when a Group
+    // Object Table exists for this app.
+    let obj3Rows: RecomputeDecoded[] = [];
+    if (groupObjectTable) {
+      const fmtEntry = (
+        e: { flagByte: number; sizeCodeByte: number } | null,
+      ): string => (e ? describeGroupObjectEntry(e) : '(out of range)');
+      for (const co of coRows) {
+        const key = `co-${co.object_number}-obj3`;
+        const prior = priorObj3Rows.get(key);
+        const expectedEntry = decodeGroupObjectEntry(
+          groupObjectTable,
+          co.object_number,
+        );
+        const actualStr = (prior?.actualValue as string | null) ?? null;
+        if (!expectedEntry && actualStr == null) continue;
+        const expectedStr = fmtEntry(expectedEntry);
+        obj3Rows.push({
+          key,
+          label: co.name || `CO ${co.object_number}`,
+          section: 'Group Object Table',
+          group: co.channel || '',
+          unit: '',
+          offset: co.object_number * 2,
+          bitOffset: 0,
+          bitSize: 0,
+          rawValue: '',
+          expectedValue: expectedStr,
+          actualValue: actualStr,
+          match: expectedStr === actualStr,
+          obj3Expected: expectedEntry
+            ? decodeGroupObjectEntryFlags(expectedEntry)
+            : undefined,
+          obj3Actual: prior?.obj3Actual ?? null,
+        });
+      }
+    }
+
+    const decoded = [
+      ...(paramRows ?? priorParamRows),
+      ...(gaTable && assocTable
+        ? gaRows
+        : [...priorGaRows.values()]),
+      ...(groupObjectTable ? obj3Rows : [...priorObj3Rows.values()]),
+    ];
+    const allDecodedMatch =
+      !decoded.length || decoded.every((d) => d.match !== false);
+
+    res.json({
+      deviceAddress: cached.deviceAddress,
+      family: cached.family,
+      match: totalDiffering === 0 && allDecodedMatch,
+      totalBytes,
+      totalDiffering,
+      segments,
+      props: cached.props,
+      decoded,
+      ...(cached.flagsTotalBytes !== undefined
+        ? {
+            flagsTotalBytes: cached.flagsTotalBytes,
+            flagsDifferingBytes: cached.flagsDifferingBytes,
+          }
+        : {}),
+      // Marks this as a LOCAL recompute, not a fresh device read - the
+      // client keeps its original `fetchedAt` (the last real bus read
+      // time) and layers this on top, so the UI can be honest about what
+      // actually happened ("recomputed just now, device last read 5m
+      // ago") instead of implying a new bus round trip occurred.
+      recomputedAt: Date.now(),
+    });
+  },
+);
+
 export function setBus(b: KnxBusManager): void {
   bus = b;
   wireBusEvents();

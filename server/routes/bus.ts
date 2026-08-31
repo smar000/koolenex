@@ -1297,13 +1297,52 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     // its original .knxproj import (a real ETS-reported download
     // timestamp), even after a genuine, confirmed-on-hardware koolenex
     // write. Set it here too, to the moment this write actually completed.
-    db.run('UPDATE devices SET status=?, last_download=? WHERE id=?', [
-      'programmed',
-      new Date().toISOString(),
-      dev.id,
-    ]);
+    //
+    // Real gap, found live 2026-08-31: a plain Program/Full-Download never
+    // captured the device's serial at all (only the addressing flow's own
+    // read-back did - AddressDeviceModal), so the Verify button's real,
+    // deliberate gate on serial_number (a physically-confirmed serial is
+    // the genuine "this exact unit was actually commissioned" signal -
+    // real user confirmation, same day: "we should have both address and
+    // serial number for a device before we enable verify") stayed
+    // permanently unsatisfiable for a device programmed this way. Best-
+    // effort read-back here, same mechanism/spirit as the addressing
+    // flow's own busDeviceInfo() call - failure is logged but does not
+    // fail the overall (already-succeeded) download.
+    let serialNumber: string | undefined;
+    try {
+      const info = await b.readDeviceInfo(deviceAddress);
+      serialNumber = info.serialNumber;
+    } catch (e) {
+      logger.warn('knx', 'Post-download serial read-back failed (continuing anyway)', {
+        deviceAddress,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+    const totalBytes =
+      (gaTable?.length ?? 0) +
+      (assocTable?.length ?? 0) +
+      (paramMem?.length ?? 0) +
+      (groupObjectTable?.length ?? 0);
+    if (serialNumber) {
+      db.run(
+        'UPDATE devices SET status=?, last_download=?, serial_number=? WHERE id=?',
+        ['programmed', new Date().toISOString(), serialNumber, dev.id],
+      );
+    } else {
+      db.run('UPDATE devices SET status=?, last_download=? WHERE id=?', [
+        'programmed',
+        new Date().toISOString(),
+        dev.id,
+      ]);
+    }
+    // Real request, 2026-08-31: "the log doesn't say that the download was
+    // successful. We should show this in the logs, including serial
+    // number of the device, and the number of bytes written." - the
+    // client's own success log line (ProgrammingView.tsx's programDevice())
+    // reads straight from this response.
     db.scheduleSave();
-    res.json({ ok: true, deviceAddress, mode });
+    res.json({ ok: true, deviceAddress, mode, serialNumber, totalBytes });
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
     b.broadcast('program:progress', {

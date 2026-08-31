@@ -16,6 +16,7 @@ import { api } from '../api.ts';
 import {
   useAppData,
   useBusActions,
+  useProjectActions,
   useVerifyCache,
   useProgrammingLog,
 } from '../contexts.ts';
@@ -26,6 +27,7 @@ import styles from './ProgrammingView.module.css';
 export function ProgrammingView() {
   const { projectData: data } = useAppData();
   const { deviceStatus: onDeviceStatus } = useBusActions();
+  const { updateDevice } = useProjectActions();
   const {
     cache: verifyCache,
     setResult: setVerifyResult,
@@ -233,12 +235,29 @@ export function ProgrammingView() {
     );
     try {
       const pid = data?.project?.id;
-      await api.busProgramDevice(devAddr, pid!, deviceId, mode);
+      const result = await api.busProgramDevice(devAddr, pid!, deviceId, mode);
       setProgress((p) => ({ ...p, [deviceId]: { state: 'done' } }));
+      // Real request, 2026-08-31: "the log doesn't say that the download
+      // was successful. We should show this in the logs, including
+      // serial number of the device, and the number of bytes written."
       addLog(
-        `[${new Date().toLocaleTimeString()}] Downloaded (${mode}) → ${devAddr}`,
+        `[${new Date().toLocaleTimeString()}] ✓ Download successful (${mode}) → ${devAddr}` +
+          (result.serialNumber ? `, serial ${result.serialNumber}` : '') +
+          `, ${result.totalBytes} bytes written`,
       );
       onDeviceStatus(deviceId, 'programmed');
+      // The server already persisted the read-back serial (see /bus/
+      // program-device's own doc comment) - sync it into local state too,
+      // the same way onDeviceStatus above syncs `status`, so the Verify
+      // button (gated on serial_number - real user confirmation, same
+      // day: "we should have both address and serial number for a device
+      // before we enable verify") reflects it immediately, not just after
+      // a reload.
+      if (result.serialNumber) {
+        updateDevice(deviceId, { serial_number: result.serialNumber }).catch(
+          () => {},
+        );
+      }
       // A successful write just changed the device's real content - the
       // cached verify result (if any) now describes the PRE-write state and
       // would otherwise keep showing until the user manually hits "clear
@@ -732,6 +751,18 @@ export function ProgrammingView() {
                             onClick={() =>
                               verifyDevice(d.id, d.individual_address)
                             }
+                            // Gating on serial_number (not just has_address/
+                            // status) is deliberate, real user confirmation
+                            // 2026-08-31: a physically-confirmed serial is
+                            // the genuine "this exact unit was actually
+                            // commissioned" signal, not merely "the project
+                            // thinks a download happened". The real gap
+                            // this surfaced (a plain Program/Full-Download
+                            // never captured a serial at all, unlike the
+                            // addressing flow) is fixed at the source
+                            // instead - see /bus/program-device's own
+                            // post-write serial read-back, server/routes/
+                            // bus.ts.
                             disabled={
                               prog?.state === 'running' ||
                               verifying ||

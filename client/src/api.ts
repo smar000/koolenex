@@ -465,11 +465,19 @@ export const api = {
     deviceId: number,
     mode?: 'full' | 'partial',
   ) =>
-    req<{ ok: boolean; deviceAddress: string; mode: 'full' | 'partial' }>(
-      'POST',
-      '/bus/program-device',
-      { deviceAddress, projectId, deviceId, mode },
-    ),
+    req<{
+      ok: boolean;
+      deviceAddress: string;
+      mode: 'full' | 'partial';
+      // Best-effort post-write read-back (server/routes/bus.ts) - real
+      // request, 2026-08-31: capture and surface the same identity/size
+      // info the log should show. serialNumber absent if the device
+      // didn't answer that read; totalBytes is always a real number (the
+      // combined size of whatever tables/parameter memory were actually
+      // part of this download's plan).
+      serialNumber?: string;
+      totalBytes: number;
+    }>('POST', '/bus/program-device', { deviceAddress, projectId, deviceId, mode }),
 
   // Read-only: compare a device's actual memory to the computed image (no writes)
   busVerifyDevice: (

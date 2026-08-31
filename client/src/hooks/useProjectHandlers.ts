@@ -551,7 +551,13 @@ export function useProjectHandlers(
 
   const handleAddScannedDevice = useCallback(
     async (address: string) => {
-      if (!state.activeProjectId) return;
+      // Real request, 2026-08-31 (AddressDeviceModal's "add as if it were
+      // a new unassigned device"): the caller needs the created row back
+      // to chain a serial-number record onto it - throwing here (instead
+      // of the previous silent no-op return) surfaces a genuinely missing
+      // project id as a real error rather than a call that quietly does
+      // nothing.
+      if (!state.activeProjectId) throw new Error('No active project');
       const [a, l] = address.split('.').map(Number);
       const device = await api.createDevice(state.activeProjectId, {
         individual_address: address,
@@ -561,6 +567,7 @@ export function useProjectHandlers(
         device_type: 'generic',
       });
       dispatch({ type: 'ADD_DEVICE', device });
+      return device;
     },
     [state.activeProjectId],
   );

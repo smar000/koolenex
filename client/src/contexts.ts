@@ -4,6 +4,7 @@ import type {
   DeviceStatus,
   ProjectFull,
   BusTelegram,
+  Device,
 } from '../../shared/types.ts';
 import type { VerifyDeviceResult } from './api.ts';
 import type { VerifyCacheEntry } from './state.ts';
@@ -90,7 +91,12 @@ export interface ProjectActions {
   addDevice: (body: Record<string, unknown>) => Promise<unknown>;
   updateComObjectGAs: (coId: number, body: unknown) => Promise<void>;
   updateComObjectFlags: (coId: number, body: unknown) => Promise<void>;
-  addScannedDevice: (address: string) => Promise<void>;
+  // Returns the created row (previously void) - real request 2026-08-31,
+  // AddressDeviceModal's "add as if it were a new unassigned device": the
+  // caller needs the new device's own id to chain a serial-number record
+  // onto it right after creation. Existing callers that ignore the return
+  // value (BusScanView.tsx) are unaffected.
+  addScannedDevice: (address: string) => Promise<Device>;
   // Local-only store update (no API call - the caller already got this
   // status from a server response that persisted it, e.g.
   // api.saveParamValues's device_status field). Lets components outside

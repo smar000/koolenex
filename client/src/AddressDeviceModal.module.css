@@ -161,6 +161,29 @@
   font-family: monospace;
   font-size: 12px;
   color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* Copy-to-clipboard button next to a detected serial/address - real
+   request 2026-08-31: "make serial copy'able". Small, text-only, matching
+   the app's existing plain-text-button convention (Clear/Detect/Edit)
+   rather than adding a new icon. */
+.copyBtn {
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 7px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.copyBtn:hover {
+  color: var(--text);
+  border-color: var(--dim);
 }
 .matchedTag {
   font-size: 10px;

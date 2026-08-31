@@ -6,6 +6,37 @@ import type { Device } from '../../shared/types.ts';
 import styles from './AddressDeviceModal.module.css';
 
 /**
+ * Small inline "copy to clipboard" button, used next to a detected serial
+ * (or address, when no serial is available) - real request, 2026-08-31:
+ * "display the serial when we detect a device (in case it doesn't have an
+ * address) and make serial copy'able." Falls back silently if the
+ * Clipboard API is unavailable or denied (e.g. a non-HTTPS context) -
+ * copying is a convenience, not worth surfacing an error over.
+ */
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className={styles.copyBtn}
+      title={`Copy ${text}`}
+      onClick={async (e) => {
+        e.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          // Nothing more to do - see doc comment above.
+        }
+      }}
+    >
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  );
+}
+
+/**
  * Guided flow for writing a real KNX individual address onto a physical
  * device - either a device currently in programming mode (pressed once to
  * enter it, not held down) or one identified purely by its serial number.
@@ -71,7 +102,7 @@ export function AddressDeviceModal({
   onClose: () => void;
   addLog: (line: string) => void;
 }) {
-  const { updateDevice, unassignDevice } = useProjectActions();
+  const { updateDevice, unassignDevice, addScannedDevice } = useProjectActions();
   const { connect } = useBusActions();
   const { busStatus } = useLiveData();
   const [tab, setTab] = useState<'detect' | 'serial'>(initialTab ?? 'detect');
@@ -98,6 +129,19 @@ export function AddressDeviceModal({
     ? devices
     : devices.filter((d) => d.status === 'unassigned');
 
+  // Broader candidate pool, general (unlocked) "Scan for New Device" flow
+  // only - unlike `candidates` above, this DOES include has_address=0
+  // devices ("not yet given a project address at all"). Safe here
+  // specifically because this flow no longer writes anything to the bus
+  // (see recordDetectedSerial() below) - it's bookkeeping-only, so the
+  // has_address=0 hazard the comment above `devices` warns about (writing
+  // a synthetic placeholder address to a physical unit) doesn't apply.
+  // Real request, 2026-08-31: "allow the device to be added as if it were
+  // a new unassigned device."
+  const generalCandidates = showAllDevices
+    ? allDevices
+    : allDevices.filter((d) => d.status === 'unassigned' || !d.has_address);
+
   const matchBySerial = (serial: string): Device | null =>
     devices.find(
       (d) =>
@@ -111,8 +155,12 @@ export function AddressDeviceModal({
     Array<{ serial: string; src: string }> | null
   >(null);
   const [detectError, setDetectError] = useState<string | null>(null);
+  // 'new' is a real, addressable choice, not just a device id - real
+  // request, 2026-08-31 (general/unlocked flow only): "in the Assign To,
+  // we should have an option (maybe first in the list) to add as New
+  // Device (i.e. something not already in our DB)."
   const [detectSelection, setDetectSelection] = useState<
-    Record<string, number | ''>
+    Record<string, number | 'new' | ''>
   >({});
   const [detectBusy, setDetectBusy] = useState<Record<string, boolean>>({});
   const [detectResult, setDetectResult] = useState<
@@ -191,6 +239,40 @@ export function AddressDeviceModal({
           bySrc.set(addrCheck.address, '');
         }
       }
+      // Real user question, 2026-08-31: "how does ETS grab the serial -
+      // after assigning an address?" - checked against our own real
+      // capture (docs/knx-device-write-protocol.md §9.3): ETS does NOT
+      // need to assign a NEW address first. It connects point-to-point to
+      // the device's CURRENT address (found via the same classic broadcast
+      // used above) and reads Property 11 (PID_SERIAL_NUMBER-family,
+      // Object Index 0) via a real PropertyValue_Read - the exact same
+      // mechanism `busDeviceInfo()` already uses (confirmed working
+      // earlier the same session, reading this device's real serial right
+      // after an address write). Mirrored here for any device found only
+      // via the legacy broadcast (no serial from either broadcast
+      // mechanism itself): a best-effort point-to-point follow-up read,
+      // same as ETS's own real sequence. Failure is expected/non-fatal for
+      // a device this doesn't work against - left blank, same as before.
+      for (const [src, serial] of [...bySrc.entries()]) {
+        if (serial) continue;
+        try {
+          addLog(
+            `[${new Date().toLocaleTimeString()}] Reading serial from ${src} (point-to-point, same as ETS)…`,
+          );
+          const info = await api.busDeviceInfo(src);
+          const found = (info as { serialNumber?: string }).serialNumber;
+          if (found) {
+            bySrc.set(src, found);
+            addLog(
+              `[${new Date().toLocaleTimeString()}] Read serial ${found} from ${src}`,
+            );
+          }
+        } catch (e: any) {
+          addLog(
+            `[${new Date().toLocaleTimeString()}] Could not read serial from ${src} → ${e.message}`,
+          );
+        }
+      }
       const devicesFound = [...bySrc.entries()].map(([src, serial]) => ({
         serial,
         src,
@@ -212,61 +294,75 @@ export function AddressDeviceModal({
     setScanning(false);
   };
 
-  // Keyed by `src` (the device's address, always real and unique), not
-  // `serial` (which is '' for a device found only via the legacy address
-  // broadcast - see scan()'s own comment) - `serial` is still the value
-  // actually used for the write/persist below, just no longer the key.
-  const writeDetected = async (
-    src: string,
-    serial: string,
-    viaProgIA: boolean,
-    explicitTarget?: Device,
-  ) => {
-    const target =
-      explicitTarget ?? devices.find((d) => d.id === detectSelection[src]);
-    if (!target) return;
+  // General (unlocked) "Scan for New Device" flow's only action, replacing
+  // the earlier write-via-broadcast/write-by-serial buttons entirely - real
+  // request, 2026-08-31: "the Write Address buttons here shouldn't be
+  // present as we don't have an address editor. Remove the buttons
+  // entirely, and allow the device to be added as if it were a new
+  // unassigned device." This flow was never the right place for a real
+  // bus write anyway (no visible confirmation of exactly which address is
+  // about to be written, unlike the locked single-device flow's own
+  // Device Address tab) - it's bookkeeping-only now, same idea as
+  // confirmSerial() below but for the general flow: record the detected
+  // serial against whichever project device the operator picks (including
+  // one with no project address at all yet - see generalCandidates above),
+  // no bus write. Keyed by `src` throughout, same reasoning as before.
+  //
+  // A 'new' selection (see detectSelection's own comment) creates a real
+  // project device first, using the address this scan already knows
+  // (d.src is the device's real, live-reported address - reusing
+  // addScannedDevice(), the same action BusScanView.tsx's own "add a
+  // device found by address scan" flow already uses), then records the
+  // serial on it too if one is known. Unlike recording onto an EXISTING
+  // device, creating one is worth doing even with no serial at all - at
+  // minimum the address gets captured, which is the real point of "add as
+  // if it were a new unassigned device".
+  const recordDetectedSerial = async (src: string, serial: string) => {
+    const selection = detectSelection[src];
+    if (!selection) return;
     setDetectBusy((b) => ({ ...b, [src]: true }));
     setDetectResult((r) => {
       const next = { ...r };
       delete next[src];
       return next;
     });
-    addLog(
-      `[${new Date().toLocaleTimeString()}] Addressing ${serial || src} → ${target.individual_address} (${target.name})`,
-    );
     try {
-      await ensureBusConnected();
-      if (viaProgIA) {
-        await api.busProgramIA(target.individual_address);
-      } else {
-        if (!serial) throw new Error('No serial number available to write by');
-        const r = await api.busAssignAddressBySerial(
-          serial,
-          target.individual_address,
+      if (selection === 'new') {
+        const created = await addScannedDevice(src);
+        addLog(
+          `[${new Date().toLocaleTimeString()}] Added new device at ${src}`,
         );
-        if (!r.verified) {
-          throw new Error(
-            r.address
-              ? `Device reported ${r.address}, not ${target.individual_address}`
-              : 'No read-back confirmation from the device',
+        if (serial) {
+          await updateDevice(created.id, { serial_number: serial });
+          addLog(
+            `[${new Date().toLocaleTimeString()}] Recorded serial ${serial} on ${src}`,
           );
         }
+        setDetectResult((r) => ({
+          ...r,
+          [src]: {
+            ok: true,
+            msg: serial
+              ? `✓ Added as a new device, serial recorded`
+              : `✓ Added as a new device`,
+          },
+        }));
+      } else {
+        const target = allDevices.find((d) => d.id === selection);
+        if (!target || !serial) return;
+        await updateDevice(target.id, { serial_number: serial });
+        setDetectResult((r) => ({
+          ...r,
+          [src]: { ok: true, msg: `✓ Recorded on ${target.name}` },
+        }));
+        addLog(
+          `[${new Date().toLocaleTimeString()}] Recorded serial ${serial} on ${target.name}`,
+        );
       }
-      // Only a real serial is worth persisting - an empty one (legacy
-      // address-broadcast detection) would just overwrite whatever the
-      // project already had on record with nothing.
-      if (serial) await updateDevice(target.id, { serial_number: serial });
-      setDetectResult((r) => ({
-        ...r,
-        [src]: { ok: true, msg: `✓ Addressed as ${target.individual_address}` },
-      }));
-      addLog(
-        `[${new Date().toLocaleTimeString()}] Addressed ${serial || src} → ${target.individual_address}`,
-      );
     } catch (e: any) {
       setDetectResult((r) => ({ ...r, [src]: { ok: false, msg: e.message } }));
       addLog(
-        `[${new Date().toLocaleTimeString()}] Addressing failed → ${serial || src} — ${e.message}`,
+        `[${new Date().toLocaleTimeString()}] Recording failed → ${e.message}`,
       );
     }
     setDetectBusy((b) => ({ ...b, [src]: false }));
@@ -1099,8 +1195,24 @@ export function AddressDeviceModal({
                         }
                       }}
                       placeholder="12 hex chars"
-                      title="Recorded serial number — edit and press Enter to save"
+                      title="Recorded serial number — edit and press Enter or click Save"
                     />
+                    {/* Real bug, found live 2026-08-31: "we don't have a
+                        save button" - Enter-to-save (above) was the only
+                        way to commit an edit, with no visible affordance
+                        for it at all. */}
+                    <Btn
+                      onClick={() => confirmSerial(manualSerial)}
+                      disabled={confirmBusy || !manualSerialValid || manualNoChange}
+                      className={styles.serialSideBtn}
+                      title={
+                        manualNoChange
+                          ? 'No change — this is already the recorded serial'
+                          : 'Save this serial to the project - no bus interaction'
+                      }
+                    >
+                      {confirmBusy ? <Spinner /> : 'Save'}
+                    </Btn>
                     <Btn
                       onClick={clearSerial}
                       disabled={clearSerialBusy || !lockedTarget?.serial_number}
@@ -1151,8 +1263,9 @@ export function AddressDeviceModal({
                           <div key={d.src} className={styles.detectedRow}>
                             <div className={styles.detectedSerial}>
                               {d.serial
-                                ? `Serial ${d.serial}`
+                                ? `Serial ${d.serial} @ ${d.src}`
                                 : `${d.src} (no serial — detected via legacy address broadcast)`}
+                              <CopyButton text={d.serial || d.src} />
                             </div>
                             <div className={isMatch ? styles.matchedTag : styles.unmatchedTag}>
                               {lockedNoAddress
@@ -1197,7 +1310,29 @@ export function AddressDeviceModal({
             </button>
             <button
               className={`${styles.tabBtn} ${tab === 'serial' ? styles.tabBtnActive : ''}`}
-              onClick={() => setTab('serial')}
+              onClick={() => {
+                // Real request, 2026-08-31: "once I select the device to
+                // assign it to, shouldn't that selection carry over to the
+                // Enter Serial Number tab (along with the serial of the
+                // selected device)?" - only meaningful with exactly one
+                // detected device (detectSelection is keyed by address, so
+                // there's no single "the" selection to carry over when
+                // several are on screen at once).
+                if (detected?.length === 1) {
+                  const d = detected[0]!;
+                  const pickedId = detectSelection[d.src];
+                  // 'new' (see detectSelection's own comment) has no
+                  // existing device id to carry over - the manual tab has
+                  // no equivalent "add as new" concept of its own, so
+                  // there's nothing meaningful to pre-fill for that case.
+                  if (pickedId && pickedId !== 'new') {
+                    setManualDeviceId(pickedId);
+                    const picked = allDevices.find((dev) => dev.id === pickedId);
+                    setManualSerial(d.serial || picked?.serial_number || '');
+                  }
+                }
+                setTab('serial');
+              }}
             >
               Enter Serial Number
             </button>
@@ -1245,25 +1380,13 @@ export function AddressDeviceModal({
                     const matched = d.serial ? matchBySerial(d.serial) : null;
                     const busy = detectBusy[d.src];
                     const result = detectResult[d.src];
-                    const canUseProgIA = detected.length === 1;
-                    const selectedTarget = devices.find(
-                      (dev) => dev.id === detectSelection[d.src],
-                    );
-                    // d.src is the device's real, currently-reported
-                    // individual address (A_IndividualAddress_Read, read
-                    // live during the scan) - nothing to write if the
-                    // selected target's own address already matches it
-                    // (real request 2026-08-31, same reasoning as the
-                    // manual tab's no-change guard below).
-                    const noChange =
-                      !!selectedTarget &&
-                      selectedTarget.individual_address === d.src;
                     return (
                       <div key={d.src} className={styles.detectedRow}>
                         <div className={styles.detectedSerial}>
                           {d.serial
-                            ? `Serial ${d.serial}`
+                            ? `Serial ${d.serial} @ ${d.src}`
                             : `${d.src} (no serial — detected via legacy address broadcast)`}
+                          <CopyButton text={d.serial || d.src} />
                         </div>
                         {matched ? (
                           <div className={styles.matchedTag}>
@@ -1285,63 +1408,65 @@ export function AddressDeviceModal({
                               onChange={(e) =>
                                 setDetectSelection((s) => ({
                                   ...s,
-                                  [d.src]: e.target.value
-                                    ? Number(e.target.value)
-                                    : '',
+                                  [d.src]:
+                                    e.target.value === 'new'
+                                      ? 'new'
+                                      : e.target.value
+                                        ? Number(e.target.value)
+                                        : '',
                                 }))
                               }
                             >
                               <option value="">— select a device —</option>
-                              {candidates.map((c) => (
+                              {/* Real request, 2026-08-31: "in the Assign
+                                  To, we should have an option (maybe first
+                                  in the list) to add as New Device (i.e.
+                                  something not already in our DB)." */}
+                              <option value="new">+ Add as New Device</option>
+                              {generalCandidates.map((c) => (
                                 <option key={c.id} value={c.id}>
-                                  {c.individual_address} — {c.name}
+                                  {c.has_address
+                                    ? `${c.individual_address} — ${c.name}`
+                                    : `(unassigned) — ${c.name}`}
                                 </option>
                               ))}
                             </select>
                           </div>
                         </div>
+                        {/* No bus write happens from this general/unlocked
+                            flow at all any more - real request, 2026-08-31:
+                            "the Write Address buttons here shouldn't be
+                            present as we don't have an address editor.
+                            Remove the buttons entirely, and allow the
+                            device to be added as if it were a new
+                            unassigned device." Recording the serial is
+                            bookkeeping only (see recordDetectedSerial()) -
+                            a real write happens later via that project
+                            device's own row (which now offers a real
+                            address editor - the locked flow's Device
+                            Address tab). */}
                         <div className={styles.row}>
-                          {canUseProgIA && (
-                            <Btn
-                              onClick={() => writeDetected(d.src, d.serial, true)}
-                              disabled={
-                                busy || !detectSelection[d.src] || noChange
-                              }
-                              title={
-                                noChange
-                                  ? 'No change — this device already reports this address'
-                                  : 'Write via the programming-mode broadcast — real-hardware confirmed, safe here since exactly one device answered'
-                              }
-                            >
-                              {busy ? <Spinner /> : '⚡ Write Address'}
-                            </Btn>
-                          )}
                           <Btn
-                            onClick={() => writeDetected(d.src, d.serial, false)}
+                            onClick={() => recordDetectedSerial(d.src, d.serial)}
                             disabled={
                               busy ||
                               !detectSelection[d.src] ||
-                              noChange ||
-                              !d.serial
+                              (detectSelection[d.src] !== 'new' && !d.serial)
                             }
-                            color="var(--amber)"
                             title={
-                              !d.serial
-                                ? 'No real serial number available — this device was only found via the legacy address broadcast'
-                                : noChange
-                                  ? 'No change — this device already reports this address'
-                                  : 'Write by targeting this exact serial number — not yet confirmed on real hardware'
+                              detectSelection[d.src] === 'new'
+                                ? `Add a new project device at ${d.src}${d.serial ? ', with this serial recorded' : ''} - no write to the physical device`
+                                : !d.serial
+                                  ? 'No real serial number available — this device was only found via the legacy address broadcast, nothing to record yet'
+                                  : 'Record this serial against the selected project device - bookkeeping only, no write to the physical device'
                             }
                           >
                             {busy ? (
                               <Spinner />
+                            ) : detectSelection[d.src] === 'new' ? (
+                              'Add as New Device'
                             ) : (
-                              <>
-                                Write by Serial{' '}
-                                <span className={styles.experimentalBadge}>
-                                  Experimental
-                                </span>
-                              </>
+                              'Record Serial'
                             )}
                           </Btn>
                         </div>

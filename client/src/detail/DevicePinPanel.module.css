@@ -652,7 +652,12 @@
 .flagsPopover {
   position: absolute;
   top: calc(100% + 4px);
-  left: 0;
+  /* Anchored to the cell's RIGHT edge, opening leftward - not left:0/
+     opening rightward. FLAGS sits second-to-last in a wide table (right
+     before GA), close to the table's own right edge, so a rightward-opening
+     popover clips off the viewport; real bug found 2026-08-31 testing at a
+     narrower width. */
+  right: 0;
   z-index: 50;
   width: 180px;
   background: var(--surface);

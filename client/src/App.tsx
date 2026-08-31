@@ -227,10 +227,16 @@ export default function App() {
           },
         });
       } else if (msg.type === 'knx:disconnected') {
+        // needsAttention deliberately absent (defaults falsy) - a fresh
+        // drop reads as calm/idle first; only 'knx:reconnect-failed'
+        // (below), sent once a reconnect attempt genuinely fails, escalates
+        // it. See state.ts's BusStatus.needsAttention doc comment.
         dispatch({
           type: 'SET_BUS',
           status: { connected: false, host: null, hasLib: true },
         });
+      } else if (msg.type === 'knx:reconnect-failed') {
+        dispatch({ type: 'SET_BUS_ATTENTION', needsAttention: true });
       } else if (msg.type === 'verify:progress') {
         const deviceAddress = msg.deviceAddress as string;
         setVerifyProgress((p) => ({

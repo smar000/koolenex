@@ -208,11 +208,27 @@
    "connected" state go unnoticed) - but that problem is now solved by
    accuracy (the WebSocket re-sync fix from that day) and a real, distinct
    icon (IconOffline, icons.tsx), not by borrowing warning/error coloring
-   for an unremarkable state. */
-.busDisconnected {
+   for an unremarkable state. Renamed from .busDisconnected 2026-08-31 -
+   this is now specifically the "not connected, nothing needs it right
+   now" reading, distinct from .busNeedsAttention below (a THIRD, real
+   state: a reconnect attempt genuinely failed - see
+   BusStatus.needsAttention, state.ts). */
+.busIdle {
   color: var(--dim);
   background: color-mix(in srgb, var(--dim) 9%, transparent);
   border: 1px solid color-mix(in srgb, var(--dim) 19%, transparent);
+}
+/* Amber, not red - real request 2026-08-31: even a genuine "this needs
+   manual attention" failure (a reconnect attempt exhausted its retries -
+   see knx-bus.ts's 'knx:reconnect-failed') shouldn't read as red/danger
+   for a KNX bus connection; amber matches this app's own established
+   language elsewhere for "needs a look, not an emergency" (e.g. the
+   download-mode popover's Partial Download tint, an "Experimental" write
+   path badge) rather than introducing red as a one-off severity level. */
+.busNeedsAttention {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 19%, transparent);
 }
 .busStatusPopover {
   position: absolute;

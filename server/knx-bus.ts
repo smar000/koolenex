@@ -263,7 +263,19 @@ class KnxBusManager extends EventEmitter {
     const port = this.port ?? 3671;
     const projectId = this.projectId;
     const protocol = this.type as IpTransportProtocol;
-    await this.connect(host, port, projectId, protocol);
+    try {
+      await this.connect(host, port, projectId, protocol);
+    } catch (err) {
+      // Same "needs manual attention" signal _ensureConnected() sends on a
+      // real failure (see its own doc comment) - a Program/Verify's own
+      // forced reconnect failing is exactly as real a failure as any
+      // other, and would otherwise never surface on the connection badge
+      // at all (this method bypasses _ensureConnected() entirely).
+      this.broadcast('knx:reconnect-failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
   }
 
   /**
@@ -275,8 +287,20 @@ class KnxBusManager extends EventEmitter {
    * bus reconnects using the last known host/port/transport on demand.
    * USB connections are not auto-reconnected (no default device path to
    * retry); callers get the usual "not connected" error for those.
+   *
+   * `broadcastFailure` (default true) sends 'knx:reconnect-failed' to
+   * clients if the reconnect attempt itself fails - real request
+   * 2026-08-31: this is what lets the UI distinguish a calm "not
+   * connected, nothing needs it right now" idle state from a genuine
+   * "this needs manual attention" one (e.g. a wrong IP - see AppShell.tsx's
+   * connection badge). A real bus operation calling this directly (the
+   * normal case - every route in server/routes/bus.ts goes through this)
+   * gets exactly one broadcast per real failure. _autoReconnect() below
+   * passes false for its own internal retries - a single attempt failing
+   * mid-backoff isn't yet "exhausted", so it broadcasts its own signal only
+   * once retries are genuinely exhausted, not on every intermediate one.
    */
-  async _ensureConnected(): Promise<void> {
+  async _ensureConnected(broadcastFailure = true): Promise<void> {
     if (this.connected && this.connection) return;
     if (!this.host || this.type === 'usb') {
       throw new Error('Not connected to KNX bus');
@@ -287,9 +311,16 @@ class KnxBusManager extends EventEmitter {
         this.port ?? 3671,
         this.projectId,
         (this.type ?? 'auto') as IpTransportProtocol,
-      ).finally(() => {
-        this._reconnecting = null;
-      });
+      )
+        .catch((err: Error) => {
+          if (broadcastFailure) {
+            this.broadcast('knx:reconnect-failed', { error: err.message });
+          }
+          throw err;
+        })
+        .finally(() => {
+          this._reconnecting = null;
+        });
     }
     await this._reconnecting;
   }
@@ -308,7 +339,7 @@ class KnxBusManager extends EventEmitter {
   _autoReconnect(attempt: number = 1): void {
     if (!this.host || this.type === 'usb' || this._keepAliveRefs <= 0) return;
     const maxAttempts = 5;
-    this._ensureConnected()
+    this._ensureConnected(false)
       .then(() => {
         logger.info('knx', 'Bus auto-reconnected after an unexpected disconnect');
       })
@@ -321,6 +352,12 @@ class KnxBusManager extends EventEmitter {
         if (attempt < maxAttempts) {
           const delay = Math.min(30000, 2000 * 2 ** (attempt - 1));
           setTimeout(() => this._autoReconnect(attempt + 1), delay);
+        } else {
+          // Retries genuinely exhausted - this is the moment the UI's
+          // calm "idle" reading stops applying; something needs a look
+          // (wrong IP, router down, etc.), not just "nobody's using it
+          // right now".
+          this.broadcast('knx:reconnect-failed', { error: err.message });
         }
       });
   }

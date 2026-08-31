@@ -149,6 +149,15 @@ interface BusStatus {
   type?: string;
   port?: number;
   path?: string;
+  // Distinguishes a calm "not connected, nothing needs it right now" idle
+  // state from a genuine "this needs manual attention" one (wrong IP,
+  // router down, etc.) - real request 2026-08-31. Absent/false by default
+  // on every real SET_BUS (a fresh disconnect is assumed calm first - "if
+  // auto-reconnect is possible, go to idle" - only escalated by a separate
+  // SET_BUS_ATTENTION dispatch once a reconnect attempt genuinely fails).
+  // See AppShell.tsx's connection badge and knx-bus.ts's
+  // 'knx:reconnect-failed' broadcast.
+  needsAttention?: boolean;
 }
 
 export interface VerifyCacheEntry {
@@ -212,6 +221,7 @@ export type Action =
   | { type: 'DPT_LOADED' }
   | { type: 'SET_ACTIVE'; id: number; data: ProjectFull }
   | { type: 'SET_BUS'; status: BusStatus }
+  | { type: 'SET_BUS_ATTENTION'; needsAttention: boolean }
   | { type: 'ADD_TELEGRAM'; telegram: BusTelegram }
   | { type: 'SET_TELEGRAMS'; telegrams: BusTelegram[] }
   | { type: 'OPEN_WINDOW'; wtype: string; address: string }
@@ -310,6 +320,15 @@ export function reducer(state: AppState, action: Action): AppState {
     }
     case 'SET_BUS':
       return { ...state, busStatus: action.status };
+    // Merges rather than replaces (unlike SET_BUS) - a 'knx:reconnect-failed'
+    // WS message only carries the fact that a reconnect attempt failed, not
+    // a full bus status snapshot; overwriting busStatus wholesale here
+    // would clobber connected/host with whatever the action didn't specify.
+    case 'SET_BUS_ATTENTION':
+      return {
+        ...state,
+        busStatus: { ...state.busStatus, needsAttention: action.needsAttention },
+      };
     case 'ADD_TELEGRAM':
       return {
         ...state,

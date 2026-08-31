@@ -1827,6 +1827,52 @@ describe('KnxBusManager._ensureConnected', () => {
     ]);
     assert.equal(connectCalls, 1);
   });
+
+  it('broadcasts knx:reconnect-failed on a real failure by default', async () => {
+    // Real request 2026-08-31: lets the connection badge distinguish a
+    // calm "not connected" idle state from a genuine "needs manual
+    // attention" one. Every real bus route calls _ensureConnected() with
+    // no arguments, so the default must broadcast.
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = false;
+    bus.connect = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as any;
+
+    const broadcasts: Array<{ type: string; payload: unknown }> = [];
+    bus.broadcast = (type: string, payload: Record<string, unknown>) => {
+      broadcasts.push({ type, payload });
+    };
+
+    await assert.rejects(() => bus._ensureConnected(), /ECONNREFUSED/);
+    assert.equal(broadcasts.length, 1);
+    assert.equal(broadcasts[0]!.type, 'knx:reconnect-failed');
+  });
+
+  it('does not broadcast when called with broadcastFailure=false', async () => {
+    // _autoReconnect() passes false for its own intermediate retries - a
+    // single attempt failing mid-backoff isn't yet "exhausted" and
+    // shouldn't flip the badge to "needs attention" prematurely.
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = false;
+    bus.connect = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as any;
+
+    const broadcasts: Array<{ type: string; payload: unknown }> = [];
+    bus.broadcast = (type: string, payload: Record<string, unknown>) => {
+      broadcasts.push({ type, payload });
+    };
+
+    await assert.rejects(() => bus._ensureConnected(false), /ECONNREFUSED/);
+    assert.equal(broadcasts.length, 0);
+  });
 });
 
 describe('KnxBusManager.forceReconnect', () => {
@@ -1904,6 +1950,31 @@ describe('KnxBusManager.forceReconnect', () => {
     }) as any;
 
     await assert.rejects(() => bus.forceReconnect(), /ECONNREFUSED/);
+  });
+
+  it('broadcasts knx:reconnect-failed on a real failure', async () => {
+    // forceReconnect() bypasses _ensureConnected() entirely (calls
+    // connect() directly), so it needs its own broadcast on failure -
+    // otherwise a Program/Verify's own forced reconnect failing would
+    // never surface on the connection badge at all.
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = true;
+    bus.connection = {} as any;
+    bus.connect = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as any;
+
+    const broadcasts: Array<{ type: string; payload: unknown }> = [];
+    bus.broadcast = (type: string, payload: Record<string, unknown>) => {
+      broadcasts.push({ type, payload });
+    };
+
+    await assert.rejects(() => bus.forceReconnect(), /ECONNREFUSED/);
+    assert.equal(broadcasts.length, 1);
+    assert.equal(broadcasts[0]!.type, 'knx:reconnect-failed');
   });
 });
 
@@ -2096,6 +2167,53 @@ describe('KnxBusManager._autoReconnect', () => {
     // The retry re-checks host/type before calling connect() again.
     assert.equal(connectCalls, 1);
     assert.equal(scheduled.length, 0);
+  });
+
+  it('broadcasts knx:reconnect-failed only once retries are genuinely exhausted', async () => {
+    // Real request 2026-08-31: a single attempt failing mid-backoff isn't
+    // "exhausted" - the badge should stay calm/idle through the retry
+    // sequence, only escalating to "needs attention" once every attempt
+    // has failed. Drives all 5 real attempts (maxAttempts in
+    // _autoReconnect) by manually firing each scheduled retry.
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = false;
+    bus.addKeepAliveRef();
+
+    bus.connect = (async () => {
+      throw new Error('gateway unreachable');
+    }) as any;
+
+    const broadcasts: Array<{ type: string; payload: unknown }> = [];
+    bus.broadcast = (type: string, payload: Record<string, unknown>) => {
+      broadcasts.push({ type, payload });
+    };
+
+    const realSetTimeout = globalThis.setTimeout;
+    const scheduled: Array<() => void> = [];
+    (globalThis as any).setTimeout = ((fn: () => void, _ms: number) => {
+      scheduled.push(fn);
+      return 0 as any;
+    }) as any;
+    try {
+      bus._autoReconnect();
+      await new Promise((r) => setImmediate(r));
+      // Attempts 1-4 each schedule a retry and broadcast nothing.
+      for (let i = 0; i < 4; i++) {
+        assert.equal(broadcasts.length, 0, `no broadcast yet after attempt ${i + 1}`);
+        const next = scheduled.shift()!;
+        next();
+        await new Promise((r) => setImmediate(r));
+      }
+      // The 5th (final) attempt exhausts maxAttempts and broadcasts once.
+      assert.equal(scheduled.length, 0);
+      assert.equal(broadcasts.length, 1);
+      assert.equal(broadcasts[0]!.type, 'knx:reconnect-failed');
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
   });
 });
 

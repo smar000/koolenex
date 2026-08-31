@@ -414,11 +414,19 @@ export function AppShell(props: AppShellProps) {
             <button
               type="button"
               onClick={() => setConnectPopoverOpen((o) => !o)}
-              className={`${appStyles.busStatus} ${state.busStatus.connected ? appStyles.busConnected : appStyles.busDisconnected}`}
+              className={`${appStyles.busStatus} ${
+                state.busStatus.connected
+                  ? appStyles.busConnected
+                  : state.busStatus.needsAttention
+                    ? appStyles.busNeedsAttention
+                    : appStyles.busIdle
+              }`}
               title={
                 state.busStatus.connected
                   ? 'Click to manage the bus connection'
-                  : 'Not connected to the bus — most work here doesn’t need it. Click to connect.'
+                  : state.busStatus.needsAttention
+                    ? 'A reconnect attempt failed - check the connection settings (address, etc.) and reconnect manually'
+                    : 'Not connected to the bus — most work here doesn’t need it. Click to connect.'
               }
             >
               {state.busStatus.connected ? (
@@ -430,7 +438,9 @@ export function AppShell(props: AppShellProps) {
                 ? state.busStatus.type === 'usb'
                   ? 'USB'
                   : `${state.busStatus.host}`
-                : 'Not Connected'}
+                : state.busStatus.needsAttention
+                  ? 'Disconnected'
+                  : 'Idle'}
             </button>
             {connectPopoverOpen && (
               <div className={appStyles.busStatusPopover}>

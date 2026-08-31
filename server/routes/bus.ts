@@ -1224,6 +1224,24 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     b.broadcast('program:progress', { deviceAddress, ...p });
   onProgress({ msg: `Starting download to ${deviceAddress}`, pct: 0 });
 
+  // Real request 2026-08-31, after a real live failure: forces a fresh
+  // connection before starting rather than reusing whatever's left of the
+  // current one, so a download always gets the full gateway idle-timeout
+  // budget from a clean baseline - see KnxBusManager.forceReconnect()'s
+  // own doc comment for the live failure that prompted this. Explicitly
+  // try/caught here (not left to throw into the handler) - this route has
+  // no surrounding try/catch until the keep-alive ref below, and Express
+  // does not catch an async handler's rejection on its own; an uncaught
+  // one here would hang the response instead of returning a real error.
+  try {
+    await b.forceReconnect();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return res
+      .status(msg.includes('Not connected') ? 409 : 502)
+      .json({ error: safeError('bus', 'Failed to reconnect before programming', e) });
+  }
+
   // A download can run long enough for the gateway's own idle timeout to
   // never actually apply mid-write (real traffic is flowing throughout),
   // but hold a keep-alive ref regardless for the duration - protects any
@@ -1315,6 +1333,19 @@ router.post('/bus/verify-device', async (req: Request, res: Response) => {
       message:
         'This device has no individual address assigned yet - use "Address New Device" to give it a real one first.',
     });
+  }
+
+  // See the matching comment in /bus/program-device above - forces a
+  // fresh connection before starting rather than reusing whatever's left
+  // of the current one. Also explicitly try/caught for the same reason
+  // (no surrounding try/catch this early in the handler).
+  try {
+    await b.forceReconnect();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return res
+      .status(msg.includes('Not connected') ? 409 : 502)
+      .json({ error: safeError('bus', 'Failed to reconnect before verifying', e) });
   }
 
   // See the matching comment in /bus/program-device above -

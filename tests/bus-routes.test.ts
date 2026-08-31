@@ -55,6 +55,15 @@ class MockBus extends EventEmitter {
     this._remapFn = fn;
   }
 
+  // Mirrors the real KnxBusManager.forceReconnect() shape (see
+  // server/knx-bus.ts) - /bus/program-device and /bus/verify-device both
+  // call this unconditionally before starting, real bus or fake.
+  async forceReconnect(): Promise<void> {
+    this.calls.push({ method: 'forceReconnect', args: [] });
+    if (!this.host || this.type === 'usb') return;
+    await this.connect(this.host, this.port ?? 3671, this.projectId);
+  }
+
   attachWSS(): void {}
 
   broadcast(): void {}

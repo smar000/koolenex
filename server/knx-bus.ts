@@ -234,6 +234,39 @@ class KnxBusManager extends EventEmitter {
   }
 
   /**
+   * Forces a fresh IP connection (disconnect + reconnect using the last
+   * known host/port/transport) regardless of whether the current one still
+   * looks alive - real request 2026-08-31, prompted by a real live
+   * failure: a Verify that started right after an idle-timeout drop and
+   * auto-reconnect still failed with "Management timeout waiting for
+   * MemoryExtended_Read_Response", because the request itself had already
+   * gone out on the dying connection before the drop was even noticed.
+   * `_ensureConnected()` below only recovers an ALREADY-dead connection;
+   * it has no notion of "this one is old, refresh it before starting
+   * something that needs the full idle-timeout budget". Used by
+   * Program/Verify specifically (server/routes/bus.ts) - real KNXnet/IP
+   * tools (ETS itself, per real-world observation) don't appear to hold a
+   * connection open at all outside of live monitoring, opening a fresh one
+   * per operation instead; this doesn't go that far (koolenex still keeps
+   * one shared connection alive for Monitor/passive watchers, which this
+   * briefly disrupts - a momentary disconnect/reconnect blip, not lost
+   * data), but gives the same guarantee to the operations that actually
+   * need a real, bounded time budget (a Full Download can take real time).
+   * A no-op if never connected at all (host null) or on USB (no
+   * transport-level idle timeout to guard against) - the caller's own
+   * subsequent `_ensureConnected()` still surfaces the normal "not
+   * connected" error in that case.
+   */
+  async forceReconnect(): Promise<void> {
+    if (!this.host || this.type === 'usb') return;
+    const host = this.host;
+    const port = this.port ?? 3671;
+    const projectId = this.projectId;
+    const protocol = this.type as IpTransportProtocol;
+    await this.connect(host, port, projectId, protocol);
+  }
+
+  /**
    * Transparently reconnects before a bus operation if the connection has
    * gone idle-dropped since the last one - a KNXnet/IP gateway may close an
    * idle TCP tunneling connection on its own after a period with no

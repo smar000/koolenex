@@ -1829,6 +1829,84 @@ describe('KnxBusManager._ensureConnected', () => {
   });
 });
 
+describe('KnxBusManager.forceReconnect', () => {
+  it('reconnects using the last known host/port/type even while already connected', async () => {
+    // Real request 2026-08-31, after a real live failure (a Verify that
+    // started right after an idle-drop-and-reconnect still failed - the
+    // request had already gone out on the dying connection). Unlike
+    // _ensureConnected(), this must reconnect even when `connected` is
+    // already true - that's the whole point.
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = true;
+    bus.connection = {} as any;
+
+    let connectCalls = 0;
+    bus.connect = (async (
+      host: string,
+      port: number,
+      _projectId?: number | string | null,
+      protocol?: string,
+    ) => {
+      connectCalls++;
+      assert.equal(host, '10.0.0.5');
+      assert.equal(port, 3671);
+      assert.equal(protocol, 'tcp');
+      bus.connected = true;
+      bus.connection = {} as any;
+      return { host, port, type: 'tcp' as const };
+    }) as any;
+
+    await bus.forceReconnect();
+    assert.equal(connectCalls, 1, 'connect() is called even though already connected');
+  });
+
+  it('is a no-op when never connected at all (no known host)', async () => {
+    const bus = new KnxBusManager();
+    bus.connected = false;
+    bus.host = null;
+    let connectCalls = 0;
+    bus.connect = (async () => {
+      connectCalls++;
+      return { host: '', port: 0, type: 'tcp' as const };
+    }) as any;
+
+    await bus.forceReconnect();
+    assert.equal(connectCalls, 0);
+  });
+
+  it('is a no-op for USB connections', async () => {
+    const bus = new KnxBusManager();
+    bus.connected = true;
+    bus.host = null;
+    bus.type = 'usb';
+    let connectCalls = 0;
+    bus.connect = (async () => {
+      connectCalls++;
+      return { host: '', port: 0, type: 'tcp' as const };
+    }) as any;
+
+    await bus.forceReconnect();
+    assert.equal(connectCalls, 0);
+  });
+
+  it('propagates a real connection failure to the caller', async () => {
+    const bus = new KnxBusManager();
+    bus.host = '10.0.0.5';
+    bus.port = 3671;
+    bus.type = 'tcp';
+    bus.connected = true;
+    bus.connection = {} as any;
+    bus.connect = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as any;
+
+    await assert.rejects(() => bus.forceReconnect(), /ECONNREFUSED/);
+  });
+});
+
 describe('KnxBusManager._autoReconnect', () => {
   it('reconnects immediately on first attempt while a keep-alive ref is held', async () => {
     const bus = new KnxBusManager();

@@ -254,9 +254,20 @@ export function ProgrammingView() {
       // before we enable verify") reflects it immediately, not just after
       // a reload.
       if (result.serialNumber) {
-        updateDevice(deviceId, { serial_number: result.serialNumber }).catch(
-          () => {},
-        );
+        try {
+          await updateDevice(deviceId, { serial_number: result.serialNumber });
+        } catch (e: any) {
+          // Real, defensive fix: this previously swallowed any failure
+          // silently (fire-and-forget with an empty .catch()) - the
+          // server-side write already succeeded at this point, so a
+          // failure here is purely "the local badge didn't refresh",
+          // genuinely worth knowing about (a reload would still show it
+          // correctly, since the DB write already happened) rather than
+          // vanishing with no trace.
+          addLog(
+            `[${new Date().toLocaleTimeString()}] Serial recorded on the device, but the project record didn't refresh locally → ${e.message} (a reload will show it correctly)`,
+          );
+        }
       }
       // A successful write just changed the device's real content - the
       // cached verify result (if any) now describes the PRE-write state and

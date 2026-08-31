@@ -33,6 +33,7 @@ import type {
 } from '../../shared/types.ts';
 import type KnxBusManager from '../knx-bus.ts';
 import type { DownloadStep, DownloadProgress } from '../knx-connection.ts';
+import { delay } from '../knx-connection.ts';
 import { planVerify } from '../knx-download-plan.ts';
 import type { PlanStep } from '../knx-download-plan.ts';
 
@@ -1309,15 +1310,28 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     // effort read-back here, same mechanism/spirit as the addressing
     // flow's own busDeviceInfo() call - failure is logged but does not
     // fail the overall (already-succeeded) download.
+    // Real live-test finding, 2026-08-31: a first attempt right after a
+    // real Full Download (much more content to process than a plain
+    // address write) genuinely failed - "Device 1.1.20 did not respond" -
+    // the device plausibly not yet ready to accept a fresh point-to-point
+    // connection the instant its own download session closes. Same
+    // pattern already established elsewhere (restartDevice()'s own
+    // settleMs) - a brief settle delay plus one retry, rather than giving
+    // up on a single fleeting failure right when this data is most wanted.
     let serialNumber: string | undefined;
-    try {
-      const info = await b.readDeviceInfo(deviceAddress);
-      serialNumber = info.serialNumber;
-    } catch (e) {
-      logger.warn('knx', 'Post-download serial read-back failed (continuing anyway)', {
-        deviceAddress,
-        error: e instanceof Error ? e.message : String(e),
-      });
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      await delay(attempt === 1 ? 500 : 1500);
+      try {
+        const info = await b.readDeviceInfo(deviceAddress);
+        serialNumber = info.serialNumber;
+        break;
+      } catch (e) {
+        logger.warn('knx', 'Post-download serial read-back failed', {
+          deviceAddress,
+          attempt,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
     const totalBytes =
       (gaTable?.length ?? 0) +

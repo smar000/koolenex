@@ -172,9 +172,25 @@ router.put(
       // project address genuinely changes, the previously-recorded serial
       // stops being trustworthy for it and must be cleared, not carried
       // forward silently.
-      if (!b.serial_number) {
-        sets.push('serial_number=?');
-        vals.push('');
+      //
+      // Real regression, found live the same day: this fired on EVERY
+      // address change, including has_address 0->1 (a device's FIRST-EVER
+      // project address, from the synthetic placeholder - see ets-
+      // parser.ts) - not just a genuine reassignment between two real
+      // addresses. A real operator workflow - enter a device's serial
+      // manually (Serial Number tab), THEN assign it a project address -
+      // silently lost the serial the moment the address was saved, purely
+      // because that's a separate request that (correctly) doesn't resend
+      // serial_number. The serial in that case is not stale at all - it's
+      // the same value entered moments earlier for this same physical
+      // unit, before it had a project address yet. Scoped to only clear
+      // when the device already HAD a real address (old.has_address) -
+      // a genuine "was at X, now at Y" reassignment, where an old serial
+      // really could be stale. Also switched from a raw sets/vals push to
+      // track() (was previously invisible in the audit log's own diff -
+      // exactly what made this regression hard to find).
+      if (!b.serial_number && old.has_address) {
+        track('serial_number', '');
       }
     }
     if (b.floor_x !== undefined) {

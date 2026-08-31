@@ -1779,6 +1779,25 @@ export class KnxConnection extends EventEmitter {
           await lsmWrite(j.objIdx, LSM_EVENT.LOAD_DATA, j.loadDataPayload!);
         }
 
+        // Real live-test finding, 2026-08-31: "we don't seem to get a
+        // progress bar... stuck at 0% for good 20/30 seconds, then jumps
+        // to 100%" - the onProgress call in the chunk-write loop below was
+        // gated to isParamObject only, so the GA/Association/Object 3
+        // tables (each their own real job here, often the bulk of a Full
+        // Download to a genuinely blank device - see the undeclared-table
+        // write mechanism this project's own docs describe at length)
+        // reported nothing at all while they wrote, only the (frequently
+        // much smaller, or completely absent for this app) parameter
+        // object ever moved the bar. Tracked here as real cumulative
+        // progress across every active job, not just one - a resumed
+        // count across objects, not each restarting its own 0-80% scale
+        // per object (which would visibly jump backward every time a new
+        // object's writes began).
+        const totalActiveBytes = activeJobs.reduce(
+          (sum, jj) => sum + jj.table.length,
+          0,
+        );
+        let bytesWrittenSoFar = 0;
         const resolvedBase = new Map<number, number>();
         for (const j of activeJobs) {
           let base: number;
@@ -1887,12 +1906,13 @@ export class KnxConnection extends EventEmitter {
             } catch (_e) {
               log(`No write response for ObjIdx=${j.objIdx} offset=${off} (continuing)`);
             }
-            if (onProgress && j.isParamObject)
+            if (onProgress && totalActiveBytes > 0)
               onProgress({
-                msg: `WriteRelMem ${off}/${j.table.length}`,
-                pct: (off / j.table.length) * 80,
+                msg: `WriteRelMem ObjIdx=${j.objIdx} (${j.label}) ${off}/${j.table.length}`,
+                pct: ((bytesWrittenSoFar + off) / totalActiveBytes) * 80,
               });
           }
+          bytesWrittenSoFar += j.table.length;
           // Real ETS reads PID_PROGRAM_VERSION (property 13) on the
           // Application Program object early in its session, then writes
           // that SAME value back after its memory writes finish, right

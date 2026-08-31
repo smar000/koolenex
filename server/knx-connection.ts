@@ -441,6 +441,34 @@ export class KnxConnection extends EventEmitter {
     });
   }
 
+  /**
+   * Sends a connection-oriented device Restart (A_Restart) on its own - opens
+   * a fresh management session (T_Connect) to `deviceAddr`, sends Restart,
+   * then disconnects. This is the exact same mechanism downloadDevice()
+   * already uses at the end of a RelSegment-driven content download (see
+   * its own doc comment, further down this file) - reused here for the
+   * address-write paths below, per real user question, 2026-08-31: "ETS
+   * restarts the device after updating its address. I don't think we are
+   * as yet." Confirmed correct on inspection: neither programIA() nor
+   * assignIndividualAddressBySerial() sent one.
+   *
+   * 🟡 The RESTART MECHANISM ITSELF (connection-oriented A_Restart via
+   * T_Connect) is real-hardware-confirmed for the content-download case.
+   * Using it specifically after an ADDRESS write has not been
+   * independently verified against a real ETS capture of that exact
+   * sequence in this project - flagged, not assumed proven, same as this
+   * file's existing convention elsewhere. A brief settle delay is given
+   * before connecting, since the device has just adopted a new address it
+   * may not be immediately ready to accept a T_Connect at - not calibrated
+   * against a real capture either, a conservative guess.
+   */
+  async restartDevice(deviceAddr: string, settleMs: number = 300): Promise<void> {
+    if (settleMs > 0) await delay(settleMs);
+    await this.managementSession(deviceAddr, async ({ sendData }) => {
+      await sendData('Restart');
+    });
+  }
+
   // ── Individual address programming ────────────────────────────────────────────
 
   /**
@@ -457,11 +485,19 @@ export class KnxConnection extends EventEmitter {
    * responsive at its old address afterward, with no error reported at any
    * layer). Fixed to use the same confirmed-correct framing as every other
    * service in this family.
+   *
+   * Restarts the device at its new address afterward (see restartDevice()'s
+   * own doc comment) - real ETS does this after every address write, not
+   * just after a content download; koolenex's own address-write paths
+   * didn't until 2026-08-31. Restart failure doesn't fail the whole call -
+   * the address write itself (this service has no response to confirm
+   * against anyway) already succeeded from koolenex's point of view; a
+   * failed restart is surfaced via `restarted: false`, not an exception.
    */
   async programIA(
     newAddr: string,
     _timeoutMs: number = 5000,
-  ): Promise<{ ok: boolean; newAddr: string }> {
+  ): Promise<{ ok: boolean; newAddr: string; restarted: boolean }> {
     if (!this.connected) throw new Error('Not connected');
     const addrBuf = encodePhysical(newAddr);
     const apdu = apduGroup('PhysicalAddress_Write', 0, addrBuf);
@@ -469,7 +505,17 @@ export class KnxConnection extends EventEmitter {
       priority: 'system',
     });
     await this.sendCEMI(cemi);
-    return { ok: true, newAddr };
+    let restarted = true;
+    try {
+      await this.restartDevice(newAddr);
+    } catch (e) {
+      restarted = false;
+      logger.warn('knx', 'programIA: restart after address write failed', {
+        newAddr,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+    return { ok: true, newAddr, restarted };
   }
 
   /**
@@ -680,18 +726,47 @@ export class KnxConnection extends EventEmitter {
    * Write, then broadcast a Read as verification and compare. Deliberately
    * no precondition check that the device isn't already addressed - per
    * Calimero's real implementation this can re-address an already-
-   * configured device too, not just commission a blank one. No Restart
-   * afterward - this is standalone address assignment, simpler than and
-   * separate from downloadDevice()'s RelSegment content-write flow.
+   * configured device too, not just commission a blank one.
+   *
+   * Restarts the device at its new address afterward, but only once the
+   * read-back has actually confirmed the write landed - see
+   * restartDevice()'s own doc comment. Previously this method never
+   * restarted at all ("No Restart afterward" - real user question,
+   * 2026-08-31: "ETS restarts the device after updating its address. I
+   * don't think we are as yet" - confirmed correct on inspection). Skipped
+   * (not attempted) when verification failed/timed out - restarting a
+   * device at an address it may not have actually adopted isn't
+   * meaningful, and `verified: false` already tells the caller something's
+   * wrong. Restart failure doesn't fail the whole call - surfaced via
+   * `restarted: false`, not an exception, same reasoning as programIA().
    */
   async assignIndividualAddressBySerial(
     serial: Buffer,
     newAddr: string,
     timeoutMs: number = 3000,
-  ): Promise<{ ok: boolean; verified: boolean; address: string | null }> {
+  ): Promise<{
+    ok: boolean;
+    verified: boolean;
+    address: string | null;
+    restarted: boolean;
+  }> {
     await this.writeIndividualAddressBySerial(serial, newAddr);
     const chk = await this.readIndividualAddressBySerial(serial, timeoutMs);
-    return { ok: true, verified: chk?.address === newAddr, address: chk?.address ?? null };
+    const verified = chk?.address === newAddr;
+    let restarted = false;
+    if (verified) {
+      try {
+        await this.restartDevice(newAddr);
+        restarted = true;
+      } catch (e) {
+        logger.warn(
+          'knx',
+          'assignIndividualAddressBySerial: restart after address write failed',
+          { newAddr, error: e instanceof Error ? e.message : String(e) },
+        );
+      }
+    }
+    return { ok: true, verified, address: chk?.address ?? null, restarted };
   }
 
   // ── Application download ──────────────────────────────────────────────────────

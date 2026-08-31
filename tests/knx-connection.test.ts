@@ -352,8 +352,13 @@ describe('KnxConnection.programIA', () => {
     conn.localAddr = '1.0.1';
 
     const result = await conn.programIA('1.1.5');
-    assert.deepEqual(result, { ok: true, newAddr: '1.1.5' });
-    assert.equal(conn.sent.length, 1);
+    // Real user question, 2026-08-31: "ETS restarts the device after
+    // updating its address. I don't think we are as yet." - fixed to
+    // match; see restartDevice()'s own doc comment.
+    assert.deepEqual(result, { ok: true, newAddr: '1.1.5', restarted: true });
+    // PhysicalAddress_Write, then a full management session for the
+    // Restart: T_Connect, Restart (data), T_Disconnect.
+    assert.equal(conn.sent.length, 4);
 
     // Same confirmed-correct wire format as every other network-management
     // broadcast service in this family (see checkProgrammingMode() etc.):
@@ -365,6 +370,12 @@ describe('KnxConnection.programIA', () => {
     assert.equal(parsed.dst, '0/0/0');
     assert.equal(parsed.isGroup, true);
     assert.equal(conn.sent[0]![2], 0xb0);
+
+    // The Restart's own management session addresses the device at its
+    // NEW individual address, not the broadcast address used for the
+    // write itself.
+    const connectFrame = parseCEMI(conn.sent[1]!);
+    assert.equal(connectFrame?.dst, '1.1.5');
   });
 
   it('throws when not connected', async () => {
@@ -374,6 +385,29 @@ describe('KnxConnection.programIA', () => {
     await assert.rejects(() => conn.programIA('1.1.5'), {
       message: 'Not connected',
     });
+  });
+
+  // Real reasoning, 2026-08-31: the address write itself has no response to
+  // confirm against (it's a fire-and-forget broadcast service), so from
+  // koolenex's point of view it already succeeded before the restart is
+  // even attempted - a restart failure shouldn't retroactively fail the
+  // whole call, just get surfaced via `restarted: false`.
+  it('reports restarted: false (not a rejection) when the restart itself fails', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+    let calls = 0;
+    conn.sendCEMI = (cemi: Buffer): Promise<void> => {
+      calls++;
+      // Let the PhysicalAddress_Write (1st call) through, fail everything
+      // in the restart's own management session after it.
+      if (calls === 1) return Promise.resolve();
+      return Promise.reject(new Error('simulated send failure'));
+    };
+
+    const result = await conn.programIA('1.1.5');
+    assert.equal(result.ok, true);
+    assert.equal(result.restarted, false);
   });
 });
 
@@ -733,10 +767,50 @@ describe('KnxConnection.assignIndividualAddressBySerial', () => {
     });
 
     const result = await assignP;
-    assert.deepEqual(result, { ok: true, verified: true, address: '1.1.20' });
-    // Both via the normal Tunneling connection, GROUP-type to 0/0/0 -
-    // confirmed byte-for-byte against real ETS traffic, 2026-08-30.
-    assert.equal(conn.sent.length, 2); // Write, then Read
+    // Real user question, 2026-08-31: "ETS restarts the device after
+    // updating its address. I don't think we are as yet." - fixed to
+    // match, but only once the read-back confirmed the write actually
+    // landed; see assignIndividualAddressBySerial()'s own doc comment.
+    assert.deepEqual(result, {
+      ok: true,
+      verified: true,
+      address: '1.1.20',
+      restarted: true,
+    });
+    // Write, then Read (both via the normal Tunneling connection, GROUP-
+    // type to 0/0/0 - confirmed byte-for-byte against real ETS traffic,
+    // 2026-08-30), then a full management session for the Restart:
+    // T_Connect, Restart (data), T_Disconnect.
+    assert.equal(conn.sent.length, 5);
+    // The Restart's own management session addresses the device at its
+    // NEW individual address (1.1.20), not the broadcast address used for
+    // the write/read-verify.
+    const connectFrame = parseCEMI(conn.sent[2]!);
+    assert.equal(connectFrame?.dst, '1.1.20');
+  });
+
+  it('does not attempt a restart when verification fails', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+    const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
+
+    // No mgmt frame is ever simulated - readIndividualAddressBySerial()
+    // times out with a null result, so verified stays false.
+    const result = await conn.assignIndividualAddressBySerial(
+      serial,
+      '1.1.20',
+      50,
+    );
+    assert.deepEqual(result, {
+      ok: true,
+      verified: false,
+      address: null,
+      restarted: false,
+    });
+    // Just Write + Read - no management session opened for a restart that
+    // was correctly never attempted.
+    assert.equal(conn.sent.length, 2);
   });
 });
 

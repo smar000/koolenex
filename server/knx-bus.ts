@@ -414,7 +414,9 @@ class KnxBusManager extends EventEmitter {
     return this.connection!.readDeviceInfo(deviceAddr);
   }
 
-  async programIA(newAddr: string): Promise<{ ok: boolean; newAddr: string }> {
+  async programIA(
+    newAddr: string,
+  ): Promise<{ ok: boolean; newAddr: string; restarted: boolean }> {
     await this._ensureConnected();
     return this.connection!.programIA(newAddr);
   }
@@ -437,7 +439,12 @@ class KnxBusManager extends EventEmitter {
     serial: Buffer,
     newAddr: string,
     timeoutMs?: number,
-  ): Promise<{ ok: boolean; verified: boolean; address: string | null }> {
+  ): Promise<{
+    ok: boolean;
+    verified: boolean;
+    address: string | null;
+    restarted: boolean;
+  }> {
     await this._ensureConnected();
     return this.connection!.assignIndividualAddressBySerial(
       serial,

@@ -179,12 +179,24 @@
 .logHeader {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
+  /* Same token AppShell uses for its own title/nav chrome (global.css's
+     --sidebar) - a real request 2026-08-31: a plain border-bottom alone
+     didn't read as "this is a header bar" against the log body's own
+     background, which was the same color. */
+  background: var(--sidebar);
   font-size: 9px;
   color: var(--dim);
   letter-spacing: 0.1em;
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+/* Horizontal mode's header, added 2026-08-31: shorter (a bottom-docked
+   panel is already competing with the device table for vertical space,
+   unlike the vertical panel which only ever competes for width) - same
+   background/border, just less vertical padding. */
+.logHeaderHorizontal {
+  padding: 4px 14px;
 }
 .logHeaderActions {
   display: flex;
@@ -201,6 +213,25 @@
   padding: 2px;
 }
 .logCollapseBtn:hover {
+  color: var(--fg);
+}
+/* Collapse button specifically, added 2026-08-31: the small triangle
+   (shared size with the other header icons) read as too small/easy to
+   miss on a real screen - bumped up on its own rather than growing every
+   header icon, since it's the one action a person needs to find
+   reliably (the others are secondary/discoverable-on-hover actions).
+   16px (the first attempt) turned out too big on a real screen -
+   settled on 13px, still visibly larger than the 11px siblings. */
+.logCollapseBtnLarge {
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px;
+}
+.logCollapseBtnLarge:hover {
   color: var(--fg);
 }
 /* Collapsed state: a slim always-visible strip instead of the full log
@@ -307,13 +338,6 @@
      indent the first line, so this uses padding-left on the whole block
      instead, which affects every wrapped line equally. */
   padding-left: 8px;
-}
-.logFooter {
-  padding: 10px 12px;
-  border-top: 1px solid var(--border);
-}
-.logFooterBtn {
-  width: 100%;
 }
 .thDevice {
   min-width: 168px;

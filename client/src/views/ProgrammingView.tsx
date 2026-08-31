@@ -878,9 +878,19 @@ export function ProgrammingView() {
                 : { width: sidebarWidth }
             }
           >
-            <div className={styles.logHeader}>
+            <div
+              className={`${styles.logHeader} ${logOrientation === 'horizontal' ? styles.logHeaderHorizontal : ''}`}
+            >
               LOG
               <div className={styles.logHeaderActions}>
+                <button
+                  type="button"
+                  className={`${styles.iconChipBtn} ${styles.clearCacheBtn}`}
+                  onClick={() => clearLog()}
+                  title="Clear log"
+                >
+                  🗑
+                </button>
                 <button
                   type="button"
                   className={styles.logCollapseBtn}
@@ -895,11 +905,11 @@ export function ProgrammingView() {
                 </button>
                 <button
                   type="button"
-                  className={styles.logCollapseBtn}
+                  className={styles.logCollapseBtnLarge}
                   onClick={() => setLogOpen(false)}
                   title="Collapse log"
                 >
-                  {logOrientation === 'horizontal' ? '▾' : '▸'}
+                  {logOrientation === 'horizontal' ? '▼' : '▶'}
                 </button>
               </div>
             </div>
@@ -936,16 +946,6 @@ export function ProgrammingView() {
                   );
                 })
               )}
-            </div>
-            <div className={styles.logFooter}>
-              <Btn
-                onClick={() => clearLog()}
-                color="var(--dim)"
-                bg="var(--bg)"
-                className={styles.logFooterBtn}
-              >
-                Clear Log
-              </Btn>
             </div>
           </div>
         </>

@@ -16,6 +16,7 @@ import {
   IconProject,
   IconFloorPlan,
   IconCatalog,
+  IconOffline,
 } from './icons.tsx';
 import { Spinner, Toast, Btn } from './primitives.tsx';
 import primStyles from './primitives.module.css';
@@ -414,17 +415,19 @@ export function AppShell(props: AppShellProps) {
               title={
                 state.busStatus.connected
                   ? 'Click to manage the bus connection'
-                  : 'Not connected — click to connect'
+                  : 'Not connected to the bus — most work here doesn’t need it. Click to connect.'
               }
             >
-              <span
-                className={`${appStyles.busDot} ${state.busStatus.connected ? `pulse ${appStyles.busDotConnected}` : appStyles.busDotDisconnected}`}
-              />
+              {state.busStatus.connected ? (
+                <span className={`${appStyles.busDot} pulse ${appStyles.busDotConnected}`} />
+              ) : (
+                <IconOffline size={11} />
+              )}
               {state.busStatus.connected
                 ? state.busStatus.type === 'usb'
                   ? 'USB'
                   : `${state.busStatus.host}`
-                : 'Disconnected'}
+                : 'Not Connected'}
             </button>
             {connectPopoverOpen && (
               <div className={appStyles.busStatusPopover}>

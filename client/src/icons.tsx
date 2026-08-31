@@ -580,6 +580,32 @@ export function IconScan({ size = 14 }: SizeOnlyProps) {
   );
 }
 
+export function IconOffline({ size = 14 }: SizeOnlyProps) {
+  // Signal-strength bars (ascending) with a diagonal strike-through - the
+  // common, calm "not connected" glyph used broadly in software (browser
+  // offline pages, OS network indicators), not an alarm/warning symbol.
+  // Added 2026-08-31, replacing a ⚠ character: "not connected" is this
+  // app's normal, everyday idle state (most work here is offline project
+  // editing, not live bus access), not an error condition, and reads as
+  // one whenever the disconnected indicator borrows warning iconography.
+  return (
+    <_SvgIcon size={size}>
+      <rect x="2" y="8.5" width="2" height="3" rx="0.4" fill="currentColor" fillOpacity="0.55" />
+      <rect x="5.3" y="6" width="2" height="5.5" rx="0.4" fill="currentColor" fillOpacity="0.55" />
+      <rect x="8.6" y="3.5" width="2" height="8" rx="0.4" fill="currentColor" fillOpacity="0.55" />
+      <line
+        x1="1.5"
+        y1="2"
+        x2="12.5"
+        y2="12"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+      />
+    </_SvgIcon>
+  );
+}
+
 export function IconSerial({ size = 14 }: SizeOnlyProps) {
   // Barcode glyph - per-device row indicator for whether a real physical
   // unit's serial number has been recorded against this address (see

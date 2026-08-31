@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { STATUS_COLOR } from '../theme.ts';
 import {
@@ -746,11 +747,20 @@ export function ProgrammingView() {
                             // verifyDevice()) for anyone who wants it.
                             style={
                               verifying && liveVerifyProgress
-                                ? {
+                                ? ({
                                     background: `linear-gradient(to right, color-mix(in srgb, var(--accent) 55%, transparent) 0%, color-mix(in srgb, var(--accent) 55%, transparent) ${Math.round(liveVerifyProgress.pct)}%, var(--surface) ${Math.round(liveVerifyProgress.pct)}%, var(--surface) 100%)`,
                                     color: 'var(--text)',
                                     cursor: 'wait',
-                                  }
+                                    // Clips the flow animation's ::before
+                                    // to just the filled portion (see
+                                    // .actionBtnRunning, ProgrammingView.
+                                    // module.css) - real request
+                                    // 2026-08-31: it swept the whole
+                                    // button regardless of real progress,
+                                    // which didn't read as "part of the
+                                    // progress bar".
+                                    '--action-pct': `${Math.round(liveVerifyProgress.pct)}%`,
+                                  } as CSSProperties)
                                 : undefined
                             }
                           >
@@ -845,11 +855,12 @@ export function ProgrammingView() {
                           // reading as stalled.
                           style={
                             prog?.state === 'running'
-                              ? {
+                              ? ({
                                   background: `linear-gradient(to right, color-mix(in srgb, var(--accent) 55%, transparent) 0%, color-mix(in srgb, var(--accent) 55%, transparent) ${Math.round(programPct)}%, var(--surface) ${Math.round(programPct)}%, var(--surface) 100%)`,
                                   color: 'var(--text)',
                                   cursor: 'wait',
-                                }
+                                  '--action-pct': `${Math.round(programPct)}%`,
+                                } as CSSProperties)
                               : undefined
                           }
                         >

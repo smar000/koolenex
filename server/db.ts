@@ -588,8 +588,22 @@ export function getProjectFull(projectId: number): ProjectFull | null {
   ]);
   if (!project) return null;
 
+  // Real bug, found live 2026-09-01: this hand-maintained column list had
+  // silently fallen 5 columns behind the real `Device` interface
+  // (`apdu_length`, `unconfirmed_writes_count`, `unconfirmed_writes_detail`,
+  // `last_verify_match`, `last_verify_at`) - a genuine live verify result
+  // was correctly persisted server-side, then vanished from the UI on the
+  // very next page refresh, because THIS is the query a refresh actually
+  // calls (the sibling devices-list route, GET /projects/:pid/devices in
+  // devices.ts, already used `SELECT *` and was unaffected - only this
+  // one, less-visited path had drifted). An explicit column list needs a
+  // matching edit here every time a column is added anywhere else in the
+  // codebase, with nothing to enforce that at compile time (TypeScript's
+  // own `all<Device>()` cast doesn't check the query actually returns
+  // every field the type promises) - switched to `SELECT *`, matching the
+  // sibling route's own convention, so this can't drift out of sync again.
   const devices = all<Device>(
-    `SELECT id,project_id,individual_address,has_address,name,description,comment,installation_hints,manufacturer,model,order_number,serial_number,product_ref,area,line,area_name,line_name,medium,device_type,status,last_modified,last_download,app_number,app_version,parameters,app_ref,param_values,space_id,model_translations,bus_current,width_mm,is_power_supply,is_coupler,is_rail_mounted,floor_x,floor_y FROM devices WHERE project_id=? ORDER BY area, line, CAST(REPLACE(individual_address, area||'.'||line||'.', '') AS INTEGER)`,
+    `SELECT * FROM devices WHERE project_id=? ORDER BY area, line, CAST(REPLACE(individual_address, area||'.'||line||'.', '') AS INTEGER)`,
     [projectId],
   );
   const gas = all<GroupAddress>(

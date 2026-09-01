@@ -88,7 +88,7 @@ export function ProgrammingView() {
     } catch (e: any) {
       setAutoAddressBySerial(!next); // revert on failure
       addLog(
-        `[${new Date().toLocaleTimeString()}] Failed to save "Auto-address by serial" setting → ${e.message}`,
+        `[${new Date().toLocaleTimeString()}] Failed to save "Auto-program by Serial No." setting → ${e.message}`,
       );
     }
   };
@@ -694,7 +694,7 @@ export function ProgrammingView() {
               key="auto-serial"
               active={autoAddressBySerial}
               onClick={toggleAutoAddressBySerial}
-              title="When a device doesn't answer at its assigned address (e.g. after a factory reset) but a serial is on record, locate/readdress it by serial automatically instead of asking each time."
+              title="When a device doesn't answer at its assigned address (e.g. after a factory reset) but a Serial No. is on record, program it by that Serial No. automatically instead of asking each time."
               // A touch more prominent than the default active styling
               // when on - real request 2026-09-01. Darker green (not
               // --amber, which this app already uses for "unassigned/
@@ -703,11 +703,19 @@ export function ProgrammingView() {
               // feature) reads as "on and fine", not "something's wrong".
               style={
                 autoAddressBySerial
-                  ? { borderColor: 'color-mix(in srgb, var(--green) 65%, black)' }
+                  ? {
+                      borderColor: 'color-mix(in srgb, var(--green) 65%, black)',
+                      background: 'color-mix(in srgb, var(--green) 12%, transparent)',
+                    }
                   : undefined
               }
             >
-              Auto-address by serial
+              {/* "Program by Serial No." (not "Auto-address...") - real
+                  request 2026-09-01: an average non-dev user connects with
+                  "Program"/"Download" more readily than "address", and
+                  "Serial No." (not bare "serial") avoids reading as the
+                  USB serial connection this app also deals with. */}
+              Auto-program by Serial No.
             </Chip>,
             <Btn
               key="address"
@@ -1498,8 +1506,8 @@ export function ProgrammingView() {
                 </div>
                 <div className={primStyles.modalBody}>
                   {d.name} didn't answer at its assigned address with a
-                  matching serial ({d.serial_number}) - this can happen
-                  after a factory reset. How should it be located?
+                  matching Serial No. ({d.serial_number}) - this can happen
+                  after a factory reset. How should it be programmed?
                 </div>
                 <div className={primStyles.modalActions}>
                   <Btn
@@ -1510,7 +1518,7 @@ export function ProgrammingView() {
                     }}
                     color="var(--accent)"
                   >
-                    Locate by Serial
+                    Program by Serial No.
                   </Btn>
                   <Btn
                     onClick={() => {

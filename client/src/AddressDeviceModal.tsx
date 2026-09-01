@@ -1181,7 +1181,7 @@ export function AddressDeviceModal({
                       (like this one) should still discover it exists. */}
                   <div className={styles.emptyState}>
                     This is also used automatically during Program when
-                    "Auto-address by serial" is enabled — see the
+                    "Auto-program by Serial No." is enabled — see the
                     Programming page header.
                   </div>
                 </>

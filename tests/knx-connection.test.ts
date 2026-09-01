@@ -870,10 +870,15 @@ describe('KnxConnection.assignIndividualAddressBySerial', () => {
     const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
 
     // No mgmt frame is ever simulated - readIndividualAddressBySerial()
-    // times out with a null result, so verified stays false.
+    // times out with a null result on every retry, so verified stays
+    // false. verifyDeadlineMs matches timeoutMs here (both 50) so the
+    // retry loop's own elapsed-time check exits after exactly one attempt,
+    // same real behavior as before the retry loop existed - a real test
+    // for the retry itself is below.
     const result = await conn.assignIndividualAddressBySerial(
       serial,
       '1.1.20',
+      50,
       50,
     );
     assert.deepEqual(result, {
@@ -885,6 +890,55 @@ describe('KnxConnection.assignIndividualAddressBySerial', () => {
     // Just Write + Read - no management session opened for a restart that
     // was correctly never attempted.
     assert.equal(conn.sent.length, 2);
+  });
+
+  it('retries the read-back verification when the first attempt times out, real bug fixed 2026-09-01', async () => {
+    const conn = new TestKnxConnection();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+    const serial = Buffer.from([0x00, 0xa6, 0x25, 0x40, 0x1d, 0x94]);
+
+    // First read-back attempt (t=0 to t=500ms) times out - nothing
+    // answers, matching the real device that wasn't ready yet. The loop's
+    // own 2000ms between-attempt delay pushes the second attempt's read to
+    // start at t≈2500ms, with its own 500ms window open until t≈3000ms.
+    // The frame is simulated at t≈2700ms - comfortably inside the SECOND
+    // attempt's own listening window, not the first - proving a real
+    // second attempt actually answers it, not just a longer single wait.
+    const assignP = conn.assignIndividualAddressBySerial(
+      serial,
+      '1.1.20',
+      500, // each individual read-back attempt's own timeout
+      3500, // overall retry deadline - comfortably covers a second attempt
+    );
+    await delay(2700);
+    const apduData = Buffer.concat([serial, Buffer.alloc(4)]);
+    const apdu = Buffer.concat([Buffer.from([0x03, 0xdd]), apduData]);
+    conn.simulateMgmtFrame({
+      msgCode: 0x29,
+      src: '1.1.20',
+      dst: '0/0/0',
+      isGroup: true,
+      apciIdx: null,
+      apciName: 'OTHER',
+      apduData,
+      apdu,
+      tpciType: 'DATA_GROUP',
+    });
+
+    const result = await assignP;
+    assert.equal(result.verified, true);
+    assert.equal(result.address, '1.1.20');
+    assert.equal(result.restarted, true);
+    // Write + two Reads (the first timed out, the second was answered) +
+    // the same 6-frame restart session as the single-attempt success case
+    // above (8 total there) = 9 - confirms a real second read-back attempt
+    // actually went out on the wire, not just a single longer-timeout read.
+    assert.equal(
+      conn.sent.length,
+      9,
+      'expected Write + 2 Reads (one retried) + the 6-frame restart session',
+    );
   });
 });
 

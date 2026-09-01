@@ -909,8 +909,9 @@ export class KnxConnection extends EventEmitter {
   /**
    * Write-then-read-verify, mirroring Calimero's real
    * ManagementProceduresImpl.writeAddress() procedure: broadcast the
-   * Write, then broadcast a Read as verification and compare. Deliberately
-   * no precondition check that the device isn't already addressed - per
+   * Write, then broadcast a Read as verification and compare - retried over
+   * a real deadline (see below), not a single attempt. Deliberately no
+   * precondition check that the device isn't already addressed - per
    * Calimero's real implementation this can re-address an already-
    * configured device too, not just commission a blank one.
    *
@@ -930,6 +931,24 @@ export class KnxConnection extends EventEmitter {
     serial: Buffer,
     newAddr: string,
     timeoutMs: number = 3000,
+    // Real bug, found live 2026-09-01, real testbed: a single read-back
+    // attempt (one `timeoutMs`-long window) genuinely failed against a
+    // factory-reset device - the write itself landed (confirmed: a second,
+    // independent request a few seconds later found the device already at
+    // the new address, with no re-write needed at all), but the device
+    // wasn't ready to answer the immediate verification broadcast within
+    // that one window. Retries the read-back over this real deadline
+    // instead of giving up after a single attempt - same pattern already
+    // proven for the post-restart settle wait (routes/bus.ts's
+    // waitForDeviceBackUp()), applied here to the write's own verification
+    // step, which runs before that later wait ever gets a chance to help.
+    // Only the read is retried, not the write - the real evidence above
+    // shows the write already succeeded; a device slow to answer isn't a
+    // reason to write to it again. A separate parameter from `timeoutMs`
+    // (not just a bigger `timeoutMs`) so a caller/test can keep each
+    // individual read's own timeout short while still choosing how long to
+    // keep retrying overall.
+    verifyDeadlineMs: number = 20000,
   ): Promise<{
     ok: boolean;
     verified: boolean;
@@ -937,7 +956,14 @@ export class KnxConnection extends EventEmitter {
     restarted: boolean;
   }> {
     await this.writeIndividualAddressBySerial(serial, newAddr);
-    const chk = await this.readIndividualAddressBySerial(serial, timeoutMs);
+    const verifyStart = Date.now();
+    let chk: { address: string } | null = null;
+    let attempt = 0;
+    while (!chk && Date.now() - verifyStart < verifyDeadlineMs) {
+      attempt++;
+      if (attempt > 1) await delay(2000);
+      chk = await this.readIndividualAddressBySerial(serial, timeoutMs);
+    }
     const verified = chk?.address === newAddr;
     let restarted = false;
     if (verified) {

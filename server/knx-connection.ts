@@ -2208,8 +2208,26 @@ export class KnxConnection extends EventEmitter {
               (bytesJustRead) => {
                 if (onProgress && totalPeekBytes > 0) {
                   peekBytesReadSoFar += bytesJustRead;
+                  // Real feedback, 2026-09-01: "% doesn't seem to reflect
+                  // what is actually shown as bytes written, e.g. 8% when
+                  // at 8000/11000". The bar's own `pct` is deliberately
+                  // compressed into a 0-15% slice (see this block's own
+                  // comment above) so this phase can't finish at its own
+                  // 100% and leave the write phase's lower 0-80% numbers
+                  // stuck unable to exceed it once the client clamps the
+                  // bar to never move backward (ProgrammingView.tsx's
+                  // programPctMaxRef) - but showing the raw byte fraction
+                  // right next to that compressed number, with no
+                  // indication the two use different scales, read as the
+                  // percentage being simply wrong. Now states its own
+                  // phase-relative percentage explicitly ("41% through
+                  // this check"), separate from and honest about not
+                  // being the same number as the bar's own fill.
+                  const phasePct = Math.round(
+                    (peekBytesReadSoFar / totalPeekBytes) * 100,
+                  );
                   onProgress({
-                    msg: `Checking ObjIdx=${j.objIdx} (${j.label}) for changes - ${Math.min(peekBytesReadSoFar, totalPeekBytes)}/${totalPeekBytes} bytes read`,
+                    msg: `Checking ObjIdx=${j.objIdx} (${j.label}) for changes - ${phasePct}% through this check (${Math.min(peekBytesReadSoFar, totalPeekBytes)}/${totalPeekBytes} bytes read)`,
                     pct: Math.min(15, (peekBytesReadSoFar / totalPeekBytes) * 15),
                   });
                 }

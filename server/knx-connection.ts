@@ -1919,6 +1919,15 @@ export class KnxConnection extends EventEmitter {
         // confirmed PID_PROGRAM_VERSION write-back after its memory write
         // finishes, before LoadCompleted - see the WriteRelMem case below.
         isParamObject: boolean;
+        // Set only by partial mode's own peek-and-diff step below (never
+        // by full mode, and never for a job with no successfully-resolved
+        // peek base) - when present, the write loop further down writes
+        // ONLY these byte ranges of `table`, not the whole thing. See
+        // computeDirtyRanges()'s own doc comment for why this exists: the
+        // object-level peek alone only ever decided whole-object skip-or-
+        // write, real request 2026-09-01 after a live single-parameter
+        // change rewrote an entire ~10KB object.
+        writeRanges?: Array<{ offset: number; length: number }>;
       }
       const relmemJobs: RelmemJob[] = [];
 
@@ -2152,6 +2161,22 @@ export class KnxConnection extends EventEmitter {
       let activeJobs: RelmemJob[] = relmemJobs;
       if (mode === 'partial') {
         activeJobs = [];
+        // Progress reporting during peek reads, added 2026-09-01 - real
+        // live feedback: "stuck at 0% for very long time (~50 seconds)"
+        // right after the last declared step logs. Root cause: this
+        // whole peek phase (real capture: 98 chunks over ~47s for one
+        // real partial download) previously had no onProgress calls
+        // anywhere in it - readRegionInSession() already supports a
+        // progress callback (used elsewhere, e.g. readMemoryMany()), it
+        // just wasn't wired in here. Landed in a dedicated 0-15% slice,
+        // ahead of the write phase's own 0-80% slice below, so the two
+        // don't collide on the same numbers - a display choice, not
+        // functionally tied to anything else.
+        const totalPeekBytes = relmemJobs.reduce(
+          (sum, j) => sum + j.table.length,
+          0,
+        );
+        let peekBytesReadSoFar = 0;
         for (const j of relmemJobs) {
           let resolvedPeekBase: number;
           if (j.presetBase != null) {
@@ -2180,6 +2205,15 @@ export class KnxConnection extends EventEmitter {
               MEM_CHUNK,
               useExtendedMemory,
               maxApduLengthValue,
+              (bytesJustRead) => {
+                if (onProgress && totalPeekBytes > 0) {
+                  peekBytesReadSoFar += bytesJustRead;
+                  onProgress({
+                    msg: `Checking ObjIdx=${j.objIdx} (${j.label}) for changes - ${Math.min(peekBytesReadSoFar, totalPeekBytes)}/${totalPeekBytes} bytes read`,
+                    pct: Math.min(15, (peekBytesReadSoFar / totalPeekBytes) * 15),
+                  });
+                }
+              },
             );
             if (current.equals(j.table)) {
               logDebug(
@@ -2187,6 +2221,25 @@ export class KnxConnection extends EventEmitter {
               );
               continue;
             }
+            // Surgical partial write, added 2026-09-01 - real request,
+            // verbatim: "otherwise no real point of partial download".
+            // Real capture evidence this replaces: a live partial
+            // download after ONE changed parameter still wrote the
+            // ENTIRE ~10KB parameter object, base to end (98 peek reads
+            // then ~46 unconditional write chunks) - the object-level
+            // peek above only ever decided whole-object skip-or-write.
+            // computeDirtyRanges() finds the actual differing byte
+            // range(s) between what's on the device now and what this
+            // download wants there; the write loop below writes only
+            // those, when present.
+            j.writeRanges = computeDirtyRanges(current, j.table);
+            const dirtyBytes = j.writeRanges.reduce(
+              (s, r) => s + r.length,
+              0,
+            );
+            logDebug(
+              `ObjIdx=${j.objIdx} (${j.label}): partial mode, ${dirtyBytes}/${j.table.length} bytes differ across ${j.writeRanges.length} region(s) - writing only those`,
+            );
           }
           activeJobs.push(j);
         }
@@ -2221,8 +2274,19 @@ export class KnxConnection extends EventEmitter {
         // count across objects, not each restarting its own 0-80% scale
         // per object (which would visibly jump backward every time a new
         // object's writes began).
+        // Real request, 2026-09-01: counts only the bytes actually being
+        // written (writeRanges' own total, when a job has one from
+        // partial mode's surgical diff above) rather than every active
+        // job's FULL table length - otherwise the progress bar's own
+        // denominator would still imply a full-object write even once
+        // the write itself is genuinely surgical, understating real
+        // progress throughout.
         const totalActiveBytes = activeJobs.reduce(
-          (sum, jj) => sum + jj.table.length,
+          (sum, jj) =>
+            sum +
+            (jj.writeRanges
+              ? jj.writeRanges.reduce((s, r) => s + r.length, 0)
+              : jj.table.length),
           0,
         );
         let bytesWrittenSoFar = 0;
@@ -2260,7 +2324,27 @@ export class KnxConnection extends EventEmitter {
             base = 0;
           }
           resolvedBase.set(j.objIdx, base);
-          for (let off = 0; off < j.table.length; ) {
+          // Surgical partial write, added 2026-09-01 (see
+          // computeDirtyRanges' own doc comment for the real motivation)
+          // - a job whose peek found the device already differs writes
+          // only its own `writeRanges` (real, actually-differing byte
+          // spans), not the whole table from offset 0. Full mode, or any
+          // job the peek never ran against (no RelSegment declaration,
+          // or a caller-supplied presetBase - see partial mode's own
+          // peek block above), has no `writeRanges` and keeps writing
+          // the whole table exactly as before - this is additive, not a
+          // behavior change for anything outside partial mode's own
+          // diffed jobs.
+          const writeWindows = j.writeRanges ?? [
+            { offset: 0, length: j.table.length },
+          ];
+          const jobBytesToWrite = writeWindows.reduce(
+            (s, w) => s + w.length,
+            0,
+          );
+          let jobBytesWritten = 0;
+          for (const win of writeWindows) {
+            for (let off = win.offset; off < win.offset + win.length; ) {
             const seq = nextSeq();
             const addr = base + j.offset + off;
             // A_Memory_Write only carries a 16-bit address - same problem as
@@ -2304,7 +2388,14 @@ export class KnxConnection extends EventEmitter {
             const stepSize = useExtendedForThisChunk
               ? MEM_CHUNK
               : Math.min(MEM_CHUNK, 63);
-            const chunk = j.table.subarray(off, off + stepSize);
+            // Bounded by the current window's own end, not just
+            // `stepSize` - a dirty range from computeDirtyRanges() can
+            // (and usually does) end well before a natural stepSize
+            // boundary; Buffer.subarray's own clipping only protects the
+            // end of the whole table, which isn't tight enough once
+            // writeWindows is a sub-range of it.
+            const chunkEnd = Math.min(off + stepSize, win.offset + win.length);
+            const chunk = j.table.subarray(off, chunkEnd);
             const apdu = useExtendedForThisChunk
               ? apduMemoryExtendedWrite(seq, addr, chunk)
               : apduMemoryWrite(seq, addr, chunk);
@@ -2345,14 +2436,24 @@ export class KnxConnection extends EventEmitter {
                 `Memory write ObjIdx=${j.objIdx} (${j.label}) offset=${off} size=${chunk.length} unconfirmed`,
               );
             }
+            jobBytesWritten += chunk.length;
+            // `bytesWrittenSoFar + jobBytesWritten` (bytes actually sent
+            // so far), not `bytesWrittenSoFar + off` (the old formula) -
+            // `off` is a position WITHIN the table, meaningless as a
+            // "bytes written" count once writeWindows is a sub-range of
+            // it (a window starting well past offset 0 would otherwise
+            // make the bar jump to a misleadingly high percentage the
+            // instant its first chunk sends, before any of ITS bytes are
+            // actually written).
             if (onProgress && totalActiveBytes > 0)
               onProgress({
-                msg: `WriteRelMem ObjIdx=${j.objIdx} (${j.label}) ${off}/${j.table.length}`,
-                pct: ((bytesWrittenSoFar + off) / totalActiveBytes) * 80,
+                msg: `WriteRelMem ObjIdx=${j.objIdx} (${j.label}) ${jobBytesWritten}/${jobBytesToWrite}`,
+                pct: ((bytesWrittenSoFar + jobBytesWritten) / totalActiveBytes) * 80,
               });
-            off += stepSize;
+            off = chunkEnd;
+            }
           }
-          bytesWrittenSoFar += j.table.length;
+          bytesWrittenSoFar += jobBytesToWrite;
           // Real ETS reads PID_PROGRAM_VERSION (property 13) on the
           // Application Program object early in its session, then writes
           // that SAME value back after its memory writes finish, right
@@ -2672,4 +2773,62 @@ export function maxChunkFromApduLength(
 ): number {
   const headerBytes = useExtended ? 6 : 4;
   return Math.max(1, maxApduLengthValue + 1 - headerBytes);
+}
+
+// Two adjacent differing bytes closer together than this get folded into
+// one write region rather than issued as two separate writes - a judgment
+// call, not derived from a specific real-hardware measurement: small
+// enough that a genuinely isolated single-parameter change (surrounded by
+// hundreds of unrelated, unchanged bytes) still produces a small, tight
+// write, large enough that a handful of nearby parameter fields changing
+// together don't fragment into many separate round trips (each with its
+// own real request/response cost) for the sake of skipping a few
+// already-matching bytes in between. Loosely consistent with the "17
+// bytes only, rest skipped" real ETS Partial Download optimization this
+// project's docs already describe, without claiming to reproduce ETS's
+// own exact algorithm.
+export const DIRTY_RANGE_MERGE_GAP = 32;
+
+/**
+ * Finds the byte range(s) where `current` (a real region just read off a
+ * device) differs from `target` (the freshly-computed image partial mode
+ * wants there), merging differences within `mergeGap` bytes of each other
+ * into a single contiguous range. Real request, 2026-09-01, after a real
+ * live partial download rewrote an entire ~10KB parameter object for a
+ * single changed value: "otherwise no real point of partial download" -
+ * the object-level peek-and-skip this was already doing (see
+ * `downloadDevice()`'s own `mode === 'partial'` block) only ever decided
+ * "skip this whole object" or "write this whole object", never anything
+ * in between. This is the missing piece: given the two buffers already
+ * being compared there anyway, work out exactly which sub-ranges actually
+ * need writing.
+ *
+ * Both buffers must be the same length (the caller already reads exactly
+ * `target.length` bytes for `current`) - not re-validated here, a
+ * mismatch would be a real caller bug upstream, not a legitimate runtime
+ * case to handle gracefully.
+ */
+export function computeDirtyRanges(
+  current: Buffer,
+  target: Buffer,
+  mergeGap: number = DIRTY_RANGE_MERGE_GAP,
+): Array<{ offset: number; length: number }> {
+  const ranges: Array<{ offset: number; length: number }> = [];
+  let rangeStart = -1;
+  let lastDiffEnd = -1; // exclusive end of the most recent differing byte
+  for (let i = 0; i < target.length; i++) {
+    if (current[i] !== target[i]) {
+      if (rangeStart === -1) {
+        rangeStart = i;
+      } else if (i - lastDiffEnd > mergeGap) {
+        ranges.push({ offset: rangeStart, length: lastDiffEnd - rangeStart });
+        rangeStart = i;
+      }
+      lastDiffEnd = i + 1;
+    }
+  }
+  if (rangeStart !== -1) {
+    ranges.push({ offset: rangeStart, length: lastDiffEnd - rangeStart });
+  }
+  return ranges;
 }

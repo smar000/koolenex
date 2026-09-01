@@ -19,7 +19,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { parseCEMI, buildCEMI, apduConnectedFull, apduGroup, APCI_EXT, TPCI } from '../server/knx-cemi.ts';
-import { KnxConnection } from '../server/knx-connection.ts';
+import { KnxConnection, computeDirtyRanges } from '../server/knx-connection.ts';
 import type { DownloadStep } from '../server/knx-connection.ts';
 
 /**
@@ -351,5 +351,170 @@ describe('FakeRWMemoryDevice.setProperty() - PropertyValue_Read support (2026-08
     await dev.downloadDevice('1.1.9', [], gaTable, null, null, undefined, { mode: 'partial' });
 
     assert.equal(dev.writeCount(), 0, 'partial mode should skip the whole cycle when content already matches');
+  });
+});
+
+describe('computeDirtyRanges() (2026-09-01)', () => {
+  it('returns an empty array when the buffers are identical', () => {
+    const a = Buffer.from('deadbeefcafef00d', 'hex');
+    assert.deepEqual(computeDirtyRanges(a, Buffer.from(a)), []);
+  });
+
+  it('finds a single isolated differing byte as one 1-byte range', () => {
+    const target = Buffer.alloc(100, 0x00);
+    target[50] = 0xff;
+    const current = Buffer.alloc(100, 0x00);
+    assert.deepEqual(computeDirtyRanges(current, target), [
+      { offset: 50, length: 1 },
+    ]);
+  });
+
+  it('merges two differences closer together than the merge gap into one range', () => {
+    const target = Buffer.alloc(100, 0x00);
+    target[40] = 0xff;
+    target[50] = 0xff; // 9 bytes apart - inside the default 32-byte gap
+    const current = Buffer.alloc(100, 0x00);
+    assert.deepEqual(computeDirtyRanges(current, target), [
+      { offset: 40, length: 11 },
+    ]);
+  });
+
+  it('keeps two differences farther apart than the merge gap as separate ranges', () => {
+    const target = Buffer.alloc(200, 0x00);
+    target[10] = 0xff;
+    target[150] = 0xff; // 139 bytes apart - well past the default 32-byte gap
+    const current = Buffer.alloc(200, 0x00);
+    assert.deepEqual(computeDirtyRanges(current, target), [
+      { offset: 10, length: 1 },
+      { offset: 150, length: 1 },
+    ]);
+  });
+
+  it('respects a caller-supplied merge gap', () => {
+    const target = Buffer.alloc(100, 0x00);
+    target[10] = 0xff;
+    target[50] = 0xff; // 39 bytes apart
+    const current = Buffer.alloc(100, 0x00);
+    // Default gap (32) keeps these separate...
+    assert.equal(computeDirtyRanges(current, target).length, 2);
+    // ...a wider gap merges them.
+    assert.equal(computeDirtyRanges(current, target, 40).length, 1);
+  });
+
+  it('handles a difference at the very start and the very end of the buffer', () => {
+    const target = Buffer.alloc(50, 0x00);
+    target[0] = 0xff;
+    target[49] = 0xff;
+    const current = Buffer.alloc(50, 0x00);
+    assert.deepEqual(computeDirtyRanges(current, target), [
+      { offset: 0, length: 1 },
+      { offset: 49, length: 1 },
+    ]);
+  });
+
+  it('treats a fully differing buffer as one single range spanning it entirely', () => {
+    const target = Buffer.from('deadbeefcafef00d', 'hex');
+    const current = Buffer.alloc(target.length, 0x00);
+    assert.deepEqual(computeDirtyRanges(current, target), [
+      { offset: 0, length: target.length },
+    ]);
+  });
+});
+
+describe("downloadDevice() mode='partial' surgical write (2026-09-01)", () => {
+  const BASE = 0x5f0e;
+
+  it('writes only the byte range that actually changed, not the whole object, for a single-value change in a large buffer', async () => {
+    // Real motivation: a live partial download after ONE changed
+    // parameter rewrote an entire ~10KB object (98 peek-read chunks then
+    // ~46 unconditional write chunks) - "otherwise no real point of
+    // partial download". This proves the fix: a large (1000-byte) object
+    // with a tiny, isolated 2-byte change produces exactly ONE small
+    // write, not the ~5 chunks (Math.ceil(1000/228)) a full rewrite of
+    // this size would need.
+    const size = 1000;
+    const target = Buffer.alloc(size);
+    for (let i = 0; i < size; i++) target[i] = i % 256;
+    const backing = Buffer.alloc(0x10000);
+    target.copy(backing, BASE);
+    // The one real change: 2 bytes near the middle differ from the
+    // device's current content.
+    backing[BASE + 500] = 0xaa;
+    backing[BASE + 501] = 0xbb;
+    const dev = new FakeRWMemoryDevice('1.1.9', backing);
+
+    const relSeg: DownloadStep = {
+      type: 'RelSegment',
+      objIdx: 4,
+      propId: 0,
+      lsmIdx: 4,
+      size,
+      fill: 0,
+    };
+    const write: DownloadStep = {
+      type: 'WriteRelMem',
+      objIdx: 4,
+      propId: 0,
+      size,
+      offset: 0,
+    };
+    await dev.downloadDevice('1.1.9', [relSeg, write], null, null, target, undefined, {
+      resolvedBases: { 4: BASE },
+      mode: 'partial',
+    });
+
+    assert.equal(
+      dev.writeCount(),
+      1,
+      'expected exactly one small write covering the 2 changed bytes, not ~5 chunks for a full 1000-byte rewrite',
+    );
+    // The device's final content is still fully correct, byte-for-byte -
+    // surgical writing must never leave stale bytes behind anywhere else
+    // in the object.
+    assert.deepEqual(
+      [...dev.memory.subarray(BASE, BASE + size)],
+      [...target],
+    );
+  });
+
+  it('writes multiple separate regions when changes are scattered far apart in a large buffer', async () => {
+    const size = 1000;
+    const target = Buffer.alloc(size);
+    for (let i = 0; i < size; i++) target[i] = i % 256;
+    const backing = Buffer.alloc(0x10000);
+    target.copy(backing, BASE);
+    backing[BASE + 10] = 0xaa; // near the start
+    backing[BASE + 900] = 0xbb; // near the end, far past the merge gap
+    const dev = new FakeRWMemoryDevice('1.1.9', backing);
+
+    const relSeg: DownloadStep = {
+      type: 'RelSegment',
+      objIdx: 4,
+      propId: 0,
+      lsmIdx: 4,
+      size,
+      fill: 0,
+    };
+    const write: DownloadStep = {
+      type: 'WriteRelMem',
+      objIdx: 4,
+      propId: 0,
+      size,
+      offset: 0,
+    };
+    await dev.downloadDevice('1.1.9', [relSeg, write], null, null, target, undefined, {
+      resolvedBases: { 4: BASE },
+      mode: 'partial',
+    });
+
+    assert.equal(
+      dev.writeCount(),
+      2,
+      'two isolated, far-apart changes should produce two separate small writes',
+    );
+    assert.deepEqual(
+      [...dev.memory.subarray(BASE, BASE + size)],
+      [...target],
+    );
   });
 });

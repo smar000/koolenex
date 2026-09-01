@@ -1024,6 +1024,18 @@ take effect on real hardware (a device moved from its factory-default address to
 address) even before this correction; the correction fixes its own read-verify step, which had
 been silently failing due to the wrong response-payload decode above.
 
+**The write's own verification read needs a retry, not a single attempt** 🟢 confirmed
+byte-for-byte against a real factory-reset device: `assignIndividualAddressBySerial()` broadcasts
+the write, then a verification read - a device that hasn't fully woken up yet after the write can
+miss that first read's timeout window entirely, even though the write itself already landed. A
+real capture shows the write at t=9.19s, a first verification read at t=9.21s going unanswered
+(timing out ~3s later), then a second verification read exactly 2s after that timeout, which the
+device (now answering with its own address as cEMI source, not just a router echo) answers
+correctly. Fixed by retrying the read over a real deadline instead of a single attempt - the same
+shape as real ETS's own behavior captured independently in §9.3 below (its factory-reset
+verification read is also retried once after a ~3s timeout), not a workaround unique to this
+codebase.
+
 ### 9.3 Real ETS Factory Reset procedure, confirmed byte-for-byte 🟢
 
 Not yet implemented in koolenex — captured as reference for a future factory-reset feature.

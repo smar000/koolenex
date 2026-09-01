@@ -522,8 +522,15 @@ legacy, `MEM_CHUNK` for extended), decided before slicing rather than after.
 
 Regression-tested against the real captured frame's own bytes
 (`tests/memory-read.test.ts`, `describe('apduMemoryWrite')`) and against the mixed-service chunking
-behavior (`tests/relmem-write-protocol.test.ts`). Not yet re-verified on real hardware — the next
-real Full Download to 1.1.20 is the actual confirmation this fix needs.
+behavior (`tests/relmem-write-protocol.test.ts`). 🟢 **Confirmed on real hardware, 2026-09-01**: a
+real Full Download to 1.1.20 sent legacy `MemWrite` frames at the correct addresses
+(`X=$1766`→`$179A`→`$17CE` for the parameter object, `X=$1002` for the GA table — all matching the
+dry run below exactly), captured via tshark — no more `$3417`/`$3017` garbage. A subsequent real
+`/bus/verify-device` read-back confirmed the actual device content: parameter memory 152/152 bytes
+matching (0 differing), and all four Object 3 (Group Object Table) flag rows reading back correctly
+set (`Update=Yes Write=Yes` as expected) — this is the exact "flags reading back as unset" symptom
+from the prior (buggy) session, now resolved. 164 of 164 decoded comparison points matched, 0
+mismatches.
 
 **Confirmed hardware-free via a dry run, 2026-09-01**: `downloadDevice()` (real, unmodified code)
 run against real 1.1.20 project data (`buildDeviceProgramming()`, same pipeline the real route

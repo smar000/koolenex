@@ -1015,87 +1015,17 @@ describe('KnxConnection.downloadDevice', () => {
     assert.ok(progress.includes('Download complete'));
   });
 
-  it('resolves the write service from a declared WriteProp[PropId=27] InlineData byte, without a live mask read', async () => {
-    for (const [byte5, expectExtended] of [
-      [0x33, true],
-      [0xff, false],
-    ] as const) {
-      const conn = new TestKnxConnection();
-      conn.connected = true;
-      conn.localAddr = '1.0.1';
-
-      const steps: DownloadStep[] = [
-        {
-          type: 'WriteProp',
-          objIdx: 4,
-          propId: 27,
-          data: Buffer.from([0x00, 0x00, 0x18, 0x04, 0x00, byte5, 0x00, 0x00]),
-        },
-      ];
-      const progress: string[] = [];
-
-      await conn.downloadDevice('1.1.2', steps, null, null, null, (p) =>
-        progress.push(p.msg),
-      );
-
-      assert.ok(
-        progress.some(
-          (m) =>
-            m.includes(`byte5=0x${byte5.toString(16)}`) &&
-            m.includes(expectExtended ? 'extended' : 'legacy'),
-        ),
-        `byte5=0x${byte5.toString(16)} should resolve to ${expectExtended ? 'extended' : 'legacy'}`,
-      );
-      // A static resolution must skip the live DeviceDescriptor_Read mask
-      // fallback entirely - no live probe needed when the project file
-      // already has the answer.
-      assert.ok(
-        !progress.some((m) => m.includes('DeviceDescriptor mask=')),
-        'must not fall back to a live mask read once resolved statically',
-      );
-    }
-  });
-
-  it('a static WriteProp resolution is never overridden by the app\'s own later LoadImageProp read, even if the live value disagrees', async () => {
-    // Real apps declare both: LdCtrlWriteProp early (the static ground
-    // truth) and LdCtrlLoadImageProp later (a read-only verification pass -
-    // see docs/knx-device-write-protocol.md §4.1). This device answers the
-    // LoadImageProp read with a byte5 that CONTRADICTS the WriteProp step's
-    // own data, to prove the guard actually holds in the shape real apps
-    // use, not just when no live read ever happens.
-    class ContradictingReadDevice extends TestKnxConnection {
-      sendCEMI(cemi: Buffer): Promise<void> {
-        this.sent.push(cemi);
-        const frame = parseCEMI(cemi);
-        const fullApci =
-          frame && frame.apdu.length >= 2
-            ? ((frame.apdu[0]! & 0x03) << 8) | frame.apdu[1]!
-            : -1;
-        if (fullApci === 0x3d5 /* PropertyValue_Read */) {
-          const objIdx = frame!.apduData[0]!;
-          const propId = frame!.apduData[1]!;
-          if (objIdx === 4 && propId === 27) {
-            const meta = Buffer.from([objIdx, propId, 0x10, 0x01]);
-            // byte5=0xFF (legacy) - the OPPOSITE of the WriteProp step's
-            // own 0x33 (extended) below.
-            const value = Buffer.from([0x00, 0x00, 0x18, 0x04, 0x00, 0xff, 0x00, 0x00]);
-            const respApdu = apduConnectedFull(
-              0,
-              APCI_EXT.PropertyValue_Response,
-              Buffer.concat([meta, value]),
-            );
-            const resp = parseCEMI(
-              buildCEMI(frame!.dst, frame!.src, respApdu, false),
-            )!;
-            setImmediate(() => this._onCEMI(resp));
-            return Promise.resolve();
-          }
-        }
-        return super.sendCEMI(cemi);
-      }
-    }
-
-    const conn = new ContradictingReadDevice();
+  it('does NOT resolve the write service from a declared WriteProp[PropId=27] InlineData byte (disproven rule, removed 2026-09-01)', async () => {
+    // Byte 5 of PID_MCB_TABLE (property 27) was previously the
+    // highest-priority write-service signal. Disproven by a real device
+    // (Weinzierl KNX IO 534 CV (4D)) that declares/reads a non-0xFF byte 5
+    // on every object yet genuinely requires the LEGACY service - the
+    // opposite of what the rule predicted. This test locks in the removal:
+    // a WriteProp[PropId=27] step must not influence `useExtendedMemory`
+    // at all - resolution falls through to IsSecureEnabled/mask/heuristic
+    // as if the step weren't there. See docs/knx-device-write-protocol.md
+    // §4.1 for the full evidence trail.
+    const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
 
@@ -1106,7 +1036,6 @@ describe('KnxConnection.downloadDevice', () => {
         propId: 27,
         data: Buffer.from([0x00, 0x00, 0x18, 0x04, 0x00, 0x33, 0x00, 0x00]),
       },
-      { type: 'LoadImageProp', objIdx: 4, propId: 27 },
     ];
     const progress: string[] = [];
 
@@ -1115,12 +1044,16 @@ describe('KnxConnection.downloadDevice', () => {
     );
 
     assert.ok(
-      progress.some((m) => m.includes('byte5=0x33') && m.includes('extended')),
-      'should resolve extended from the static WriteProp data',
+      !progress.some((m) => m.includes('byte5=') || m.includes('PID_MCB_TABLE')),
+      'a WriteProp[PropId=27] step must not be read as a write-service signal any more',
     );
+    // With no IsSecureEnabled and this fake device never answering
+    // DeviceDescriptor_Read, resolution should fall through to the live
+    // mask-read attempt (and then the address-size heuristic) exactly as
+    // if the WriteProp step didn't exist.
     assert.ok(
-      !progress.some((m) => m.includes('byte5=0xff')),
-      'the contradicting live read must never be acted on once resolved statically',
+      progress.some((m) => m.includes('No DeviceDescriptor_Response received')),
+      'must fall through to the live mask read now that the static signal is gone',
     );
   });
 

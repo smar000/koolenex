@@ -1668,31 +1668,18 @@ export class KnxConnection extends EventEmitter {
       // that genuinely doesn't fit in 16 bits always needs extended,
       // regardless of what either signal above says.
       //
-      // Highest-priority signal: for an app that declares `LdCtrlWriteProp`
-      // for objIdx4/PropId27, the memory-write service is determined by
-      // byte 5 of that step's own `InlineData` — a literal value baked into
-      // the app XML by the manufacturer's build, which ETS writes to the
-      // device verbatim rather than computing at runtime. This is ground
-      // truth from the project file, not a correlate, and takes priority
-      // over IsSecureEnabled/mask/live-read below. Apps that don't declare
-      // this step (e.g. HDL's) fall through to those. See
-      // docs/knx-device-write-protocol.md §4.1 for the full evidence.
+      // PID_MCB_TABLE (property 27) byte 5, previously used here as the
+      // highest-priority write-service signal, was DISPROVEN 2026-09-01: a
+      // real device (Weinzierl KNX IO 534 CV (4D)) declares a non-0xFF byte
+      // 5 on every object (matching a live read exactly) yet genuinely
+      // requires the LEGACY service - the opposite of what this rule
+      // predicted. Removed entirely rather than left as a silently-wrong
+      // priority signal; see docs/knx-device-write-protocol.md §4.1 for the
+      // full evidence trail. `IsSecureEnabled` is the current best inferred
+      // signal (still unconfirmed from any primary KNX source - see its own
+      // doc comment below).
       let useExtendedMemory: boolean | null = null;
-      let staticWriteServiceResolved = false;
-      for (const s of steps) {
-        if (s.type === 'WriteProp' && s.propId === 27 && s.data && s.data.length >= 6) {
-          useExtendedMemory = s.data[5] !== 0xff;
-          staticWriteServiceResolved = true;
-          logDebug(
-            `PID_MCB_TABLE byte5=0x${s.data[5]!.toString(16).padStart(2, '0')} from the app's declared LdCtrlWriteProp InlineData (${useExtendedMemory ? 'extended' : 'legacy'} memory writes)`,
-          );
-          break;
-        }
-      }
-      if (staticWriteServiceResolved) {
-        // Nothing to do - already resolved above, and nothing below is
-        // allowed to override it.
-      } else if (extra?.isSecureEnabled !== undefined) {
+      if (extra?.isSecureEnabled !== undefined) {
         useExtendedMemory = extra.isSecureEnabled;
         logDebug(
           `IsSecureEnabled=${extra?.isSecureEnabled} (${useExtendedMemory ? 'extended' : 'legacy'} memory writes - 🔴 speculative, unconfirmed rule, see code comment)`,
@@ -1790,32 +1777,50 @@ export class KnxConnection extends EventEmitter {
       // Verify Mode is set first on THIS device; the write itself always
       // persists either way, confirmed vs unconfirmed. That part is solid.
       //
-      // 🟡 What decides WHEN to send it - genuinely still a guess, kept
-      // deliberately narrow rather than confident. The real project file
-      // for this exact app has exactly one relevant data point: its only
-      // `LdCtrlWriteRelMem` declaration (the parameter object, objIdx 4)
-      // carries `Verify="true"` - the only occurrence of that attribute
-      // anywhere in the app. It's a plausible, direct, project-file-level
-      // signal - much more principled than inferring from the legacy vs
-      // extended memory-write service, which a real cross-device check the
-      // same day showed was NOT a safe generalization (1 legacy device vs
-      // 2 extended devices - far too small a sample either way, see
-      // `knx_open_unconfirmed_writes_issues` memory in the `knx-ets-
-      // manager` repo for the full history). But treat this as a
-      // reasonable-guess trigger, not a confirmed mechanism: nobody has
-      // seen `Verify="false"` or a genuinely absent `Verify` attribute on
-      // a second real app to know what that would mean, and whether
-      // `Verify="true"` is really what CAUSES real ETS to enable Verify
-      // Mode (as opposed to both simply correlating with something else
-      // about this one app) has not been independently confirmed - e.g. by
-      // finding a real app with `Verify="true"` that ETS does NOT set
-      // Verify Mode for, or vice versa. Scanning `steps` (not just the
-      // object 4 job specifically) because Verify Mode is a device-wide
-      // setting, and this session's own test showed objects 1/2/3
-      // (undeclared writes, no `Verify` attribute of their own at all)
-      // benefited from it too, once set.
-      if (steps.some((s) => s.type === 'WriteRelMem' && s.verify === true)) {
-        logDebug('PID_DEVICE_CONTROL: enabling Verify Mode ($04) before memory writes (a declared WriteRelMem step requested Verify="true")');
+      // 🔴 An earlier version of this gate keyed on a project-file
+      // `LdCtrlWriteRelMem Verify="true"` attribute - DISPROVEN 2026-09-01:
+      // that attribute is present, identically, on every `RelSegment`-style
+      // app checked (including three real apps whose captures never touch
+      // this property at all). It looks like a fixed default for that
+      // load-procedure style, not a live per-device signal, and has been
+      // removed as a trigger.
+      //
+      // 🟡 What correlates instead, across every device/app checked so far
+      // with no exception found: which memory-write service the device
+      // resolves to. Every device confirmed to require the legacy service
+      // has also been confirmed to require this property write; every
+      // device confirmed to use the extended service has never been
+      // observed to touch it. Gating on `useExtendedMemory` (resolved
+      // above - itself only an inference, currently led by the app's
+      // `IsSecureEnabled` attribute, not an independently confirmed rule)
+      // is therefore an inference built on an inference, not a proven
+      // mechanism - see docs/knx-device-write-protocol.md §4.1/§4.1d for
+      // the full evidence trail and what would falsify it.
+      // `useExtendedMemory !== true` (rather than `=== false`) means an
+      // unresolved service (mask read failed, no signal available) is
+      // treated the same as legacy - the same conservative default already
+      // used for MEM_CHUNK sizing above, since sending this write to a
+      // device that doesn't need it is expected to be harmless (the
+      // reference implementation's extended-write handler has no Verify
+      // Mode dependency to begin with) while omitting it from a device
+      // that does need it silently loses every write confirmation - the
+      // asymmetric-risk case this project's whole investigation was about.
+      // Still scoped to sessions that actually declare a `WriteRelMem` step
+      // (the RelSegment-family download path this whole mechanism has been
+      // confirmed against) - not the per-step `verify` flag any more, but
+      // the same overall gate as before: a session with no memory write to
+      // confirm has nothing for Verify Mode to help with. Real captures
+      // showed objects 1/2/3 (undeclared writes, no `Verify` attribute of
+      // their own at all) benefit from this write just as much as the
+      // declared object 4 step does, once set - hence checking for ANY
+      // `WriteRelMem` step's presence, not that specific step's own flag.
+      if (
+        steps.some((s) => s.type === 'WriteRelMem') &&
+        useExtendedMemory !== true
+      ) {
+        logDebug(
+          `PID_DEVICE_CONTROL: enabling Verify Mode ($04) before memory writes (write service resolved to ${useExtendedMemory === false ? 'legacy' : 'unresolved - defaulting to legacy'})`,
+        );
         try {
           await propWrite(0, 14, Buffer.from([0x04]));
         } catch (_e) {
@@ -1990,42 +1995,16 @@ export class KnxConnection extends EventEmitter {
             logDebug(
               `LoadImageProp ObjIdx=${step.objIdx} PropId=${step.propId} - read-only per real ETS, not writing`,
             );
-            {
-              const val = await propRead(step.objIdx, step.propId);
-              // Fallback signal for apps that don't declare LdCtrlWriteProp
-              // for PropId27 at all (e.g. HDL's). Byte 5 of the live value
-              // correlates with the required write service, but — unlike
-              // the WriteProp case's InlineData — it isn't ETS's own
-              // decision mechanism, just an observed correlate; see
-              // docs/knx-device-write-protocol.md §4.1. Never overrides an
-              // already-resolved static value.
-              if (
-                !staticWriteServiceResolved &&
-                step.propId === 27 &&
-                val &&
-                val.length >= 6
-              ) {
-                const resolved = val[5] !== 0xff;
-                logDebug(
-                  `PID_MCB_TABLE byte5=0x${val[5]!.toString(16).padStart(2, '0')} from a live read (no LdCtrlWriteProp declared for this app - ${resolved ? 'extended' : 'legacy'} memory writes - 🔴 speculative, unconfirmed rule, see code comment)`,
-                );
-                useExtendedMemory = resolved;
-                // MEM_CHUNK was already sized (above, before this step
-                // ran) using whichever service `IsSecureEnabled`/mask
-                // resolved at the time - if this real, live signal just
-                // changed that decision, MEM_CHUNK's own header-byte
-                // assumption (4 legacy / 6 extended) is now stale too.
-                // Recompute it the same way, so the two stay consistent
-                // for the real writes still to come.
-                if (maxApduLengthValue != null) {
-                  MEM_CHUNK = Math.min(
-                    228,
-                    maxChunkFromApduLength(maxApduLengthValue, useExtendedMemory),
-                  );
-                  logDebug(`Real MEM_CHUNK for this device (revised): ${MEM_CHUNK} bytes`);
-                }
-              }
-            }
+            // A live read of PID_MCB_TABLE (property 27) byte 5 was
+            // previously used here as a fallback write-service signal for
+            // apps that don't declare `LdCtrlWriteProp` for it (e.g.
+            // HDL's). DISPROVEN 2026-09-01 alongside the static InlineData
+            // version of the same rule (see the `useExtendedMemory`
+            // resolution above) - removed rather than left as a silently-
+            // wrong signal. `propRead()` is still issued, matching real
+            // ETS's own read-only verification pass, but its value no
+            // longer feeds any decision.
+            await propRead(step.objIdx, step.propId);
             break;
           }
         }

@@ -238,19 +238,35 @@ comfortably in 16 bits — the same decisive shape as the original 1.1.9 evidenc
 HDL app), and the segment-size gap the size-based theory would need to resolve narrows
 considerably too (152↔6152, down from 152↔8178).
 
-**This is still only a hypothesis that happens to fit today's small (five-app, two-manufacturer)
-sample — not an independently confirmed rule**, and every one of the confirming data points so
-far is a real ETS write, not a koolenex one (koolenex's own extended-service write to a device
-with `IsSecureEnabled` absent has been tested exactly once — HDL, and it correctly used legacy per
-this rule, matching real ETS — but that's the only case where koolenex's OWN write, gated on this
-rule, has been confirmed against real hardware end-to-end; the Jung/production devices' evidence
-is entirely from watching what real ETS does, not from koolenex writing to them). What would
-actually settle it as a rule, not just a pattern: a real device/app with `IsSecureEnabled=false`
-(or absent) and a LARGE parameter segment, or one with `IsSecureEnabled=true` and a SMALL segment
-— neither combination has ever been tested. Re-test against a new device/app before trusting this
-in any context where a silent write failure would matter. Tracked in the `knx-ets-manager` repo's
-`CLAUDE.md` ("Track B write-path status" section, standing-gaps list) too — update both if this
-gets confirmed or disproven.
+**This is still only a hypothesis, not an independently confirmed rule**, and every one of the
+confirming data points so far is a real ETS write, not a koolenex one (koolenex's own
+extended-service write to a device with `IsSecureEnabled` absent has been tested exactly once —
+HDL, and it correctly used legacy per this rule, matching real ETS — but that's the only case
+where koolenex's OWN write, gated on this rule, has been confirmed against real hardware
+end-to-end; the rest of the evidence is entirely from watching what real ETS does, not from
+koolenex writing to those devices). What would actually settle it as a rule, not just a pattern: a
+real device/app with `IsSecureEnabled=false` (or absent) and a LARGE parameter segment, or one
+with `IsSecureEnabled=true` and a SMALL segment — neither combination has ever been tested.
+Re-test against a new device/app before trusting this in any context where a silent write failure
+would matter. Tracked in the `knx-ets-manager` repo's `CLAUDE.md` ("Track B write-path status"
+section, standing-gaps list) too — update both if this gets confirmed or disproven.
+
+**Update 2026-09-01 — sample considerably broadened, including a same-manufacturer control test,
+still an inference not a confirmed rule.** Real captures now cover nine app/device combinations
+across four manufacturers: `IsSecureEnabled="true"` and extended service — three Jung apps (1.1.9,
+1.1.10, and the production `D142-21-8848-O000A` pushbutton). `IsSecureEnabled` absent and legacy
+service — HDL (two distinct apps, `20A9-10-EAA5` and `20A8-10-3AB7`), a Gira smoke-alarm app
+(`C016-02-1019`), Weinzierl's `KNX IO 534 CV (4D)` (`0508-10-B5DC`), and two further Jung apps: a
+"Presence detector Universal" (`A011-13-400D`) and an older-generation push-button module
+(`1106-11-5D53`, `MaskVersion="MV-0705"`, `LoadProcedureStyle="ProductProcedure"` — a materially
+different load mechanism from the `MergedProcedure`/`RelSegment`-style apps used everywhere else
+in this document). The latter two are notable because they are the same manufacturer as the three
+`IsSecureEnabled=true` apps above, isolating app generation from manufacturer as the candidate
+explanatory variable — nine for nine, no counter-example found so far. Still an inference, not a
+proof: the underlying mechanism connecting `IsSecureEnabled` to write-service selection is not
+independently confirmed from any primary KNX source, and the falsifying test described in the
+paragraph above (a large-segment app with `IsSecureEnabled` absent, or a small-segment app with it
+present) has still never been run.
 
 **Candidate rule #2 / real mechanism (`PID_MCB_TABLE`, property 27) — 🟢 CONFIRMED for apps that
 declare it.** Property 27 is `PID_MCB_TABLE` ("Memory Control Table" — confirmed against
@@ -303,6 +319,20 @@ without a declared `LdCtrlWriteProp`, the real write-service decision mechanism 
 only that reading `PID_MCB_TABLE` isn't it. What would settle the open question: a device/app
 without `LdCtrlWriteProp` for property 27 whose live byte-5 read doesn't match its actual required
 service — not yet seen.
+
+**Update 2026-09-01 — this candidate rule is now DIRECTLY FALSIFIED, not merely "confirmed for
+apps that declare it"; downgrade accordingly.** The counter-example the "open" paragraph above
+flagged as never having been seen has now been found: the Weinzierl `KNX IO 534 CV (4D)` app
+declares `LdCtrlWriteProp` for `PropId="27"` on object 4 (`InlineData="00000014003200000000"`,
+byte 5 = `0x32`), and a real capture confirms this matches the live device exactly (`PropValueResp
+OX=4 P=27 ... $0000001400327908...`) — objects 1/2/3's own `PID_MCB_TABLE` values are likewise
+non-`0xFF` (byte 5 = `0x33` on each) — **yet this device confirmedly uses the LEGACY write
+service** (`A_Memory_Write`, not `A_MemoryExtended_Write`, throughout a real Full Download). The
+rule as stated predicts non-`0xFF` ⇒ extended; this is non-`0xFF` and legacy. Byte 5's real value
+is being read correctly here; it simply does not discriminate legacy from extended for this
+device. **Demoted — byte 5 of `PID_MCB_TABLE` is not a reliable write-service signal.** See the
+updated `IsSecureEnabled` discussion above (candidate rule #1), which has since absorbed the
+leading-signal role this rule briefly held.
 
 ### 4.1a Real per-device memory-chunk size ceiling (`PID_MAX_APDULENGTH`) 🟢
 
@@ -550,6 +580,68 @@ ETS also sends a single-byte `MemWrite X=$17FD $01`, immediately after a `PropVa
 `0x170E+0x58=0x1766`, object 4 starts there) — looks like a separate step this app declares that
 koolenex doesn't yet parse/model. Needs identifying: check what `OX=0 P=14` and the real app's own
 `LoadProcedures` XML declare around this point in the sequence.
+
+### 4.1d `PID_DEVICE_CONTROL` (property 14, object 0) — Verify Mode and write confirmation 🟢/🔴
+
+The `PropValueWrite OX=0 P=14` step flagged as open above is `PID_DEVICE_CONTROL` (confirmed
+against the KNX Master Data, `data/knx_master_*.xml`: `Number="14" Name="PID_DEVICE_CONTROL"
+PDT="PDT-51"`, a 1-byte bitfield on the Device Object). Bit layout, per the KNX Association's
+open-source reference device stack (`knx.readthedocs.io`, `src/knx/device_object.cpp`): bit 0
+`USER_STOPPED`, bit 1 `OWN_ADDR_DUPL`, bit 2 `VERIFY_MODE` (`0x04` — the value observed being
+written), bit 3 `SAFE_STATE`.
+
+**🟢 Confirmed mechanism**: for the legacy `A_Memory_Write` service, the same reference stack's
+`BauSystemB::memoryWriteIndication()` writes memory unconditionally but only sends a
+`Memory_Response` back **if Verify Mode is set**; the extended-service handler,
+`memoryExtWriteIndication()`, responds unconditionally with no such gate. This precisely explains
+a full-session real-hardware symptom: writes that persist correctly but never generate a device
+reply on the legacy service, resolved by writing `PID_DEVICE_CONTROL=$04` (read the current value
+first — commonly `$00`; on at least one real device it carries other bits already set, e.g. `$01`,
+in which case the write ORs in bit 2 rather than replacing the byte) once per session, before the
+memory writes that need a confirmed reply. Confirmed via a controlled real-hardware isolation
+test: an identical write positioned before this property write got no reply; the same write moved
+to after it got a normal reply — same bytes, same device, only position changed.
+
+**🟢 Real per-device evidence, extended-service devices never touch this property at all** — every
+Jung app/device captured (real ETS sessions, not koolenex writes) uses the extended write service
+throughout and never reads or writes `PID_DEVICE_CONTROL`, consistent with the reference stack's
+extended-write handler having no Verify Mode dependency to begin with.
+
+**🔴 What was NOT the trigger, ruled out directly**: an earlier hypothesis held that a literal
+`Verify="true"` attribute on an app's own `LdCtrlWriteRelMem` declaration was the real per-project
+signal driving this. That hypothesis does not survive a broader check across app files: the
+attribute is present, identically, on every `RelSegment`/`MergedProcedure`-style app examined so
+far — including three Jung apps whose real captures never touch `PID_DEVICE_CONTROL` at all. It
+appears to be closer to a fixed default for this load-procedure style than a live, per-device
+signal, and should not be relied on to predict this behavior.
+
+**🟡 What does correlate, across every device/app checked so far, with no exception found**: which
+memory-write service the device uses. Every device confirmed to require the legacy service has
+also been confirmed to require this property write; every device confirmed to use the extended
+service has never been observed to touch it. Since the same `IsSecureEnabled`-based inference
+already used for write-service selection (§4.1, candidate rule #1) is itself only a hypothesis,
+this is presented as an inference built on an inference, not an independently established fact —
+the two open questions ("which write service does this device need" and "does it need Verify
+Mode") currently appear to have the same answer, but neither has a confirmed root cause from a
+primary KNX source.
+
+**A structurally different app family exists, using neither `RelSegment`/`WriteRelMem` nor a
+`Verify` attribute of any kind**: some apps (observed on a Gira smoke-alarm app and on
+older-generation Jung apps sharing the same `MaskVersion="MV-0705"`/`LoadProcedureStyle=
+"ProductProcedure"` shape) use `LdCtrlAbsSegment`/`LdCtrlTaskSegment` instead, with no
+`LdCtrlWriteRelMem` step at all. Real captures confirm these devices also require the legacy
+write service and also receive the `PID_DEVICE_CONTROL=$04` write — consistent with the
+write-service correlation above, but reached by a mechanism this document has no visibility into
+from the project file alone (no `Verify` attribute exists anywhere in these apps to point to).
+
+🔴 **Separately open, not resolved by the above**: a single-byte content anomaly at the offset the
+original `MemWrite X=$17FD` targets (the last byte of the parameter object's relative segment on
+one tested device) has been observed reverting to a default/fill value when that object's
+`LoadData` declaration is sent without an explicit follow-up write to that byte, and requiring a
+targeted one-byte patch to correct. This is a distinct question from the Verify Mode mechanism
+above — it concerns device-side content persistence, not reply behavior — and remains unexplained.
+Nothing in the relevant `Parameter`/`ParameterType`/`RelativeSegment` declarations in the project
+file distinguishes this byte from any neighboring one.
 
 ### 4.2 The 9-byte "LoadData" declaration
 

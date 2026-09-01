@@ -2158,402 +2158,393 @@ async function runVerifyDevice(
     return;
   }
 
-  try {
-    const segments = [];
-    const props = [];
-    let totalBytes = 0;
-    let totalDiffering = 0;
-    // Object 3's own raw byte-level totals, set only when this app declares
-    // a Group Object Table region to verify - see the assignment further
-    // down for why this is tracked as a separate pair rather than folded
-    // into totalBytes/totalDiffering above.
-    let flagsTotalBytes: number | undefined;
-    let flagsDifferingBytes: number | undefined;
+  const segments = [];
+  const props = [];
+  let totalBytes = 0;
+  let totalDiffering = 0;
+  // Object 3's own raw byte-level totals, set only when this app declares
+  // a Group Object Table region to verify - see the assignment further
+  // down for why this is tracked as a separate pair rather than folded
+  // into totalBytes/totalDiffering above.
+  let flagsTotalBytes: number | undefined;
+  let flagsDifferingBytes: number | undefined;
 
-    // Read every region/property for this device inside ONE management session
-    // (one Connect/Disconnect for the whole verify), instead of churning a
-    // fresh connection-oriented session per read. The total byte count is
-    // known upfront (it's the same computed-image size "expected" is built
-    // from), so real progress can be broadcast as chunks come in rather than
-    // only reporting done/not-done - the UI no longer has to guess.
-    const progressTotal = plan.mem.reduce(
-      (sum, r) => sum + r.expected.length,
-      0,
-    );
-    const memActuals = plan.mem.length
-      ? await b.readMemoryMany(
-          deviceAddress,
-          plan.mem.map((r) => ({ address: r.addr, length: r.expected.length })),
-          undefined,
-          (bytesRead) =>
-            b.broadcast('verify:progress', {
-              deviceAddress,
-              bytesRead,
-              totalBytes: progressTotal,
-              pct: progressTotal
-                ? Math.min(100, Math.round((bytesRead / progressTotal) * 100))
-                : 0,
-            }),
-          cachedMaxApduLength,
-        )
-      : [];
-    for (let i = 0; i < plan.mem.length; i++) {
-      const region = plan.mem[i]!;
-      const expected = region.expected;
-      const actual = memActuals[i] ?? Buffer.alloc(0);
-      const diff = diffMemory(expected, actual, region.addr);
-      totalBytes += diff.total;
-      totalDiffering += diff.differing;
-      segments.push({
-        label: region.label,
-        offset: region.addr,
-        size: expected.length,
-        matching: diff.matching,
-        differing: diff.differing,
-        chunks: diff.chunks,
-        expectedHex: expected.toString('hex'),
-        actualHex: actual.toString('hex'),
-      });
-    }
-
-    const propActuals = plan.props.length
-      ? await b.readPropertyMany(
-          deviceAddress,
-          plan.props.map((p) => ({ objIdx: p.obj, propId: p.pid })),
-        )
-      : [];
-    for (let i = 0; i < plan.props.length; i++) {
-      const p = plan.props[i]!;
-      const actual = propActuals[i] ?? Buffer.alloc(0);
-      // Compare over the length ETS supplies as the expected value; the device
-      // may return a longer property array than the compared prefix.
-      const cmpLen = Math.min(p.expected.length, actual.length);
-      const differ =
-        actual.length < p.expected.length ||
-        !actual.subarray(0, cmpLen).equals(p.expected.subarray(0, cmpLen));
-      totalBytes += p.expected.length;
-      totalDiffering += differ ? p.expected.length : 0;
-      props.push({
-        label: p.label,
-        obj: p.obj,
-        pid: p.pid,
-        match: !differ,
-        expectedHex: p.expected.toString('hex'),
-        actualHex: actual.toString('hex'),
-      });
-    }
-
-    // Decode the raw relmem bytes just read/compared into human-readable
-    // parameter values, purely as an additional view on data already
-    // fetched above — no extra bus reads. Reuses the exact same
-    // paramMemLayout/params definitions used to build the download image and
-    // to compute "expected", so decoded expected/actual values are directly
-    // comparable to (and should explain) the byte-level diff in `segments`.
-    // relmem-family only for now (single contiguous buffer to decode
-    // against one paramMemLayout); prop-family devices have no equivalent
-    // memory image to decode.
-    type DecodedComparison = Omit<
-      ReturnType<typeof decodeParamMem>[number],
-      'value'
-    > & {
-      expectedValue: string;
-      actualValue: string | null;
-      match: boolean | null;
-      // Object 3 rows only - structured (not string) flag data for the
-      // compact per-flag chip display, added 2026-08-29 alongside the
-      // chip redesign. `expectedValue`/`actualValue` (the full sentence
-      // from describeGroupObjectEntry()) stay the hover-tooltip content;
-      // undefined for every other row kind (params, GA links).
-      obj3Expected?: GroupObjectEntryFlags;
-      obj3Actual?: GroupObjectEntryFlags | null;
-    };
-    let decoded: DecodedComparison[] | undefined;
-    if (
-      plan.family === 'relmem' &&
-      segments.length === 1 &&
-      paramMemLayout &&
-      Object.keys(paramMemLayout).length
-    ) {
-      const expectedBuf = Buffer.from(segments[0]!.expectedHex, 'hex');
-      const actualBuf = Buffer.from(segments[0]!.actualHex, 'hex');
-      const layout = paramMemLayout as Parameters<typeof decodeParamMem>[1];
-      const defs = paramDefs as Parameters<typeof decodeParamMem>[2];
-      const expectedDecoded = decodeParamMem(expectedBuf, layout, defs);
-      const actualDecoded = decodeParamMem(actualBuf, layout, defs);
-      const actualByKey = new Map(actualDecoded.map((d) => [d.key, d]));
-      decoded = expectedDecoded.map(({ value, ...exp }) => {
-        const act = actualByKey.get(exp.key);
-        return {
-          ...exp,
-          expectedValue: value,
-          actualValue: act?.value ?? null,
-          match: act ? act.value === value : null,
-        };
-      });
-    }
-
-    // Verify the GA table / Association table too, when the model didn't
-    // already declare (and get read/decoded as) an ordinary WriteRelMem
-    // step - see the `undeclaredTableMem` field comment in
-    // knx-download-plan.ts. Surfaced as one comparison row per
-    // communication object (its expected vs. actual linked GA), not raw
-    // bytes - deliberately kept out of `segments`/`totalBytes` so the
-    // existing "raw memory bytes match" scope (named-parameter segment
-    // only) is unaffected; folded into `decoded` instead, so it shows up
-    // in the same named-comparison table the frontend already renders.
-    // Scoped to just gatable@/assoctable@ here - Object 3 (object3@) is
-    // handled separately below, since its real size is already known
-    // (groupObjectTableSize) rather than needing GA/Assoc's own dynamic
-    // "read the real count field first" probe.
-    const gaAssocMem = plan.undeclaredTableMem.filter(
-      (r) => r.label.startsWith('gatable@') || r.label.startsWith('assoctable@'),
-    );
-    if (gaAssocMem.length) {
-      // The device's own real table can be a DIFFERENT size than the
-      // project's currently-computed `expected` buffer (e.g. a GA link was
-      // just removed/added in the project but never re-downloaded, or the
-      // device simply has more/fewer entries than the project currently
-      // declares) - reading `expected.length` bytes would silently truncate
-      // a real table that's larger than expected, decoding it as if entries
-      // past the truncation point don't exist. Read each table's real
-      // 2-byte count field first, then read the real full length it
-      // implies - not the project's assumed length. Capped defensively
-      // (2000 bytes ~ 500 GA entries / 250 association entries) against a
-      // corrupt/garbage count field driving an unbounded read.
-      const countActuals = await b.readMemoryMany(
+  // Read every region/property for this device inside ONE management session
+  // (one Connect/Disconnect for the whole verify), instead of churning a
+  // fresh connection-oriented session per read. The total byte count is
+  // known upfront (it's the same computed-image size "expected" is built
+  // from), so real progress can be broadcast as chunks come in rather than
+  // only reporting done/not-done - the UI no longer has to guess.
+  const progressTotal = plan.mem.reduce(
+    (sum, r) => sum + r.expected.length,
+    0,
+  );
+  const memActuals = plan.mem.length
+    ? await b.readMemoryMany(
         deviceAddress,
-        gaAssocMem.map((r) => ({ address: r.addr, length: 2 })),
+        plan.mem.map((r) => ({ address: r.addr, length: r.expected.length })),
         undefined,
-        undefined,
+        (bytesRead) =>
+          b.broadcast('verify:progress', {
+            deviceAddress,
+            bytesRead,
+            totalBytes: progressTotal,
+            pct: progressTotal
+              ? Math.min(100, Math.round((bytesRead / progressTotal) * 100))
+              : 0,
+          }),
         cachedMaxApduLength,
-      );
-      const realLengths = gaAssocMem.map((r, i) => {
-        const countBuf = countActuals[i];
-        const realCount =
-          countBuf && countBuf.length >= 2 ? countBuf.readUInt16BE(0) : 0;
-        const entryWidth = r.label.startsWith('gatable@') ? 2 : 4;
-        const realLen = 2 + realCount * entryWidth;
-        return Math.min(Math.max(realLen, r.expected.length), 2000);
-      });
-      const gaAssocActuals = await b.readMemoryMany(
-        deviceAddress,
-        gaAssocMem.map((r, i) => ({ address: r.addr, length: realLengths[i]! })),
-        undefined,
-        undefined,
-        cachedMaxApduLength,
-      );
-      const coRows = db.all<ComObject>(
-        'SELECT * FROM com_objects WHERE device_id=? ORDER BY object_number',
-        [dev.id],
-      );
-      const gaRegion = gaAssocMem.find((r) => r.label.startsWith('gatable@'));
-      const assocRegion = gaAssocMem.find((r) => r.label.startsWith('assoctable@'));
-      const gaIdx = gaRegion ? gaAssocMem.indexOf(gaRegion) : -1;
-      const assocIdx = assocRegion ? gaAssocMem.indexOf(assocRegion) : -1;
-
-      const expectedGAs = gaRegion ? decodeGATable(gaRegion.expected) : [];
-      const actualGAs =
-        gaIdx >= 0 ? decodeGATable(gaAssocActuals[gaIdx] ?? Buffer.alloc(0)) : [];
-      const expectedAssoc = assocRegion
-        ? decodeAssocTable(assocRegion.expected, expectedGAs)
-        : [];
-      const actualAssoc =
-        assocIdx >= 0
-          ? decodeAssocTable(gaAssocActuals[assocIdx] ?? Buffer.alloc(0), actualGAs)
-          : [];
-      // A com object can have more than one GA link (see buildAssocTable) -
-      // aggregate every link per com object rather than keeping only the
-      // last one, then join for display/comparison the same way
-      // co.ga_address is already stored (space-separated).
-      const groupByCO = (
-        entries: Array<{ coNumber: number; ga: string | null }>,
-      ): Map<number, string> => {
-        const m = new Map<number, string[]>();
-        for (const e of entries) {
-          if (!m.has(e.coNumber)) m.set(e.coNumber, []);
-          if (e.ga) m.get(e.coNumber)!.push(e.ga);
-        }
-        return new Map([...m].map(([co, gas]) => [co, gas.join(' ')]));
-      };
-      const expectedByCO = groupByCO(expectedAssoc);
-      const actualByCO = groupByCO(actualAssoc);
-
-      // One row per com object that has (or should have) a GA link on
-      // either side - matches the existing "only named parameters" scope
-      // convention (nothing to compare = not shown).
-      const gaRows: DecodedComparison[] = [];
-      for (const co of coRows) {
-        const expectedGA = expectedByCO.get(co.object_number) ?? null;
-        const actualGA = actualByCO.get(co.object_number) ?? null;
-        if (expectedGA == null && actualGA == null) continue;
-        gaRows.push({
-          key: `co-${co.object_number}-ga`,
-          label: co.name || `CO ${co.object_number}`,
-          section: 'Group Addresses',
-          group: co.channel || '',
-          unit: '',
-          offset: 0,
-          bitOffset: 0,
-          bitSize: 0,
-          rawValue: '',
-          expectedValue: expectedGA ?? '(none)',
-          actualValue: actualGA,
-          match: expectedGA === actualGA,
-        });
-      }
-      if (gaRows.length) decoded = [...(decoded ?? []), ...gaRows];
-    }
-
-    // Verify Object 3 (Group Object Table) too, when the model didn't
-    // already declare it - added 2026-08-29 alongside the real-hardware
-    // write confirmation (docs/knx-device-write-protocol.md Part 18).
-    // Unlike GA/Association, Object 3's real size is already known
-    // (`groupObjectTable.length`, computed from `maxComObjectNumber` -
-    // ets-app.ts) rather than needing a dynamic count-probe read first -
-    // it isn't a variable-length, user-editable-link-count table the way
-    // GA/Association are. One comparison row per communication object
-    // (its expected vs. actual raw flag+size-code byte pair), matching the
-    // GA rows' "named comparison, not raw bytes" convention.
-    const object3Region = plan.undeclaredTableMem.find((r) =>
-      r.label.startsWith('object3@'),
-    );
-    if (object3Region) {
-      const [actualObject3] = await b.readMemoryMany(
-        deviceAddress,
-        [
-          {
-            address: object3Region.addr,
-            length: object3Region.expected.length,
-          },
-        ],
-        undefined,
-        undefined,
-        cachedMaxApduLength,
-      );
-      const actual = actualObject3 ?? Buffer.alloc(0);
-      // Object 3's own raw byte-level diff count, mirroring `totalBytes`/
-      // `totalDiffering` for the named-parameter segment - surfaced
-      // separately (`flagsTotalBytes`/`flagsDifferingBytes`) so the log line
-      // can quote a real "N/M bytes match" figure for this region too,
-      // rather than only ever reporting it as a count of differing named
-      // rows. Genuinely a different number from the per-communication-object
-      // row mismatch count below: one flag bit differing inside one row's
-      // byte still counts as the whole byte differing here.
-      flagsTotalBytes = object3Region.expected.length;
-      flagsDifferingBytes = 0;
-      for (let i = 0; i < object3Region.expected.length; i++) {
-        if (object3Region.expected[i] !== actual[i]) flagsDifferingBytes++;
-      }
-      const coRows = db.all<ComObject>(
-        'SELECT * FROM com_objects WHERE device_id=? ORDER BY object_number',
-        [dev.id],
-      );
-      const obj3Rows: DecodedComparison[] = [];
-      // Human-readable, not a raw hex byte pair - every flag bit
-      // computeGroupObjectByte() writes (Update/Transmit/Read-On-Init/
-      // Write/Read/Comm+Linked), Priority, and the real Object Size, not
-      // just the GA link already shown in its own row above. See
-      // describeGroupObjectEntry()'s own doc comment (knx-tables.ts).
-      const fmtEntry = (e: { flagByte: number; sizeCodeByte: number } | null): string =>
-        e ? describeGroupObjectEntry(e) : '(out of range)';
-      for (const co of coRows) {
-        const expectedEntry = decodeGroupObjectEntry(
-          object3Region.expected,
-          co.object_number,
-        );
-        const actualEntry = decodeGroupObjectEntry(actual, co.object_number);
-        // Nothing to show for an object with no real entry on either side
-        // (matches the GA rows' "nothing to compare = not shown" convention).
-        if (!expectedEntry && !actualEntry) continue;
-        const expectedStr = fmtEntry(expectedEntry);
-        const actualStr = fmtEntry(actualEntry);
-        obj3Rows.push({
-          key: `co-${co.object_number}-obj3`,
-          label: co.name || `CO ${co.object_number}`,
-          section: 'Group Object Table',
-          group: co.channel || '',
-          unit: '',
-          offset: co.object_number * 2,
-          bitOffset: 0,
-          bitSize: 0,
-          rawValue: '',
-          expectedValue: expectedStr,
-          actualValue: actualStr,
-          match: expectedStr === actualStr,
-          // Structured flags for the compact per-flag chip display -
-          // expectedEntry is only null when the object falls outside the
-          // buffer, which can't happen here (coRows only ever holds real
-          // com objects, and buildGroupObjectTable() sizes the buffer to
-          // cover every one of them) - the fallback is defensive, not a
-          // real expected case.
-          obj3Expected: expectedEntry
-            ? decodeGroupObjectEntryFlags(expectedEntry)
-            : undefined,
-          obj3Actual: actualEntry ? decodeGroupObjectEntryFlags(actualEntry) : null,
-        });
-      }
-      if (obj3Rows.length) decoded = [...(decoded ?? []), ...obj3Rows];
-    }
-
-    // `totalDiffering`/`totalBytes` are deliberately scoped to raw memory
-    // only (segments) - GA table, Association table, and Object 3 rows are
-    // kept OUT of that scope on purpose (see `undeclaredTableMem`'s own doc
-    // comment in knx-download-plan.ts), so a real mismatch in any of those
-    // would previously leave `totalDiffering === 0` true and this top-level
-    // `match` flag reporting a false "everything matches" - inconsistent
-    // with the real per-row mismatches shown in `decoded` (found live,
-    // 2026-08-29: a real Object 3 mismatch on 1.1.9 showed up correctly as
-    // a row and a summary badge, but the overall match flag - and the
-    // ProgrammingView log line derived from it - still said "matches
-    // computed image"). `match` now requires every decoded row to match
-    // too, not just the raw byte scope.
-    const allDecodedMatch = !decoded || decoded.every((d) => d.match !== false);
-    const match = totalDiffering === 0 && allDecodedMatch;
-    // A clean verify is real, positive confirmation the device's actual
-    // content matches the project - clears any "verify recommended"
-    // indicator left over from a download with unconfirmed writes (see
-    // /bus/program-device's own unconfirmed_writes_count/detail write).
-    if (match) {
-      db.run(
-        'UPDATE devices SET unconfirmed_writes_count=0, unconfirmed_writes_detail=? WHERE id=?',
-        ['[]', dev.id],
-      );
-    }
-    // Persisted verify indicator, added 2026-09-01 - real request: "we
-    // should consider an indicator for both successful verify and
-    // failed". Written unconditionally (both match and mismatch), unlike
-    // the unconfirmed_writes reset above which only applies on a clean
-    // match - a real, live bus verify just happened either way, and the
-    // whole point is to surface a failed one just as visibly as a clean
-    // one. See last_verify_match's own migration comment (db.ts) for why
-    // this only ever happens here (a real live bus read), never from the
-    // cache-only recompute path below.
-    db.run(
-      'UPDATE devices SET last_verify_match=?, last_verify_at=? WHERE id=?',
-      [match ? 1 : 0, new Date().toISOString(), dev.id],
-    );
-    db.scheduleSave();
-    res.json({
-      deviceAddress,
-      family: plan.family,
-      match,
-      totalBytes,
-      totalDiffering,
-      segments,
-      props,
-      ...(decoded ? { decoded } : {}),
-      ...(flagsTotalBytes !== undefined
-        ? { flagsTotalBytes, flagsDifferingBytes }
-        : {}),
+      )
+    : [];
+  for (let i = 0; i < plan.mem.length; i++) {
+    const region = plan.mem[i]!;
+    const expected = region.expected;
+    const actual = memActuals[i] ?? Buffer.alloc(0);
+    const diff = diffMemory(expected, actual, region.addr);
+    totalBytes += diff.total;
+    totalDiffering += diff.differing;
+    segments.push({
+      label: region.label,
+      offset: region.addr,
+      size: expected.length,
+      matching: diff.matching,
+      differing: diff.differing,
+      chunks: diff.chunks,
+      expectedHex: expected.toString('hex'),
+      actualHex: actual.toString('hex'),
     });
-  } catch (e) {
-    // Deliberately re-thrown, not handled here - the route above owns error
-    // handling now (§ comment there), so it can retry a transient timeout
-    // instead of failing immediately. Kept as a try/catch (rather than
-    // reformatting this whole block's indentation) purely to keep this
-    // diff small; functionally equivalent to no try/catch here at all.
-    throw e;
   }
+
+  const propActuals = plan.props.length
+    ? await b.readPropertyMany(
+        deviceAddress,
+        plan.props.map((p) => ({ objIdx: p.obj, propId: p.pid })),
+      )
+    : [];
+  for (let i = 0; i < plan.props.length; i++) {
+    const p = plan.props[i]!;
+    const actual = propActuals[i] ?? Buffer.alloc(0);
+    // Compare over the length ETS supplies as the expected value; the device
+    // may return a longer property array than the compared prefix.
+    const cmpLen = Math.min(p.expected.length, actual.length);
+    const differ =
+      actual.length < p.expected.length ||
+      !actual.subarray(0, cmpLen).equals(p.expected.subarray(0, cmpLen));
+    totalBytes += p.expected.length;
+    totalDiffering += differ ? p.expected.length : 0;
+    props.push({
+      label: p.label,
+      obj: p.obj,
+      pid: p.pid,
+      match: !differ,
+      expectedHex: p.expected.toString('hex'),
+      actualHex: actual.toString('hex'),
+    });
+  }
+
+  // Decode the raw relmem bytes just read/compared into human-readable
+  // parameter values, purely as an additional view on data already
+  // fetched above — no extra bus reads. Reuses the exact same
+  // paramMemLayout/params definitions used to build the download image and
+  // to compute "expected", so decoded expected/actual values are directly
+  // comparable to (and should explain) the byte-level diff in `segments`.
+  // relmem-family only for now (single contiguous buffer to decode
+  // against one paramMemLayout); prop-family devices have no equivalent
+  // memory image to decode.
+  type DecodedComparison = Omit<
+    ReturnType<typeof decodeParamMem>[number],
+    'value'
+  > & {
+    expectedValue: string;
+    actualValue: string | null;
+    match: boolean | null;
+    // Object 3 rows only - structured (not string) flag data for the
+    // compact per-flag chip display, added 2026-08-29 alongside the
+    // chip redesign. `expectedValue`/`actualValue` (the full sentence
+    // from describeGroupObjectEntry()) stay the hover-tooltip content;
+    // undefined for every other row kind (params, GA links).
+    obj3Expected?: GroupObjectEntryFlags;
+    obj3Actual?: GroupObjectEntryFlags | null;
+  };
+  let decoded: DecodedComparison[] | undefined;
+  if (
+    plan.family === 'relmem' &&
+    segments.length === 1 &&
+    paramMemLayout &&
+    Object.keys(paramMemLayout).length
+  ) {
+    const expectedBuf = Buffer.from(segments[0]!.expectedHex, 'hex');
+    const actualBuf = Buffer.from(segments[0]!.actualHex, 'hex');
+    const layout = paramMemLayout as Parameters<typeof decodeParamMem>[1];
+    const defs = paramDefs as Parameters<typeof decodeParamMem>[2];
+    const expectedDecoded = decodeParamMem(expectedBuf, layout, defs);
+    const actualDecoded = decodeParamMem(actualBuf, layout, defs);
+    const actualByKey = new Map(actualDecoded.map((d) => [d.key, d]));
+    decoded = expectedDecoded.map(({ value, ...exp }) => {
+      const act = actualByKey.get(exp.key);
+      return {
+        ...exp,
+        expectedValue: value,
+        actualValue: act?.value ?? null,
+        match: act ? act.value === value : null,
+      };
+    });
+  }
+
+  // Verify the GA table / Association table too, when the model didn't
+  // already declare (and get read/decoded as) an ordinary WriteRelMem
+  // step - see the `undeclaredTableMem` field comment in
+  // knx-download-plan.ts. Surfaced as one comparison row per
+  // communication object (its expected vs. actual linked GA), not raw
+  // bytes - deliberately kept out of `segments`/`totalBytes` so the
+  // existing "raw memory bytes match" scope (named-parameter segment
+  // only) is unaffected; folded into `decoded` instead, so it shows up
+  // in the same named-comparison table the frontend already renders.
+  // Scoped to just gatable@/assoctable@ here - Object 3 (object3@) is
+  // handled separately below, since its real size is already known
+  // (groupObjectTableSize) rather than needing GA/Assoc's own dynamic
+  // "read the real count field first" probe.
+  const gaAssocMem = plan.undeclaredTableMem.filter(
+    (r) => r.label.startsWith('gatable@') || r.label.startsWith('assoctable@'),
+  );
+  if (gaAssocMem.length) {
+    // The device's own real table can be a DIFFERENT size than the
+    // project's currently-computed `expected` buffer (e.g. a GA link was
+    // just removed/added in the project but never re-downloaded, or the
+    // device simply has more/fewer entries than the project currently
+    // declares) - reading `expected.length` bytes would silently truncate
+    // a real table that's larger than expected, decoding it as if entries
+    // past the truncation point don't exist. Read each table's real
+    // 2-byte count field first, then read the real full length it
+    // implies - not the project's assumed length. Capped defensively
+    // (2000 bytes ~ 500 GA entries / 250 association entries) against a
+    // corrupt/garbage count field driving an unbounded read.
+    const countActuals = await b.readMemoryMany(
+      deviceAddress,
+      gaAssocMem.map((r) => ({ address: r.addr, length: 2 })),
+      undefined,
+      undefined,
+      cachedMaxApduLength,
+    );
+    const realLengths = gaAssocMem.map((r, i) => {
+      const countBuf = countActuals[i];
+      const realCount =
+        countBuf && countBuf.length >= 2 ? countBuf.readUInt16BE(0) : 0;
+      const entryWidth = r.label.startsWith('gatable@') ? 2 : 4;
+      const realLen = 2 + realCount * entryWidth;
+      return Math.min(Math.max(realLen, r.expected.length), 2000);
+    });
+    const gaAssocActuals = await b.readMemoryMany(
+      deviceAddress,
+      gaAssocMem.map((r, i) => ({ address: r.addr, length: realLengths[i]! })),
+      undefined,
+      undefined,
+      cachedMaxApduLength,
+    );
+    const coRows = db.all<ComObject>(
+      'SELECT * FROM com_objects WHERE device_id=? ORDER BY object_number',
+      [dev.id],
+    );
+    const gaRegion = gaAssocMem.find((r) => r.label.startsWith('gatable@'));
+    const assocRegion = gaAssocMem.find((r) => r.label.startsWith('assoctable@'));
+    const gaIdx = gaRegion ? gaAssocMem.indexOf(gaRegion) : -1;
+    const assocIdx = assocRegion ? gaAssocMem.indexOf(assocRegion) : -1;
+
+    const expectedGAs = gaRegion ? decodeGATable(gaRegion.expected) : [];
+    const actualGAs =
+      gaIdx >= 0 ? decodeGATable(gaAssocActuals[gaIdx] ?? Buffer.alloc(0)) : [];
+    const expectedAssoc = assocRegion
+      ? decodeAssocTable(assocRegion.expected, expectedGAs)
+      : [];
+    const actualAssoc =
+      assocIdx >= 0
+        ? decodeAssocTable(gaAssocActuals[assocIdx] ?? Buffer.alloc(0), actualGAs)
+        : [];
+    // A com object can have more than one GA link (see buildAssocTable) -
+    // aggregate every link per com object rather than keeping only the
+    // last one, then join for display/comparison the same way
+    // co.ga_address is already stored (space-separated).
+    const groupByCO = (
+      entries: Array<{ coNumber: number; ga: string | null }>,
+    ): Map<number, string> => {
+      const m = new Map<number, string[]>();
+      for (const e of entries) {
+        if (!m.has(e.coNumber)) m.set(e.coNumber, []);
+        if (e.ga) m.get(e.coNumber)!.push(e.ga);
+      }
+      return new Map([...m].map(([co, gas]) => [co, gas.join(' ')]));
+    };
+    const expectedByCO = groupByCO(expectedAssoc);
+    const actualByCO = groupByCO(actualAssoc);
+
+    // One row per com object that has (or should have) a GA link on
+    // either side - matches the existing "only named parameters" scope
+    // convention (nothing to compare = not shown).
+    const gaRows: DecodedComparison[] = [];
+    for (const co of coRows) {
+      const expectedGA = expectedByCO.get(co.object_number) ?? null;
+      const actualGA = actualByCO.get(co.object_number) ?? null;
+      if (expectedGA == null && actualGA == null) continue;
+      gaRows.push({
+        key: `co-${co.object_number}-ga`,
+        label: co.name || `CO ${co.object_number}`,
+        section: 'Group Addresses',
+        group: co.channel || '',
+        unit: '',
+        offset: 0,
+        bitOffset: 0,
+        bitSize: 0,
+        rawValue: '',
+        expectedValue: expectedGA ?? '(none)',
+        actualValue: actualGA,
+        match: expectedGA === actualGA,
+      });
+    }
+    if (gaRows.length) decoded = [...(decoded ?? []), ...gaRows];
+  }
+
+  // Verify Object 3 (Group Object Table) too, when the model didn't
+  // already declare it - added 2026-08-29 alongside the real-hardware
+  // write confirmation (docs/knx-device-write-protocol.md Part 18).
+  // Unlike GA/Association, Object 3's real size is already known
+  // (`groupObjectTable.length`, computed from `maxComObjectNumber` -
+  // ets-app.ts) rather than needing a dynamic count-probe read first -
+  // it isn't a variable-length, user-editable-link-count table the way
+  // GA/Association are. One comparison row per communication object
+  // (its expected vs. actual raw flag+size-code byte pair), matching the
+  // GA rows' "named comparison, not raw bytes" convention.
+  const object3Region = plan.undeclaredTableMem.find((r) =>
+    r.label.startsWith('object3@'),
+  );
+  if (object3Region) {
+    const [actualObject3] = await b.readMemoryMany(
+      deviceAddress,
+      [
+        {
+          address: object3Region.addr,
+          length: object3Region.expected.length,
+        },
+      ],
+      undefined,
+      undefined,
+      cachedMaxApduLength,
+    );
+    const actual = actualObject3 ?? Buffer.alloc(0);
+    // Object 3's own raw byte-level diff count, mirroring `totalBytes`/
+    // `totalDiffering` for the named-parameter segment - surfaced
+    // separately (`flagsTotalBytes`/`flagsDifferingBytes`) so the log line
+    // can quote a real "N/M bytes match" figure for this region too,
+    // rather than only ever reporting it as a count of differing named
+    // rows. Genuinely a different number from the per-communication-object
+    // row mismatch count below: one flag bit differing inside one row's
+    // byte still counts as the whole byte differing here.
+    flagsTotalBytes = object3Region.expected.length;
+    flagsDifferingBytes = 0;
+    for (let i = 0; i < object3Region.expected.length; i++) {
+      if (object3Region.expected[i] !== actual[i]) flagsDifferingBytes++;
+    }
+    const coRows = db.all<ComObject>(
+      'SELECT * FROM com_objects WHERE device_id=? ORDER BY object_number',
+      [dev.id],
+    );
+    const obj3Rows: DecodedComparison[] = [];
+    // Human-readable, not a raw hex byte pair - every flag bit
+    // computeGroupObjectByte() writes (Update/Transmit/Read-On-Init/
+    // Write/Read/Comm+Linked), Priority, and the real Object Size, not
+    // just the GA link already shown in its own row above. See
+    // describeGroupObjectEntry()'s own doc comment (knx-tables.ts).
+    const fmtEntry = (e: { flagByte: number; sizeCodeByte: number } | null): string =>
+      e ? describeGroupObjectEntry(e) : '(out of range)';
+    for (const co of coRows) {
+      const expectedEntry = decodeGroupObjectEntry(
+        object3Region.expected,
+        co.object_number,
+      );
+      const actualEntry = decodeGroupObjectEntry(actual, co.object_number);
+      // Nothing to show for an object with no real entry on either side
+      // (matches the GA rows' "nothing to compare = not shown" convention).
+      if (!expectedEntry && !actualEntry) continue;
+      const expectedStr = fmtEntry(expectedEntry);
+      const actualStr = fmtEntry(actualEntry);
+      obj3Rows.push({
+        key: `co-${co.object_number}-obj3`,
+        label: co.name || `CO ${co.object_number}`,
+        section: 'Group Object Table',
+        group: co.channel || '',
+        unit: '',
+        offset: co.object_number * 2,
+        bitOffset: 0,
+        bitSize: 0,
+        rawValue: '',
+        expectedValue: expectedStr,
+        actualValue: actualStr,
+        match: expectedStr === actualStr,
+        // Structured flags for the compact per-flag chip display -
+        // expectedEntry is only null when the object falls outside the
+        // buffer, which can't happen here (coRows only ever holds real
+        // com objects, and buildGroupObjectTable() sizes the buffer to
+        // cover every one of them) - the fallback is defensive, not a
+        // real expected case.
+        obj3Expected: expectedEntry
+          ? decodeGroupObjectEntryFlags(expectedEntry)
+          : undefined,
+        obj3Actual: actualEntry ? decodeGroupObjectEntryFlags(actualEntry) : null,
+      });
+    }
+    if (obj3Rows.length) decoded = [...(decoded ?? []), ...obj3Rows];
+  }
+
+  // `totalDiffering`/`totalBytes` are deliberately scoped to raw memory
+  // only (segments) - GA table, Association table, and Object 3 rows are
+  // kept OUT of that scope on purpose (see `undeclaredTableMem`'s own doc
+  // comment in knx-download-plan.ts), so a real mismatch in any of those
+  // would previously leave `totalDiffering === 0` true and this top-level
+  // `match` flag reporting a false "everything matches" - inconsistent
+  // with the real per-row mismatches shown in `decoded` (found live,
+  // 2026-08-29: a real Object 3 mismatch on 1.1.9 showed up correctly as
+  // a row and a summary badge, but the overall match flag - and the
+  // ProgrammingView log line derived from it - still said "matches
+  // computed image"). `match` now requires every decoded row to match
+  // too, not just the raw byte scope.
+  const allDecodedMatch = !decoded || decoded.every((d) => d.match !== false);
+  const match = totalDiffering === 0 && allDecodedMatch;
+  // A clean verify is real, positive confirmation the device's actual
+  // content matches the project - clears any "verify recommended"
+  // indicator left over from a download with unconfirmed writes (see
+  // /bus/program-device's own unconfirmed_writes_count/detail write).
+  if (match) {
+    db.run(
+      'UPDATE devices SET unconfirmed_writes_count=0, unconfirmed_writes_detail=? WHERE id=?',
+      ['[]', dev.id],
+    );
+  }
+  // Persisted verify indicator, added 2026-09-01 - real request: "we
+  // should consider an indicator for both successful verify and
+  // failed". Written unconditionally (both match and mismatch), unlike
+  // the unconfirmed_writes reset above which only applies on a clean
+  // match - a real, live bus verify just happened either way, and the
+  // whole point is to surface a failed one just as visibly as a clean
+  // one. See last_verify_match's own migration comment (db.ts) for why
+  // this only ever happens here (a real live bus read), never from the
+  // cache-only recompute path below.
+  db.run(
+    'UPDATE devices SET last_verify_match=?, last_verify_at=? WHERE id=?',
+    [match ? 1 : 0, new Date().toISOString(), dev.id],
+  );
+  db.scheduleSave();
+  res.json({
+    deviceAddress,
+    family: plan.family,
+    match,
+    totalBytes,
+    totalDiffering,
+    segments,
+    props,
+    ...(decoded ? { decoded } : {}),
+    ...(flagsTotalBytes !== undefined
+      ? { flagsTotalBytes, flagsDifferingBytes }
+      : {}),
+  });
 }
 
 // Recomputes a verify comparison's PROJECT/expected side fresh from current
@@ -2742,7 +2733,7 @@ router.post(
     // all, regardless of device family (pure com_objects + fresh gaTable/
     // assocTable lookup, no raw-byte/addressing dependency - see this
     // function's doc comment above).
-    let gaRows: RecomputeDecoded[] = [];
+    const gaRows: RecomputeDecoded[] = [];
     if (gaTable && assocTable) {
       const expectedGAs = decodeGATable(gaTable);
       const expectedAssoc = decodeAssocTable(assocTable, expectedGAs);
@@ -2782,7 +2773,7 @@ router.post(
 
     // Object 3 rows - same reasoning, always recomputed when a Group
     // Object Table exists for this app.
-    let obj3Rows: RecomputeDecoded[] = [];
+    const obj3Rows: RecomputeDecoded[] = [];
     if (groupObjectTable) {
       const fmtEntry = (
         e: { flagByte: number; sizeCodeByte: number } | null,

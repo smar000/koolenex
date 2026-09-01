@@ -437,7 +437,6 @@ export function AddressDeviceModal({
   useEffect(() => {
     if (!lockDevice) return;
     setManualSerial(lockedTarget?.serial_number ?? '');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lockDevice, lockedTarget?.serial_number]);
 
   // No real address to write to at all - only serial CAPTURE is safe here

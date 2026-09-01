@@ -49,7 +49,6 @@ export function BusConnectionPanel({
         if (s.knxip_protocol) setProtocol(s.knxip_protocol);
       })
       .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const doConnect = async () => {

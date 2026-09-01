@@ -232,7 +232,6 @@ export function BusMonitorView() {
     if (paused) return;
     watchStart();
     return () => watchStop();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paused]);
   const [snapshot, setSnapshot] = useState<any[] | null>(null);
   const [showSend, setShowSend] = useState(false);

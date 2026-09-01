@@ -27,13 +27,19 @@ interface ChipProps {
   active?: boolean;
   onClick?: () => void;
   title?: string;
+  // Scoped override for one specific Chip instance (e.g. a stronger
+  // border color) - deliberately not a className passthrough, so callers
+  // can't accidentally fight the shared .chipActive/.chipInactive base
+  // styling, only layer a small addition on top of it.
+  style?: React.CSSProperties;
 }
 
-export const Chip = ({ children, active, onClick, title }: ChipProps) => (
+export const Chip = ({ children, active, onClick, title, style }: ChipProps) => (
   <button
     onClick={onClick}
     title={title}
     className={`${styles.chip} ${active ? styles.chipActive : styles.chipInactive}`}
+    style={style}
   >
     {children}
   </button>

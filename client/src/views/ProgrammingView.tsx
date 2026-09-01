@@ -695,6 +695,17 @@ export function ProgrammingView() {
               active={autoAddressBySerial}
               onClick={toggleAutoAddressBySerial}
               title="When a device doesn't answer at its assigned address (e.g. after a factory reset) but a serial is on record, locate/readdress it by serial automatically instead of asking each time."
+              // A touch more prominent than the default active styling
+              // when on - real request 2026-09-01. Darker green (not
+              // --amber, which this app already uses for "unassigned/
+              // needs attention" - see theme.ts's STATUS_COLOR - a bad
+              // semantic fit for an intentionally-enabled convenience
+              // feature) reads as "on and fine", not "something's wrong".
+              style={
+                autoAddressBySerial
+                  ? { borderColor: 'color-mix(in srgb, var(--green) 65%, black)' }
+                  : undefined
+              }
             >
               Auto-address by serial
             </Chip>,

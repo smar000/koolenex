@@ -111,6 +111,13 @@ export interface DownloadStep {
   // segment's declared fill byte.
   mode?: string;
   fill?: number;
+  // Real `Verify="true"` attribute on this app's own `LdCtrlWriteRelMem`
+  // declaration (only ever seen set on the parameter-object step so far,
+  // never on any other step type, and never `false`/absent-vs-present
+  // tested against a second real app). 🟡 Candidate signal, not confirmed
+  // as a general rule - see downloadDevice()'s own use of this field for
+  // the full caveat.
+  verify?: boolean;
   // AbsoluteSegment (MDT-style) load-procedure fields — see knx-download-plan.ts
   lsmIdx?: number;
   address?: number;
@@ -386,7 +393,7 @@ export class KnxConnection extends EventEmitter {
       s: number = 0,
     ): Promise<void> => {
       const apdu = apduControl(tpciCode, s);
-      const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+      const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
       await this.sendCEMI(cemi);
     };
 
@@ -395,7 +402,7 @@ export class KnxConnection extends EventEmitter {
       extraBuf: Buffer | null = null,
     ): Promise<void> => {
       const apdu = apduConnected(seq, apciName, extraBuf);
-      const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+      const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
       await this.sendCEMI(cemi);
     };
 
@@ -564,7 +571,7 @@ export class KnxConnection extends EventEmitter {
           try {
             const seq = nextSeq();
             const apdu = apduPropertyValueRead(seq, objIdx, propId);
-            const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+            const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
             await this.sendCEMI(cemi);
             await waitResponse('OTHER', 2000);
           } catch (e) {
@@ -1081,7 +1088,7 @@ export class KnxConnection extends EventEmitter {
     const { waitResponse } = fns;
     try {
       const apdu = apduGroup('DeviceDescriptor_Read');
-      const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+      const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
       const respP = waitResponse('DeviceDescriptor_Response', 3000);
       await this.sendCEMI(cemi);
       const resp = await respP;
@@ -1129,7 +1136,7 @@ export class KnxConnection extends EventEmitter {
       const seq = nextSeq();
       const apdu = apduPropertyValueRead(seq, 0, 56);
       const respP = waitResponse('OTHER', 3000);
-      await this.sendCEMI(buildCEMI(this.localAddr, deviceAddr, apdu, false));
+      await this.sendCEMI(buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' }));
       const res = await respP;
       const data = res?.apduData;
       // 4-byte PropertyValue_Response header (objIdx, propId, count,
@@ -1241,7 +1248,7 @@ export class KnxConnection extends EventEmitter {
       if (useExtended) {
         const apdu = apduMemoryExtendedRead(seq, n, wantAddr);
         const respP = waitResponse('MemoryExtended_Read_Response', 3000);
-        await this.sendCEMI(buildCEMI(this.localAddr, deviceAddr, apdu, false));
+        await this.sendCEMI(buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' }));
         const frame = await respP;
         const { returnCode, address: gotAddr, data } =
           parseMemoryExtendedResponse(frame);
@@ -1287,7 +1294,7 @@ export class KnxConnection extends EventEmitter {
       }
       const apdu = apduMemoryRead(seq, n, wantAddr);
       const respP = waitResponse('Memory_Response', 3000);
-      await this.sendCEMI(buildCEMI(this.localAddr, deviceAddr, apdu, false));
+      await this.sendCEMI(buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' }));
       const frame = await respP;
       const { address: gotAddr, data } = parseMemoryResponse(frame);
       if (gotAddr !== wantAddr)
@@ -1339,7 +1346,7 @@ export class KnxConnection extends EventEmitter {
         const retryApdu = apduMemoryRead(retrySeq, retryN, wantAddr);
         const retryRespP = waitResponse('Memory_Response', 3000);
         await this.sendCEMI(
-          buildCEMI(this.localAddr, deviceAddr, retryApdu, false),
+          buildCEMI(this.localAddr, deviceAddr, retryApdu, false, { priority: 'system' }),
         );
         const retryFrame = await retryRespP;
         const { address: retryGotAddr, data: retryData } =
@@ -1397,7 +1404,7 @@ export class KnxConnection extends EventEmitter {
           const apdu = apduPropertyValueRead(seq, objIdx, propId);
           const respP = waitResponse('OTHER', 3000);
           await this.sendCEMI(
-            buildCEMI(this.localAddr, deviceAddr, apdu, false),
+            buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' }),
           );
           const res = await respP;
           const data = res?.apduData;
@@ -1436,7 +1443,7 @@ export class KnxConnection extends EventEmitter {
           const apdu = apduMemoryExtendedRead(seq, n, address + off);
           const respP = waitResponse('MemoryExtended_Read_Response', 3000);
           await this.sendCEMI(
-            buildCEMI(this.localAddr, deviceAddr, apdu, false),
+            buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' }),
           );
           const frame = await respP;
           const { returnCode, data } = parseMemoryExtendedResponse(frame);
@@ -1509,7 +1516,7 @@ export class KnxConnection extends EventEmitter {
               logDebug(`PropWrite ObjIdx=${op.obj} PropId=${op.pid}`);
               const seq = nextSeq();
               const apdu = apduPropertyValueWrite(seq, op.obj, op.pid, op.data);
-              const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+              const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
               await this.sendCEMI(cemi);
               await delay(50);
               break;
@@ -1523,7 +1530,7 @@ export class KnxConnection extends EventEmitter {
                 const addr = op.addr + off;
                 const seq = nextSeq();
                 const apdu = apduMemoryWrite(seq, addr, chunk);
-                const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+                const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
                 await this.sendCEMI(cemi);
                 await delay(30);
               }
@@ -1533,7 +1540,7 @@ export class KnxConnection extends EventEmitter {
               logDebug('Restart');
               const seq = nextSeq();
               const apdu = apduConnected(seq, 'Restart');
-              const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+              const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
               await this.sendCEMI(cemi);
               break;
             }
@@ -1596,7 +1603,7 @@ export class KnxConnection extends EventEmitter {
       ): Promise<void> => {
         const seq = nextSeq();
         const apdu = apduPropertyValueWrite(seq, objIdx, propId, data, 1, startIndex);
-        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
         const respP = waitResponse('OTHER', 3000);
         await this.sendCEMI(cemi);
         try {
@@ -1617,7 +1624,7 @@ export class KnxConnection extends EventEmitter {
       ): Promise<Buffer | null> => {
         const seq = nextSeq();
         const apdu = apduPropertyValueRead(seq, objIdx, propId, count, startIndex);
-        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
         const respP = waitResponse('OTHER', 3000);
         await this.sendCEMI(cemi);
         try {
@@ -1692,7 +1699,7 @@ export class KnxConnection extends EventEmitter {
         );
       } else {
         const apdu = apduGroup('DeviceDescriptor_Read');
-        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
         const respP = waitResponse('DeviceDescriptor_Response', 3000);
         await this.sendCEMI(cemi);
         try {
@@ -1759,7 +1766,7 @@ export class KnxConnection extends EventEmitter {
       {
         const seq = nextSeq();
         const apdu = apduAuthorizeRequest(seq);
-        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
         const respP = waitResponse('OTHER', 3000);
         await this.sendCEMI(cemi);
         try {
@@ -1767,6 +1774,52 @@ export class KnxConnection extends EventEmitter {
           logDebug(`Authorize level=${resp.apduData[0] ?? 'unknown'}`);
         } catch (_e) {
           logDebug('No Authorize_Response received (continuing)');
+        }
+      }
+
+      // PID_DEVICE_CONTROL (property 14 on the Device Object, objIdx 0) -
+      // Verify Mode (bit 2, value 0x04).
+      //
+      // 🟢 What's actually confirmed, real hardware, 2026-09-01: a
+      // controlled isolation test (byte-for-byte replay of a real ETS
+      // session against 1.1.20/HDL, with only this one write kept and
+      // every other candidate variable - order, the separate `$17FD`
+      // single-byte write, object 5's Unload, content bugs already fixed
+      // elsewhere - removed one at a time) showed that a legacy
+      // `A_Memory_Write` only gets a real `A_Memory_Response` back if
+      // Verify Mode is set first on THIS device; the write itself always
+      // persists either way, confirmed vs unconfirmed. That part is solid.
+      //
+      // 🟡 What decides WHEN to send it - genuinely still a guess, kept
+      // deliberately narrow rather than confident. The real project file
+      // for this exact app has exactly one relevant data point: its only
+      // `LdCtrlWriteRelMem` declaration (the parameter object, objIdx 4)
+      // carries `Verify="true"` - the only occurrence of that attribute
+      // anywhere in the app. It's a plausible, direct, project-file-level
+      // signal - much more principled than inferring from the legacy vs
+      // extended memory-write service, which a real cross-device check the
+      // same day showed was NOT a safe generalization (1 legacy device vs
+      // 2 extended devices - far too small a sample either way, see
+      // `knx_open_unconfirmed_writes_issues` memory in the `knx-ets-
+      // manager` repo for the full history). But treat this as a
+      // reasonable-guess trigger, not a confirmed mechanism: nobody has
+      // seen `Verify="false"` or a genuinely absent `Verify` attribute on
+      // a second real app to know what that would mean, and whether
+      // `Verify="true"` is really what CAUSES real ETS to enable Verify
+      // Mode (as opposed to both simply correlating with something else
+      // about this one app) has not been independently confirmed - e.g. by
+      // finding a real app with `Verify="true"` that ETS does NOT set
+      // Verify Mode for, or vice versa. Scanning `steps` (not just the
+      // object 4 job specifically) because Verify Mode is a device-wide
+      // setting, and this session's own test showed objects 1/2/3
+      // (undeclared writes, no `Verify` attribute of their own at all)
+      // benefited from it too, once set.
+      if (steps.some((s) => s.type === 'WriteRelMem' && s.verify === true)) {
+        logDebug('PID_DEVICE_CONTROL: enabling Verify Mode ($04) before memory writes (a declared WriteRelMem step requested Verify="true")');
+        try {
+          await propWrite(0, 14, Buffer.from([0x04]));
+        } catch (_e) {
+          logDebug('PID_DEVICE_CONTROL write failed (continuing)');
         }
       }
 
@@ -2276,7 +2329,7 @@ export class KnxConnection extends EventEmitter {
             const apdu = useExtendedForThisChunk
               ? apduMemoryExtendedWrite(seq, addr, chunk)
               : apduMemoryWrite(seq, addr, chunk);
-            const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+            const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
             // Real bug, found live 2026-08-30: this loop used to fire each
             // chunk with a flat 30ms pace and never confirm the device
             // actually kept up (these writes weren't response-waited at
@@ -2371,7 +2424,7 @@ export class KnxConnection extends EventEmitter {
         logDebug('Restart');
         const seq = nextSeq();
         const apdu = apduConnected(seq, 'Restart');
-        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+        const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
         await this.sendCEMI(cemi);
       }
 
@@ -2408,6 +2461,7 @@ export class KnxConnection extends EventEmitter {
         deviceAddr,
         memWrite(seq0, 0x0060, 0x01),
         false,
+        { priority: 'system' },
       );
       await this.sendCEMI(on);
       await delay(3000);
@@ -2417,6 +2471,7 @@ export class KnxConnection extends EventEmitter {
         deviceAddr,
         memWrite(seq1, 0x0060, 0x00),
         false,
+        { priority: 'system' },
       );
       await this.sendCEMI(off);
     });
@@ -2445,7 +2500,7 @@ export class KnxConnection extends EventEmitter {
           ): Promise<Buffer | null> => {
             const seq = nextSeq();
             const apdu = apduPropertyValueRead(seq, objIdx, propId);
-            const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+            const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
             await this.sendCEMI(cemi);
             const res = await waitResponse('OTHER', 2000);
             return res?.apduData || null;
@@ -2539,7 +2594,7 @@ export class KnxConnection extends EventEmitter {
       };
       this.on('_mgmt', onMgmt);
       const apdu = apduGroup('DeviceDescriptor_Read');
-      const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+      const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false, { priority: 'system' });
       this.sendCEMI(cemi).catch(() => {});
     });
   }

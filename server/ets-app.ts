@@ -1767,6 +1767,11 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
               offset: parseInt(attr(el, 'Offset'), 10) || 0,
               size: parseInt(attr(el, 'Size'), 10) || 0,
               mode: attr(el, 'AppliesTo') || 'full',
+              // Real, only-ever-seen-once-so-far attribute (HDL's app,
+              // objIdx 4): `Verify="true"`. See downloadDevice()'s own use
+              // of this field for what it's currently believed to mean and
+              // how tentative that belief still is.
+              verify: attr(el, 'Verify') === 'true',
             });
             break;
           case 'LdCtrlLoadImageProp':

@@ -229,3 +229,62 @@ describe('ets-app.ts: TypeRawData ParameterType (blob-shaped defaults)', () => {
     assert.equal(entry.bitSize, 8);
   });
 });
+
+describe('ets-app.ts: LdCtrlWriteRelMem Verify attribute', () => {
+  // Real, only-ever-seen-once-so-far data point: HDL's app
+  // (M-0073_A-20A9-10-EAA5) declares exactly one LdCtrlWriteRelMem, for
+  // objIdx 4, with Verify="true" - the only occurrence of that attribute
+  // anywhere in the app. See knx-connection.ts's own use of this field for
+  // the full, deliberately cautious caveat on what it's believed to mean.
+  it('parses Verify="true" into the WriteRelMem step', () => {
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<KNX>
+  <ManufacturerData>
+    <Manufacturer>
+      <ApplicationPrograms>
+        <ApplicationProgram Id="AP-6">
+          <Static>
+            <LoadProcedures>
+              <LoadProcedure MergeId="4">
+                <LdCtrlWriteRelMem ObjIdx="4" Offset="0" Size="152" Verify="true" AppliesTo="full,par" />
+              </LoadProcedure>
+            </LoadProcedures>
+          </Static>
+        </ApplicationProgram>
+      </ApplicationPrograms>
+    </Manufacturer>
+  </ManufacturerData>
+</KNX>`;
+    const idx = buildAppIndex(Buffer.from(xml, 'utf8'));
+    assert(idx, 'buildAppIndex should parse the synthetic app XML');
+    const step = idx!.loadProcedures.find((s) => s.type === 'WriteRelMem');
+    assert(step, 'a WriteRelMem step should be present');
+    assert.equal(step!.verify, true);
+  });
+
+  it('parses a missing Verify attribute as false, not undefined/truthy', () => {
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<KNX>
+  <ManufacturerData>
+    <Manufacturer>
+      <ApplicationPrograms>
+        <ApplicationProgram Id="AP-7">
+          <Static>
+            <LoadProcedures>
+              <LoadProcedure MergeId="4">
+                <LdCtrlWriteRelMem ObjIdx="4" Offset="0" Size="8" AppliesTo="full" />
+              </LoadProcedure>
+            </LoadProcedures>
+          </Static>
+        </ApplicationProgram>
+      </ApplicationPrograms>
+    </Manufacturer>
+  </ManufacturerData>
+</KNX>`;
+    const idx = buildAppIndex(Buffer.from(xml, 'utf8'));
+    assert(idx, 'buildAppIndex should parse the synthetic app XML');
+    const step = idx!.loadProcedures.find((s) => s.type === 'WriteRelMem');
+    assert(step, 'a WriteRelMem step should be present');
+    assert.equal(step!.verify, false);
+  });
+});

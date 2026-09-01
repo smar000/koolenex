@@ -325,6 +325,66 @@ describe('WriteRelMem protocol-level test — 1.1.10 (real captured memory, base
     );
   });
 
+  it('writes PID_DEVICE_CONTROL Verify Mode ($04) before memory writes when a WriteRelMem step declares Verify="true"', async () => {
+    // Real, only-ever-seen-once-so-far project-file data point: HDL's own
+    // app (M-0073_A-20A9-10-EAA5) declares `Verify="true"` on its object-4
+    // WriteRelMem step - the only occurrence of that attribute anywhere in
+    // the app. A real-hardware isolation test (2026-09-01, see
+    // knx-connection.ts's own doc comment on this write) confirmed a
+    // legacy A_Memory_Write only gets a real A_Memory_Response if Verify
+    // Mode is set first - this test locks in that koolenex now sends that
+    // write when a step asks for it, deliberately scoped no further than
+    // that one real signal.
+    const backing = Buffer.alloc(0x10000);
+    const dev = new FakeWritableMemoryDevice('1.1.20', backing, null);
+    const payload = Buffer.alloc(5, 0xaa);
+    const steps: DownloadStep[] = [
+      { type: 'WriteRelMem', objIdx: 4, propId: 0, size: payload.length, offset: 0, verify: true },
+    ];
+    await dev.downloadDevice('1.1.20', steps, null, null, payload, undefined, {
+      resolvedBases: { 4: 0x1000 },
+    });
+    const verifyModeWrites = dev.sent
+      .map((c) => parseCEMI(c))
+      .filter((f): f is NonNullable<typeof f> => {
+        if (!f) return false;
+        const fullApci = f.apdu.length >= 2 ? ((f.apdu[0]! & 0x03) << 8) | f.apdu[1]! : -1;
+        return (
+          fullApci === 0x3d7 /* PropertyValue_Write */ &&
+          f.apduData[0] === 0 /* objIdx 0 */ &&
+          f.apduData[1] === 14 /* PID_DEVICE_CONTROL */
+        );
+      });
+    assert.equal(verifyModeWrites.length, 1, 'expected exactly one PID_DEVICE_CONTROL write');
+    assert.equal(verifyModeWrites[0]!.apduData[4], 0x04, 'Verify Mode bit (bit 2) should be set');
+  });
+
+  it('does NOT write PID_DEVICE_CONTROL when no WriteRelMem step declares Verify="true"', async () => {
+    // The other side of the same gate - deliberately conservative: with no
+    // real signal asking for it, koolenex should not guess.
+    const backing = Buffer.alloc(0x10000);
+    const dev = new FakeWritableMemoryDevice('1.1.20', backing, null);
+    const payload = Buffer.alloc(5, 0xaa);
+    const steps: DownloadStep[] = [
+      { type: 'WriteRelMem', objIdx: 4, propId: 0, size: payload.length, offset: 0 },
+    ];
+    await dev.downloadDevice('1.1.20', steps, null, null, payload, undefined, {
+      resolvedBases: { 4: 0x1000 },
+    });
+    const verifyModeWrites = dev.sent
+      .map((c) => parseCEMI(c))
+      .filter((f): f is NonNullable<typeof f> => {
+        if (!f) return false;
+        const fullApci = f.apdu.length >= 2 ? ((f.apdu[0]! & 0x03) << 8) | f.apdu[1]! : -1;
+        return (
+          fullApci === 0x3d7 /* PropertyValue_Write */ &&
+          f.apduData[0] === 0 /* objIdx 0 */ &&
+          f.apduData[1] === 14 /* PID_DEVICE_CONTROL */
+        );
+      });
+    assert.equal(verifyModeWrites.length, 0);
+  });
+
   it('gates on the device\'s real mask version: System B (0x07B0) always uses A_MemoryExtended_Write, even for a 16-bit-fitting address', async () => {
     // The specific real-hardware finding this test locks in: a real
     // captured ETS Partial Download against 1.1.9 (mask 0x07B0, confirmed

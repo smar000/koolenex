@@ -934,43 +934,6 @@ export function ProgrammingView() {
                               <IconAttention size={12} />
                             </span>
                           )}
-                          {/* Persisted verify indicator, added 2026-09-01 -
-                              real request: "we should consider an indicator
-                              for both successful verify and failed"
-                              (server/db.ts's last_verify_match/
-                              last_verify_at). Distinct from unconfirmed
-                              writes above: that one is about whether the
-                              LAST DOWNLOAD's writes all got a confirmed
-                              reply; this one is about whether a REAL LIVE
-                              VERIFY (device actually re-read and compared)
-                              found the device's content still matches the
-                              project. `!= null` (not `!==`) deliberately
-                              catches both null and undefined, since a
-                              never-verified device may have either
-                              depending on how the row was last fetched.
-                              Cleared back to null on the next download,
-                              on unassign, or on any edit made after a
-                              verify recorded a result (server/routes/
-                              shared.ts's markDeviceModifiedIfProgrammed,
-                              server/routes/devices.ts's PUT/unassign) - a
-                              verify result only means something until the
-                              thing it verified changes. */}
-                          {d.last_verify_match != null && (
-                            <Badge
-                              label={d.last_verify_match ? 'VERIFIED' : 'MISMATCH'}
-                              color={
-                                d.last_verify_match ? 'var(--green)' : 'var(--red)'
-                              }
-                              title={
-                                (d.last_verify_match
-                                  ? 'Last verify matched the project'
-                                  : 'Last verify found differences from the project') +
-                                (d.last_verify_at
-                                  ? ` — ${new Date(d.last_verify_at).toLocaleString()}`
-                                  : '')
-                              }
-                            />
-                          )}
                         </span>
                         {d.last_download && (
                           <span
@@ -994,31 +957,52 @@ export function ProgrammingView() {
                             the slot as much as two text buttons would. */}
                         <div className={styles.viewSlot}>
                           {verifyCache[d.id] && (
-                            <>
-                              <button
-                                type="button"
-                                className={styles.iconChipBtn}
-                                onClick={() => openComparison(d.id)}
-                                disabled={verifying}
-                                title="View the last comparison result — no bus read"
-                              >
-                                👁
-                              </button>
-                              <button
-                                type="button"
-                                className={`${styles.iconChipBtn} ${styles.clearCacheBtn}`}
-                                onClick={() => clearVerifyResult(d.id)}
-                                disabled={verifying}
-                                title="Clear the cached comparison result for this device — does not touch the device itself, only local cache"
-                              >
-                                🗑
-                              </button>
-                            </>
+                            // Real request, 2026-09-01: the clear-cache
+                            // icon here felt out of place - moved into
+                            // the compare slide-over's own header,
+                            // to the left of its close button, where it
+                            // acts on the comparison actually on screen
+                            // rather than a row the operator may not be
+                            // looking at.
+                            <button
+                              type="button"
+                              className={styles.iconChipBtn}
+                              onClick={() => openComparison(d.id)}
+                              disabled={verifying}
+                              title="View the last comparison result — no bus read"
+                            >
+                              👁
+                            </button>
                           )}
                         </div>
                         <div className={styles.verifyBtnWrap}>
                           <Btn
                             className={`${styles.actionBtn}${verifying ? ' ' + styles.actionBtnRunning : ''}`}
+                            // Real request, 2026-09-01, replacing the
+                            // separate VERIFIED/MISMATCH badge that used
+                            // to sit in the status column (see
+                            // last_verify_match's own doc comment,
+                            // shared/types.ts): it visually overflowed
+                            // into the next column under
+                            // table-layout:fixed once a device had both a
+                            // status badge and a verify badge. Folded
+                            // into this button instead, the same way
+                            // "✓ Re-program" already indicates success
+                            // below - color left at the default `accent`
+                            // while a verify is actively running (the
+                            // progress-fill `style` below overrides
+                            // `color` anyway) or never verified, so this
+                            // only visibly changes anything once a real
+                            // result exists.
+                            color={
+                              verifying
+                                ? undefined
+                                : d.last_verify_match === 1
+                                  ? 'var(--green)'
+                                  : d.last_verify_match === 0
+                                    ? 'var(--amber)'
+                                    : undefined
+                            }
                             onClick={() =>
                               verifyDevice(d.id, d.individual_address)
                             }
@@ -1104,7 +1088,13 @@ export function ProgrammingView() {
                                 <Spinner />
                               )
                             ) : verifyCache[d.id] && d.status !== 'unassigned' ? (
-                              'Re-verify'
+                              d.last_verify_match === 1 ? (
+                                '✓ Re-verify'
+                              ) : d.last_verify_match === 0 ? (
+                                '⚠ Re-verify'
+                              ) : (
+                                'Re-verify'
+                              )
                             ) : (
                               'Verify'
                             )}
@@ -1437,13 +1427,33 @@ export function ProgrammingView() {
                   : '-.-.-'}{' '}
                 — {slideOverDevice.name}
               </span>
-              <button
-                className={styles.slideOverClose}
-                onClick={() => setSlideOverDevice(null)}
-                title="Close"
-              >
-                ✕
-              </button>
+              <span className={styles.slideOverHeaderActions}>
+                {/* Moved here from the device table row, 2026-09-01 -
+                    real request: it "feels out of place" sitting next to
+                    View in the row. Acts on the comparison actually on
+                    screen, so this is a more natural home for it than a
+                    row the operator may not currently be looking at.
+                    Closes the panel afterward - once the cache is
+                    cleared, there's nothing left for this view to show. */}
+                <button
+                  type="button"
+                  className={`${styles.iconChipBtn} ${styles.clearCacheBtn}`}
+                  onClick={() => {
+                    clearVerifyResult(slideOverDevice.id);
+                    setSlideOverDevice(null);
+                  }}
+                  title="Clear the cached comparison result for this device — does not touch the device itself, only local cache"
+                >
+                  🗑
+                </button>
+                <button
+                  className={styles.slideOverClose}
+                  onClick={() => setSlideOverDevice(null)}
+                  title="Close"
+                >
+                  ✕
+                </button>
+              </span>
             </div>
             <div className={styles.slideOverBody}>
               <DeviceCompareResults

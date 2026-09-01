@@ -504,21 +504,23 @@
     background-position: 160% 0;
   }
 }
-/* Fixed-width slot for the View/clear-cache icon pair so Verify/Program
-   always line up at the same x across rows, whether or not a row has a
-   cached result (see the comment at its call site). Width covers both
-   icon buttons' natural size plus their gap and a little breathing room. */
+/* Fixed-width slot for the View icon so Verify/Program always line up at
+   the same x across rows, whether or not a row has a cached result (see
+   the comment at its call site). Narrowed 2026-09-01 (52px -> 26px) when
+   the clear-cache icon that used to share this slot moved into the
+   compare slide-over's own header instead. */
 .viewSlot {
-  width: 52px;
+  width: 26px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 4px;
 }
-/* Small square icon buttons (View 👁 / clear-cache 🗑) - replaced the old
-   text "View" pill once a second action needed to sit next to it; a pill
-   sized for "Clear" text would have eaten more row width than these two
-   icons combined. */
+/* Small square icon button (View 👁) - replaced the old text "View" pill
+   once a second action needed to sit next to it; a pill sized for "Clear"
+   text would have eaten more row width than the icons combined. The
+   second icon (clear-cache 🗑) has since moved to the compare slide-over's
+   own header - see .viewSlot's own comment. */
 .iconChipBtn {
   width: 20px;
   height: 20px;
@@ -619,6 +621,16 @@
   font-family: 'Syne', sans-serif;
   font-weight: 700;
   font-size: 14px;
+}
+/* Wraps the clear-cache icon + close button, added 2026-09-01 so
+   .slideOverHeader's own space-between still only has two real children
+   (title, this group) rather than three fighting over the same
+   justify-content behavior. */
+.slideOverHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 .slideOverClose {
   background: var(--surface);

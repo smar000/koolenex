@@ -125,6 +125,13 @@
   align-items: flex-start;
   gap: 3px;
 }
+/* Badge + the "verify recommended" indicator, side by side above the
+   last-download label. */
+.statusBadgeRow {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
 .lastDownloadLabel {
   color: var(--dim);
   font-size: 9px;

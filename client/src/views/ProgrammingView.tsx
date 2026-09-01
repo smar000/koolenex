@@ -11,7 +11,7 @@ import {
   DeviceAddr,
   Badge,
 } from '../primitives.tsx';
-import { DeviceTypeIcon, IconSerial } from '../icons.tsx';
+import { DeviceTypeIcon, IconSerial, IconAttention } from '../icons.tsx';
 import { api } from '../api.ts';
 import {
   useAppData,
@@ -24,6 +24,17 @@ import { DeviceCompareResults, displaySectionName } from './DeviceCompareResults
 import { AddressDeviceModal } from '../AddressDeviceModal.tsx';
 import styles from './ProgrammingView.module.css';
 import primStyles from '../primitives.module.css';
+
+/** unconfirmed_writes_detail is a JSON-encoded string[] (server/db.ts) -
+ * malformed/empty is treated as "nothing to show", not an error. */
+function parseUnconfirmedDetail(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
 
 export function ProgrammingView() {
   const { projectData: data } = useAppData();
@@ -265,34 +276,46 @@ export function ProgrammingView() {
       // "everything's fine" rather than being honest that a real step
       // didn't complete - say so explicitly instead of going quiet about
       // it.
+      // Real gap, found live: downloadDevice() completing without throwing
+      // only means the protocol sequence ran to completion, not that every
+      // write got a confirmed response - a device occasionally not
+      // answering one write is real, observed behavior (see
+      // knx-connection.ts's own DownloadResult doc comment), and was
+      // previously only ever logged server-side, invisible here. Report it
+      // plainly instead of an unconditional "successful" when it happens.
+      const unconfirmed = result.unconfirmedWrites ?? 0;
       addLog(
-        `[${new Date().toLocaleTimeString()}] ✓ Download successful (${mode}) → ${devAddr}` +
+        `[${new Date().toLocaleTimeString()}] ${unconfirmed ? '⚠' : '✓'} Download ${unconfirmed ? `completed with ${unconfirmed} unconfirmed write${unconfirmed === 1 ? '' : 's'} — verify recommended` : 'successful'} (${mode}) → ${devAddr}` +
           (result.serialNumber
             ? `, serial ${result.serialNumber}`
             : ' (could not confirm serial — device unresponsive after restart)') +
           `, ${result.totalBytes} bytes written`,
       );
       onDeviceStatus(deviceId, 'programmed');
-      // The server already persisted the read-back serial (see /bus/
-      // program-device's own doc comment) - sync it into local state too,
-      // the same way onDeviceStatus above syncs `status`, so the Verify
-      // button (gated on serial_number - real user confirmation, same
-      // day: "we should have both address and serial number for a device
-      // before we enable verify") reflects it immediately, not just after
-      // a reload.
-      if (result.serialNumber) {
+      // The server already persisted the read-back serial and the
+      // unconfirmed-writes count/detail (see /bus/program-device's own
+      // doc comment) - sync them into local state too, the same way
+      // onDeviceStatus above syncs `status`, so the Verify button (gated
+      // on serial_number) and the "verify recommended" indicator both
+      // reflect the real state immediately, not just after a reload.
+      {
+        const patch: Record<string, unknown> = {
+          unconfirmed_writes_count: unconfirmed,
+          unconfirmed_writes_detail: JSON.stringify(result.unconfirmedDetails ?? []),
+        };
+        if (result.serialNumber) patch.serial_number = result.serialNumber;
         try {
-          await updateDevice(deviceId, { serial_number: result.serialNumber });
+          await updateDevice(deviceId, patch);
         } catch (e: any) {
           // Real, defensive fix: this previously swallowed any failure
           // silently (fire-and-forget with an empty .catch()) - the
           // server-side write already succeeded at this point, so a
-          // failure here is purely "the local badge didn't refresh",
+          // failure here is purely "the local badges didn't refresh",
           // genuinely worth knowing about (a reload would still show it
           // correctly, since the DB write already happened) rather than
           // vanishing with no trace.
           addLog(
-            `[${new Date().toLocaleTimeString()}] Serial recorded on the device, but the project record didn't refresh locally → ${e.message} (a reload will show it correctly)`,
+            `[${new Date().toLocaleTimeString()}] Download recorded on the device, but the project record didn't refresh locally → ${e.message} (a reload will show it correctly)`,
           );
         }
       }
@@ -354,6 +377,23 @@ export function ProgrammingView() {
       // once." Deliberately does NOT touch 'unassigned' - only match/no
       // match, not "never verified".
       onDeviceStatus(deviceId, r.match ? 'programmed' : 'modified');
+      // A clean verify is real, positive confirmation the device's actual
+      // content matches the project - the server already cleared
+      // unconfirmed_writes_count/detail for this device (see /bus/verify-
+      // device's own doc comment); sync that into local state too, same
+      // reasoning as programDevice()'s own sync above.
+      if (r.match) {
+        try {
+          await updateDevice(deviceId, {
+            unconfirmed_writes_count: 0,
+            unconfirmed_writes_detail: '[]',
+          });
+        } catch (e: any) {
+          addLog(
+            `[${new Date().toLocaleTimeString()}] Verify cleared the unconfirmed-writes flag on the device, but the project record didn't refresh locally → ${e.message} (a reload will show it correctly)`,
+          );
+        }
+      }
       // r.match now accounts for decoded rows (GA table / communication
       // flags, i.e. Object 3) as well as raw parameter-memory bytes (see
       // docs/knx-device-write-protocol.md Part 21, koolenex repo).
@@ -752,14 +792,43 @@ export function ProgrammingView() {
                     </TD>
                     <TD>
                       <div className={styles.statusCol}>
-                        {prog?.state === 'done' ? (
-                          <Badge label="PROGRAMMED" color="var(--green)" />
-                        ) : (
-                          <Badge
-                            label={d.status.toUpperCase()}
-                            color={STATUS_COLOR[d.status] || 'var(--dim)'}
-                          />
-                        )}
+                        <span className={styles.statusBadgeRow}>
+                          {prog?.state === 'done' ? (
+                            <Badge label="PROGRAMMED" color="var(--green)" />
+                          ) : (
+                            <Badge
+                              label={d.status.toUpperCase()}
+                              color={STATUS_COLOR[d.status] || 'var(--dim)'}
+                            />
+                          )}
+                          {/* Persisted across reloads (server/db.ts's
+                              unconfirmed_writes_count) - real gap found
+                              live: downloadDevice() completing without
+                              throwing only means the protocol sequence ran
+                              to completion, not that every write got a
+                              confirmed response. Cleared by a clean Verify
+                              (see /bus/verify-device), not by this badge
+                              alone changing. */}
+                          {!!d.unconfirmed_writes_count && (
+                            <span
+                              className={styles.serialIcon}
+                              style={{ color: 'var(--amber)' }}
+                              title={
+                                `${d.unconfirmed_writes_count} write${d.unconfirmed_writes_count === 1 ? '' : 's'} unconfirmed during the last download — verify recommended` +
+                                (() => {
+                                  const detail = parseUnconfirmedDetail(
+                                    d.unconfirmed_writes_detail,
+                                  );
+                                  return detail.length
+                                    ? `\n\n${detail.join('\n')}`
+                                    : '';
+                                })()
+                              }
+                            >
+                              <IconAttention size={12} />
+                            </span>
+                          )}
+                        </span>
                         {d.last_download && (
                           <span
                             className={styles.lastDownloadLabel}
@@ -810,8 +879,8 @@ export function ProgrammingView() {
                             onClick={() =>
                               verifyDevice(d.id, d.individual_address)
                             }
-                            // Gating on serial_number (not just has_address/
-                            // status) is deliberate, real user confirmation
+                            // Gating on serial_number (not just has_address)
+                            // is deliberate, real user confirmation
                             // 2026-08-31: a physically-confirmed serial is
                             // the genuine "this exact unit was actually
                             // commissioned" signal, not merely "the project
@@ -822,24 +891,38 @@ export function ProgrammingView() {
                             // instead - see /bus/program-device's own
                             // post-write serial read-back, server/routes/
                             // bus.ts.
+                            //
+                            // `status === 'unassigned'` is also disabling,
+                            // real gap found live: unassigning a device (see
+                            // AddressDeviceModal's doUnassign) resets status
+                            // back to 'unassigned' even after a project
+                            // address and serial are both re-entered - that
+                            // status means "not confirmed commissioned in
+                            // this identity", and Verify comparing against a
+                            // device we have no record of ever writing to
+                            // isn't a meaningful action yet, regardless of
+                            // whether address/serial happen to be filled in.
                             disabled={
                               prog?.state === 'running' ||
                               verifying ||
                               !d.has_address ||
-                              !d.serial_number
+                              !d.serial_number ||
+                              d.status === 'unassigned'
                             }
                             title={
                               !d.has_address
                                 ? 'No individual address assigned yet'
                                 : !d.serial_number
                                   ? 'Not yet commissioned — no serial recorded for this device'
-                                  : verifying
-                                  ? (liveVerifyProgress
-                                      ? `${liveVerifyProgress.bytesRead}/${liveVerifyProgress.totalBytes} bytes`
-                                      : 'Reading device…')
-                                  : verifyCache[d.id]
-                                    ? 'Read the device again and compare to the computed image — no writes'
-                                    : 'Read the device and compare to the computed image — no writes'
+                                  : d.status === 'unassigned'
+                                    ? 'Not yet commissioned — program the device first'
+                                    : verifying
+                                      ? (liveVerifyProgress
+                                          ? `${liveVerifyProgress.bytesRead}/${liveVerifyProgress.totalBytes} bytes`
+                                          : 'Reading device…')
+                                      : verifyCache[d.id]
+                                        ? 'Read the device again and compare to the computed image — no writes'
+                                        : 'Read the device and compare to the computed image — no writes'
                             }
                             // Same treatment as the Program button - the
                             // button's own background becomes the progress
@@ -877,7 +960,7 @@ export function ProgrammingView() {
                               ) : (
                                 <Spinner />
                               )
-                            ) : verifyCache[d.id] ? (
+                            ) : verifyCache[d.id] && d.status !== 'unassigned' ? (
                               'Re-verify'
                             ) : (
                               'Verify'

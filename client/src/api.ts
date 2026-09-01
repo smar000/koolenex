@@ -484,6 +484,11 @@ export const api = {
       // part of this download's plan).
       serialNumber?: string;
       totalBytes: number;
+      // Count/detail of writes whose response never arrived during this
+      // download - see knx-connection.ts's DownloadResult doc comment. 0
+      // means every write was confirmed.
+      unconfirmedWrites?: number;
+      unconfirmedDetails?: string[];
     }>(
       'POST',
       '/bus/program-device',

@@ -17,7 +17,7 @@ import {
   IconFloorPlan,
   IconCatalog,
   IconOffline,
-  IconAttentionOffline,
+  IconAttention,
 } from './icons.tsx';
 import { Spinner, Toast, Btn } from './primitives.tsx';
 import primStyles from './primitives.module.css';
@@ -433,7 +433,7 @@ export function AppShell(props: AppShellProps) {
               {state.busStatus.connected ? (
                 <span className={`${appStyles.busDot} pulse ${appStyles.busDotConnected}`} />
               ) : state.busStatus.needsAttention ? (
-                <IconAttentionOffline size={11} />
+                <IconAttention size={11} />
               ) : (
                 <IconOffline size={11} />
               )}

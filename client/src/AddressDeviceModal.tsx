@@ -1,7 +1,12 @@
 import { useState, useRef, useEffect } from 'react';
 import { Btn, Spinner } from './primitives.tsx';
 import { api } from './api.ts';
-import { useProjectActions, useBusActions, useLiveData } from './contexts.ts';
+import {
+  useProjectActions,
+  useBusActions,
+  useLiveData,
+  useVerifyCache,
+} from './contexts.ts';
 import type { Device } from '../../shared/types.ts';
 import styles from './AddressDeviceModal.module.css';
 
@@ -105,6 +110,7 @@ export function AddressDeviceModal({
   const { updateDevice, unassignDevice, addScannedDevice } = useProjectActions();
   const { connect } = useBusActions();
   const { busStatus } = useLiveData();
+  const { clearResult: clearVerifyResult } = useVerifyCache();
   const [tab, setTab] = useState<'detect' | 'serial'>(initialTab ?? 'detect');
   const [showAllDevices, setShowAllDevices] = useState(false);
 
@@ -533,6 +539,14 @@ export function AddressDeviceModal({
     setUnassignBusy(true);
     try {
       await unassignDevice(lockedTarget.id);
+      // A cached verify result describes a PRIOR commissioning of this
+      // device identity - unassigning means we no longer stand behind
+      // that (see ProgrammingView's own status==='unassigned' gate on the
+      // Verify button) - drop it so a later re-address doesn't leave a
+      // stale "Re-verify" label/result sitting around for what's now, as
+      // far as the project is concerned, a device waiting to be
+      // recommissioned.
+      clearVerifyResult(lockedTarget.id);
       addLog(
         `[${new Date().toLocaleTimeString()}] Unassigned project address for ${lockedTarget.name}`,
       );
@@ -1082,7 +1096,7 @@ export function AddressDeviceModal({
                         color="var(--red)"
                         title={
                           lockedTarget?.serial_number
-                            ? 'This device has a physically-confirmed serial at this address - unassigning is not supported here'
+                            ? 'This device has a physically-confirmed serial at this address - clear the serial number above first, then unassign'
                             : 'Revert to no project address'
                         }
                       >

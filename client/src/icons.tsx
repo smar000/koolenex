@@ -606,15 +606,14 @@ export function IconOffline({ size = 14 }: SizeOnlyProps) {
   );
 }
 
-export function IconAttentionOffline({ size = 14 }: SizeOnlyProps) {
-  // A genuine "needs attention" state (a real reconnect attempt failed) -
-  // real request 2026-08-31: IconOffline's own calm, non-alarm reading
-  // (see its doc comment) made a real failed-reconnect state visually
-  // indistinguishable from ordinary "nothing's using the bus right now"
-  // idle - "let's pick a different icon for Idle, as that looks same as
-  // disconnected". A warning triangle - the deliberately alarming glyph
-  // IconOffline's own comment explicitly moved away from for the calm
-  // case - is the right one to reserve for here instead.
+export function IconAttention({ size = 14 }: SizeOnlyProps) {
+  // A genuine "needs attention" state, reserved for cases that deserve the
+  // deliberately alarming warning-triangle reading - IconOffline's own
+  // calm, non-alarm glyph is used for ordinary idle states instead (see
+  // its doc comment). Originally added for a failed reconnect attempt
+  // (AppShell.tsx); reused wherever else the same "this needs a look, not
+  // just informational" meaning applies (e.g. ProgrammingView.tsx's
+  // "verify recommended" indicator).
   return (
     <_SvgIcon size={size}>
       <path

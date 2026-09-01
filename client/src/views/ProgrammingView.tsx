@@ -994,14 +994,35 @@ export function ProgrammingView() {
                             // `color` anyway) or never verified, so this
                             // only visibly changes anything once a real
                             // result exists.
+                            //
+                            // Toned down 2026-09-01 (real feedback: "the
+                            // green text appears brighter than the
+                            // program one") - `var(--green)` is the raw,
+                            // fully-saturated neon token; the Re-program
+                            // button next to this one is actually colored
+                            // off STATUS_COLOR.programmed (a more muted
+                            // green, see its own `color`/`bg` props
+                            // below), not that token. Matched here for
+                            // real visual consistency between the two
+                            // buttons, including the same soft `bg` tint
+                            // (12% mix) Re-program already uses - without
+                            // it, plain text color against the default
+                            // `--selected` background reads noticeably
+                            // more vivid than Re-program's own softer
+                            // look, even at the same hex value.
                             color={
                               verifying
                                 ? undefined
                                 : d.last_verify_match === 1
-                                  ? 'var(--green)'
+                                  ? STATUS_COLOR.programmed
                                   : d.last_verify_match === 0
-                                    ? 'var(--amber)'
+                                    ? STATUS_COLOR.unassigned
                                     : undefined
+                            }
+                            bg={
+                              verifying || d.last_verify_match == null
+                                ? undefined
+                                : `color-mix(in srgb, ${d.last_verify_match === 1 ? STATUS_COLOR.programmed : STATUS_COLOR.unassigned} 12%, transparent)`
                             }
                             onClick={() =>
                               verifyDevice(d.id, d.individual_address)
@@ -1047,9 +1068,28 @@ export function ProgrammingView() {
                                       ? (liveVerifyProgress
                                           ? `${liveVerifyProgress.bytesRead}/${liveVerifyProgress.totalBytes} bytes`
                                           : 'Reading device…')
-                                      : verifyCache[d.id]
-                                        ? 'Read the device again and compare to the computed image — no writes'
-                                        : 'Read the device and compare to the computed image — no writes'
+                                      : // Real request, 2026-09-01: "update
+                                        // the tooltip to reflect the
+                                        // verification status" - prefixes
+                                        // the same persisted result the
+                                        // button's own color/label now
+                                        // show, ahead of the existing
+                                        // generic action description
+                                        // (kept as-is below it, not
+                                        // replaced - still useful context
+                                        // for what clicking the button
+                                        // does). `d.last_verify_match`
+                                        // (persisted, server-side) rather
+                                        // than `verifyCache[d.id]` (local-
+                                        // session-only) deliberately, so
+                                        // this survives a reload the way
+                                        // the button's own color does.
+                                        (d.last_verify_match != null
+                                          ? `${d.last_verify_match ? 'Last verify matched the project' : 'Last verify found differences from the project'}${d.last_verify_at ? ` (${new Date(d.last_verify_at).toLocaleString()})` : ''} — `
+                                          : '') +
+                                        (verifyCache[d.id]
+                                          ? 'Read the device again and compare to the computed image — no writes'
+                                          : 'Read the device and compare to the computed image — no writes')
                             }
                             // Same treatment as the Program button - the
                             // button's own background becomes the progress

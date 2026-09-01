@@ -111,6 +111,27 @@ export default function App() {
   const [programmingLogEntries, setProgrammingLogEntries] = useState<
     string[]
   >([]);
+  // Whether to include server-tagged debug messages in the programming
+  // log (see ProgrammingLog's own doc comment, contexts.ts). Read via a
+  // ref inside the WebSocket handler below (a `[]`-deps effect - see its
+  // own comment) so a later toggle isn't stuck reading a stale closure
+  // value.
+  const [showDebugLog, setShowDebugLog] = useState<boolean>(
+    () => localStorage.getItem('knx-programming-debug-log') === 'true',
+  );
+  const showDebugLogRef = useRef(showDebugLog);
+  useEffect(() => {
+    showDebugLogRef.current = showDebugLog;
+  }, [showDebugLog]);
+  const toggleShowDebugLog = () => {
+    setShowDebugLog((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem('knx-programming-debug-log', String(next));
+      } catch {}
+      return next;
+    });
+  };
   const [mediumTypes, setMediumTypes] = useState<Record<string, any>>({});
   const [maskVersions, setMaskVersions] = useState<Record<string, any>>({});
   const [i18nLang, setI18nLang] = useState<string>(
@@ -268,13 +289,20 @@ export default function App() {
         // Real request, 2026-08-31: "each step should also show in the
         // log, with reasonable details" - every program:progress message
         // previously only ever updated the button's own inline text/
-        // percentage, never the actual log panel.
-        setProgrammingLogEntries((l) =>
-          [
-            `[${new Date().toLocaleTimeString()}] ${deviceAddress}: ${msg.msg as string}`,
-            ...l,
-          ].slice(0, PROGRAMMING_LOG_CAP),
-        );
+        // percentage, never the actual log panel. `msg.debug` (see
+        // DownloadProgress's own doc comment, knx-connection.ts) filters
+        // this at the source, not just at render time, when the debug-log
+        // preference is off - `programProgress` above still gets every
+        // message regardless (the live progress bar/awaitingButton modal
+        // must never depend on this display preference).
+        if (!msg.debug || showDebugLogRef.current) {
+          setProgrammingLogEntries((l) =>
+            [
+              `[${new Date().toLocaleTimeString()}] ${deviceAddress}: ${msg.msg as string}`,
+              ...l,
+            ].slice(0, PROGRAMMING_LOG_CAP),
+          );
+        }
       } else if (msg.type === 'scan:progress') {
         dispatch({
           type: 'SCAN_PROGRESS',
@@ -483,8 +511,10 @@ export default function App() {
           [line, ...l].slice(0, PROGRAMMING_LOG_CAP),
         ),
       clear: () => setProgrammingLogEntries([]),
+      showDebug: showDebugLog,
+      toggleShowDebug: toggleShowDebugLog,
     }),
-    [programmingLogEntries],
+    [programmingLogEntries, showDebugLog],
   );
 
   const shellProps = {

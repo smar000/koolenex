@@ -289,6 +289,20 @@ export interface ProgrammingLog {
   entries: string[];
   add: (line: string) => void;
   clear: () => void;
+  // Real request, 2026-09-01: the write-service-resolution work added a
+  // lot of low-level protocol detail to the log (per-step Unload/
+  // StartLoading/WriteProp/mask-resolution messages etc.) - genuinely
+  // useful for debugging, too much for a normal operator just watching a
+  // download happen. Server-tagged messages (DownloadProgress.debug, see
+  // knx-connection.ts) are filtered out of `entries` at the source
+  // (App.tsx's program:progress handler) when this is false, not just
+  // hidden at render time - toggling it doesn't retroactively reveal
+  // messages from before it was turned on. Persisted (localStorage,
+  // per-browser) like theme/dptMode, not the server-side `settings`
+  // table - this is a personal display preference, not a shared
+  // workflow-behavior default.
+  showDebug: boolean;
+  toggleShowDebug: () => void;
 }
 
 export const ProgrammingLogCtx = createContext<ProgrammingLog | null>(null);

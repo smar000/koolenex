@@ -132,6 +132,17 @@ export interface DownloadProgress {
   // absent) means every write was confirmed; see DownloadResult's own doc
   // comment for the full detail list this summarizes.
   unconfirmedWrites?: number;
+  // Marks a low-level protocol-step message (Unload/StartLoading/
+  // WriteProp/mask-resolution/etc.) as debugging detail rather than
+  // something a normal operator watching a download needs to see - real
+  // request, 2026-09-01, after the write-service-resolution work added a
+  // lot of this kind of detail to the log. Filtered client-side
+  // (App.tsx's program:progress handler, gated on the programming log's
+  // own "show debug" preference) - the live progress bar/percentage
+  // still receives and reacts to every message regardless, only the LOG
+  // PANEL entry is affected. Absent/false for anything a normal operator
+  // should always see (session start, milestones, completion, errors).
+  debug?: boolean;
 }
 
 /** Extra context needed to plan an AbsoluteSegment (MDT-style) download. */
@@ -1453,6 +1464,11 @@ export class KnxConnection extends EventEmitter {
     const log = (msg: string): void => {
       if (onProgress) onProgress({ msg });
     };
+    // Low-level protocol-step detail - see DownloadProgress.debug's own
+    // doc comment for what this is/isn't used for.
+    const logDebug = (msg: string): void => {
+      if (onProgress) onProgress({ msg, debug: true });
+    };
 
     // Every write whose response never arrived, across the whole session -
     // see DownloadResult's own doc comment for why this exists.
@@ -1489,7 +1505,7 @@ export class KnxConnection extends EventEmitter {
               break;
             }
             case 'propWrite': {
-              log(`PropWrite ObjIdx=${op.obj} PropId=${op.pid}`);
+              logDebug(`PropWrite ObjIdx=${op.obj} PropId=${op.pid}`);
               const seq = nextSeq();
               const apdu = apduPropertyValueWrite(seq, op.obj, op.pid, op.data);
               const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
@@ -1498,7 +1514,7 @@ export class KnxConnection extends EventEmitter {
               break;
             }
             case 'memWrite': {
-              log(
+              logDebug(
                 `MemWrite Addr=0x${op.addr.toString(16)} Len=${op.bytes.length}`,
               );
               for (let off = 0; off < op.bytes.length; off += MEM_CHUNK) {
@@ -1517,7 +1533,7 @@ export class KnxConnection extends EventEmitter {
               break;
             }
             case 'restart': {
-              log('Restart');
+              logDebug('Restart');
               const seq = nextSeq();
               const apdu = apduConnected(seq, 'Restart');
               const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
@@ -1590,7 +1606,7 @@ export class KnxConnection extends EventEmitter {
           await respP;
         } catch (_e) {
           const detail = `PropertyValue write ObjIdx=${objIdx} PropId=${propId} unconfirmed`;
-          log(`No PropertyValue_Response for ObjIdx=${objIdx} PropId=${propId} (continuing)`);
+          logDebug(`No PropertyValue_Response for ObjIdx=${objIdx} PropId=${propId} (continuing)`);
           unconfirmed.push(detail);
         }
       };
@@ -1663,7 +1679,7 @@ export class KnxConnection extends EventEmitter {
         if (s.type === 'WriteProp' && s.propId === 27 && s.data && s.data.length >= 6) {
           useExtendedMemory = s.data[5] !== 0xff;
           staticWriteServiceResolved = true;
-          log(
+          logDebug(
             `PID_MCB_TABLE byte5=0x${s.data[5]!.toString(16).padStart(2, '0')} from the app's declared LdCtrlWriteProp InlineData (${useExtendedMemory ? 'extended' : 'legacy'} memory writes)`,
           );
           break;
@@ -1674,7 +1690,7 @@ export class KnxConnection extends EventEmitter {
         // allowed to override it.
       } else if (extra?.isSecureEnabled !== undefined) {
         useExtendedMemory = extra.isSecureEnabled;
-        log(
+        logDebug(
           `IsSecureEnabled=${extra?.isSecureEnabled} (${useExtendedMemory ? 'extended' : 'legacy'} memory writes - 🔴 speculative, unconfirmed rule, see code comment)`,
         );
       } else {
@@ -1689,13 +1705,13 @@ export class KnxConnection extends EventEmitter {
             : null;
           if (mask != null) {
             useExtendedMemory = (mask & 0xff) === 0xb0;
-            log(
+            logDebug(
               `DeviceDescriptor mask=0x${mask.toString(16).padStart(4, '0')} ` +
                 `(${useExtendedMemory ? 'SystemB family - extended memory writes' : 'legacy family - address-size heuristic applies'} - IsSecureEnabled unavailable, falling back to mask)`,
             );
           }
         } catch (_e) {
-          log('No DeviceDescriptor_Response received (falling back to address-size heuristic for memory writes)');
+          logDebug('No DeviceDescriptor_Response received (falling back to address-size heuristic for memory writes)');
         }
       }
 
@@ -1727,7 +1743,7 @@ export class KnxConnection extends EventEmitter {
           MEM_CHUNK,
           maxChunkFromApduLength(maxApduLengthValue, useExtendedMemory ?? false),
         );
-        log(`Real MEM_CHUNK for this device: ${MEM_CHUNK} bytes`);
+        logDebug(`Real MEM_CHUNK for this device: ${MEM_CHUNK} bytes`);
       }
 
       // A_Authorize_Request with the well-known/default key - real ETS
@@ -1751,9 +1767,9 @@ export class KnxConnection extends EventEmitter {
         await this.sendCEMI(cemi);
         try {
           const resp = await respP;
-          log(`Authorize level=${resp.apduData[0] ?? 'unknown'}`);
+          logDebug(`Authorize level=${resp.apduData[0] ?? 'unknown'}`);
         } catch (_e) {
-          log('No Authorize_Response received (continuing)');
+          logDebug('No Authorize_Response received (continuing)');
         }
       }
 
@@ -1854,7 +1870,7 @@ export class KnxConnection extends EventEmitter {
       for (const step of steps) {
         switch (step.type) {
           case 'WriteProp': {
-            log(`WriteProp ObjIdx=${step.objIdx} PropId=${step.propId}`);
+            logDebug(`WriteProp ObjIdx=${step.objIdx} PropId=${step.propId}`);
             if (step.data && step.data.length) {
               // Property 27's declared InlineData is always 2 bytes longer
               // than what real ETS actually puts on the wire - confirmed
@@ -1873,11 +1889,11 @@ export class KnxConnection extends EventEmitter {
             break;
           }
           case 'CompareProp': {
-            log(`CompareProp ObjIdx=${step.objIdx} PropId=${step.propId}`);
+            logDebug(`CompareProp ObjIdx=${step.objIdx} PropId=${step.propId}`);
             break;
           }
           case 'WriteRelMem': {
-            log(`WriteRelMem ObjIdx=${step.objIdx} Size=${step.size}`);
+            logDebug(`WriteRelMem ObjIdx=${step.objIdx} Size=${step.size}`);
             if (!paramMem) throw new Error('Parameter memory not available');
             const objIdx = step.objIdx ?? 4;
             const relSeg = relSegByObj.get(objIdx);
@@ -1921,7 +1937,7 @@ export class KnxConnection extends EventEmitter {
             // `LdCtrlWriteProp` step declared earlier in the same app (see
             // the WriteProp case above); this step is purely a read-back
             // verification.
-            log(
+            logDebug(
               `LoadImageProp ObjIdx=${step.objIdx} PropId=${step.propId} - read-only per real ETS, not writing`,
             );
             {
@@ -1940,7 +1956,7 @@ export class KnxConnection extends EventEmitter {
                 val.length >= 6
               ) {
                 const resolved = val[5] !== 0xff;
-                log(
+                logDebug(
                   `PID_MCB_TABLE byte5=0x${val[5]!.toString(16).padStart(2, '0')} from a live read (no LdCtrlWriteProp declared for this app - ${resolved ? 'extended' : 'legacy'} memory writes - 🔴 speculative, unconfirmed rule, see code comment)`,
                 );
                 useExtendedMemory = resolved;
@@ -1956,7 +1972,7 @@ export class KnxConnection extends EventEmitter {
                     228,
                     maxChunkFromApduLength(maxApduLengthValue, useExtendedMemory),
                   );
-                  log(`Real MEM_CHUNK for this device (revised): ${MEM_CHUNK} bytes`);
+                  logDebug(`Real MEM_CHUNK for this device (revised): ${MEM_CHUNK} bytes`);
                 }
               }
             }
@@ -2137,7 +2153,7 @@ export class KnxConnection extends EventEmitter {
               maxApduLengthValue,
             );
             if (current.equals(j.table)) {
-              log(
+              logDebug(
                 `ObjIdx=${j.objIdx} (${j.label}): partial mode, device already matches - skipping`,
               );
               continue;
@@ -2152,13 +2168,13 @@ export class KnxConnection extends EventEmitter {
 
         const loadCycleJobs = activeJobs.filter((j) => j.loadDataPayload);
         for (const j of loadCycleJobs) {
-          log(`Unload ObjIdx=${j.objIdx} (${j.label})`);
+          logDebug(`Unload ObjIdx=${j.objIdx} (${j.label})`);
           await lsmWrite(j.objIdx, LSM_EVENT.UNLOAD);
         }
         for (const j of loadCycleJobs) {
-          log(`StartLoading ObjIdx=${j.objIdx} (${j.label})`);
+          logDebug(`StartLoading ObjIdx=${j.objIdx} (${j.label})`);
           await lsmWrite(j.objIdx, LSM_EVENT.START_LOADING);
-          log(`LoadData ObjIdx=${j.objIdx} Size=${j.table.length} (${j.label})`);
+          logDebug(`LoadData ObjIdx=${j.objIdx} Size=${j.table.length} (${j.label})`);
           await lsmWrite(j.objIdx, LSM_EVENT.LOAD_DATA, j.loadDataPayload!);
         }
 
@@ -2202,7 +2218,7 @@ export class KnxConnection extends EventEmitter {
             const baseBuf = await propRead(j.objIdx, 7);
             base = baseBuf && baseBuf.length >= 4 ? baseBuf.readUInt32BE(0) : 0;
             if (!base) {
-              log(
+              logDebug(
                 `ObjIdx=${j.objIdx} (${j.label}): PID_TABLE_REFERENCE unallocated - skipping write`,
               );
               continue;
@@ -2287,7 +2303,7 @@ export class KnxConnection extends EventEmitter {
             try {
               await respP;
             } catch (_e) {
-              log(`No write response for ObjIdx=${j.objIdx} offset=${off} (continuing)`);
+              logDebug(`No write response for ObjIdx=${j.objIdx} offset=${off} (continuing)`);
               unconfirmed.push(
                 `Memory write ObjIdx=${j.objIdx} (${j.label}) offset=${off} size=${chunk.length} unconfirmed`,
               );
@@ -2318,17 +2334,17 @@ export class KnxConnection extends EventEmitter {
           if (j.isParamObject && j.loadDataPayload) {
             const version = await propRead(4, 13);
             if (version && version.length) {
-              log(`PID_PROGRAM_VERSION=${version.toString('hex')} (write-back)`);
+              logDebug(`PID_PROGRAM_VERSION=${version.toString('hex')} (write-back)`);
               await propWrite(4, 13, version);
             } else {
-              log('Could not read PID_PROGRAM_VERSION - skipping write-back');
+              logDebug('Could not read PID_PROGRAM_VERSION - skipping write-back');
             }
           }
         }
 
         for (const j of loadCycleJobs) {
           if (!resolvedBase.has(j.objIdx)) continue; // unallocated - skipped above
-          log(`LoadCompleted ObjIdx=${j.objIdx} (${j.label})`);
+          logDebug(`LoadCompleted ObjIdx=${j.objIdx} (${j.label})`);
           await lsmWrite(j.objIdx, LSM_EVENT.LOAD_COMPLETED);
         }
       }
@@ -2346,7 +2362,7 @@ export class KnxConnection extends EventEmitter {
         // itself, real ETS's extra margin here is real, observed behavior,
         // not just a safety guess this fix invented on top of it).
         await delay(1000);
-        log('Restart');
+        logDebug('Restart');
         const seq = nextSeq();
         const apdu = apduConnected(seq, 'Restart');
         const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);

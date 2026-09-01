@@ -379,6 +379,23 @@
      instead, which affects every wrapped line equally. */
   padding-left: 8px;
 }
+/* Bottom-horizontal orientation only - real request 2026-09-01: with the
+   log as a wide strip (not a narrow sidebar column), a stacked time/
+   message pair reads as wasted vertical space rather than the clarity
+   fix it was for the sidebar (see .logEntryTime's own doc comment) -
+   same-line reads better here, time still its own (dim) color. */
+.logEntryHorizontal {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.logEntryHorizontal .logEntryTime {
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+.logEntryHorizontal .logEntryText {
+  padding-left: 0;
+}
 .thDevice {
   min-width: 168px;
 }
@@ -534,6 +551,14 @@
   background: color-mix(in srgb, var(--red) 20%, transparent);
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
   color: var(--red);
+}
+/* Debug-log toggle's "on" state - muted when off (.clearCacheBtn, reused
+   for the same dim-by-default treatment), accent-highlighted when on so
+   it's obvious debug detail is currently included in the log. */
+.debugLogBtnActive {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  color: var(--accent);
 }
 /* ── Slide-over: opens automatically once a Verify read completes.
    position:absolute against .root (not position:fixed against the

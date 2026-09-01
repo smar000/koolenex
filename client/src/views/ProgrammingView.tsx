@@ -110,7 +110,13 @@ export function ProgrammingView() {
   // to. Real request, 2026-08-31: "somewhere to display the press prog
   // button. Maybe a modal pop-up with just a cancel button."
   const programAbortRef = useRef<Record<string, AbortController>>({});
-  const { entries: log, add: addLog, clear: clearLog } = useProgrammingLog();
+  const {
+    entries: log,
+    add: addLog,
+    clear: clearLog,
+    showDebug,
+    toggleShowDebug,
+  } = useProgrammingLog();
   const [verifyingIds, setVerifyingIds] = useState<Set<number>>(new Set());
   const [slideOverDevice, setSlideOverDevice] = useState<any | null>(null);
   const { devices = [] } = data || {};
@@ -1192,6 +1198,27 @@ export function ProgrammingView() {
             >
               LOG
               <div className={styles.logHeaderActions}>
+                {/* Real request, 2026-09-01: the write-service-resolution
+                    work added a lot of low-level protocol detail to the
+                    log (per-step Unload/StartLoading/WriteProp/mask-
+                    resolution messages etc.) - genuinely useful for
+                    debugging, too much clutter for a normal operator just
+                    watching a download happen. Filtered at the source
+                    (App.tsx's program:progress handler), not just
+                    visually hidden - see DownloadProgress.debug's own
+                    doc comment (knx-connection.ts). */}
+                <button
+                  type="button"
+                  className={`${styles.iconChipBtn} ${showDebug ? styles.debugLogBtnActive : styles.clearCacheBtn}`}
+                  onClick={toggleShowDebug}
+                  title={
+                    showDebug
+                      ? 'Showing debug detail (low-level protocol steps) - click to hide'
+                      : 'Debug detail hidden - click to show low-level protocol steps'
+                  }
+                >
+                  🐛
+                </button>
                 <button
                   type="button"
                   className={`${styles.iconChipBtn} ${styles.clearCacheBtn}`}
@@ -1246,7 +1273,10 @@ export function ProgrammingView() {
                   // failed", "Verified", etc.), so a separate color/tick
                   // was redundant, not an extra signal.
                   return (
-                    <div key={i} className={styles.logEntry}>
+                    <div
+                      key={i}
+                      className={`${styles.logEntry}${logOrientation === 'horizontal' ? ' ' + styles.logEntryHorizontal : ''}`}
+                    >
                       {time && (
                         <div className={styles.logEntryTime}>{time}</div>
                       )}

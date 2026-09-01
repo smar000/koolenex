@@ -13,6 +13,12 @@ koolenex.db
 # manufacturer-copyrighted — never commit.
 data/
 
+# Real-hardware packet captures (.pcapng) and their decoded transcripts, taken
+# against real devices at real sites during protocol investigations. Same
+# category as data/ above (real device serials, IPs, site identities) —
+# never commit.
+captures/
+
 # Build output
 client/dist/
 

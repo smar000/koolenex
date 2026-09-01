@@ -229,6 +229,11 @@ export interface DownloadExtra {
   // shift every later entry's position), so resolvePendingWriteRanges()
   // deliberately marks those objects' FULL range dirty whenever any
   // ga_link change is pending, rather than guessing a sub-range.
+  // resolvePendingWriteRanges() also appends objIdx 4's own final byte
+  // whenever it has any other range pending - a real ETS Partial Download
+  // requirement, not something derived from the pending-change log itself;
+  // see that function's own doc comment and docs/knx-device-write-
+  // protocol.md §6.1 for the evidence.
   pendingWriteRanges?: Record<number, Array<{ offset: number; length: number }>>;
 }
 

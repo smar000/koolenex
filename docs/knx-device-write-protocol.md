@@ -82,7 +82,9 @@ bytes that actually differ (§6.1), never the whole object unconditionally. A **
 is a stricter version of the same sequence: only the interface objects whose content genuinely
 changed go through the cycle at all — everything else is skipped outright, with no "mark
 unloaded" step and no write. The two are otherwise frame-for-frame identical, distinguished by
-one single signal in the data (§4.2).
+one single signal in the data (§4.2). A Partial Download's write to the parameter object (§6.1)
+is not limited to the edited byte(s) alone — it also always includes that object's own final
+byte, regardless of what was actually edited.
 
 ## 2. Session bootstrap
 
@@ -719,6 +721,16 @@ format for one of these is a 4-byte length value (big-endian) followed by the ac
 not the raw payload alone. 🔴 whether this framing (a length prefix before the payload)
 generalizes to every blob-typed parameter, or is specific to the one case it was confirmed
 against, is unconfirmed.
+
+**Partial Download always writes the object's own final byte, alongside whatever was actually
+edited.** 🟢 confirmed byte-for-byte against a real ETS Partial Download that changed a single
+parameter value: the wire traffic carried two separate single-byte writes, not one — the edited
+byte itself, and a second write to the object's last byte (`base + size − 1`), whose value did
+not correspond to anything the user changed. This holds even when the edited parameter is nowhere
+near the end of the object. The mechanism behind it (a device-side commit/trailer marker for the
+segment, vs. an ETS-side convention) is not confirmed — only that it happens unconditionally
+alongside any other write to this object. A Partial Download write that omits this byte leaves it
+at its previous value, which reads back as a real mismatch on the next verify.
 
 ### 6.2 Object 1 — group address table
 

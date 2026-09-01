@@ -1267,24 +1267,16 @@ export const _buildDeviceProgramming = buildDeviceProgramming;
 // - 'group_object_flag': resolved via the same `object_number * 2` formula
 //   computeGroupObjectByte()/buildGroupObjectTable() already use.
 //
-// Real ETS quirk, confirmed 2026-09-01 via a byte-for-byte capture analysis
-// (koolenex's own parseCEMI(), not tshark's one-line summaries, which had
-// already been shown to silently drop single-byte MemoryExtended_Write
-// frames entirely - the earlier "ETS wrote nothing" conclusion from reading
-// those summaries was wrong): a real ETS Partial Download that changes one
-// parameter value (`MemoryExtended_Write X=$0C30AC $19`, offset 172) also
-// unconditionally writes the parameter object's own FINAL byte in the same
-// download (`MemoryExtended_Write X=$0C58C0 $01`, offset paramSize-1) -
-// even though nothing about that trailing byte changed. Almost certainly a
-// device-required trailer/commit byte for this segment, not something tied
-// to what was actually edited. Reproduced the real mismatch this project
-// chased for a whole session: koolenex's own partial write only sent the
-// edited byte, never the trailer, leaving the device's trailer byte at
-// whatever it last held. `paramSize` is optional so callers/tests that
-// don't have it (or don't care about objIdx 4 at all) see no behavior
-// change - only applied when objIdx 4 already has at least one real write
-// pending, matching real ETS's own "alongside whatever else it writes"
-// behavior, not as a write on its own.
+// Real ETS behavior, confirmed via a byte-for-byte capture of a real
+// Partial Download that changed one parameter value: ETS wrote two bytes,
+// not one - the edited byte itself, and a second, unconditional write to
+// the parameter object's own final byte (offset paramSize-1), regardless
+// of what was actually edited. See docs/knx-device-write-protocol.md §6.1
+// for the full evidence. `paramSize` is optional so a caller/test that
+// doesn't have it (or doesn't touch objIdx 4 at all) sees no behavior
+// change - the trailer byte is only added when objIdx 4 already has at
+// least one real write pending, matching ETS's own "alongside whatever
+// else it writes" behavior, not a write on its own.
 function resolvePendingWriteRanges(
   deviceId: number,
   paramMemLayout: Record<string, unknown>,

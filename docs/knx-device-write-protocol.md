@@ -525,6 +525,25 @@ Regression-tested against the real captured frame's own bytes
 behavior (`tests/relmem-write-protocol.test.ts`). Not yet re-verified on real hardware — the next
 real Full Download to 1.1.20 is the actual confirmation this fix needs.
 
+**Confirmed hardware-free via a dry run, 2026-09-01**: `downloadDevice()` (real, unmodified code)
+run against real 1.1.20 project data (`buildDeviceProgramming()`, same pipeline the real route
+uses) through a fake in-process bus device seeded with the real base addresses and MCB values
+already captured from ETS — no hardware touched. Three of the four real interface-object writes
+matched real ETS byte-for-byte: GA table (`N=2 X=$1002 0000`), Association table
+(`N=2 X=$125C 0000`), and both chunks of the Group Object Table (`N=52 X=$170E
+002B930093...`/`N=36 X=$1742 0000...`), including Object 3's nontrivial real content. The
+parameter object (obj 4) had no real-ETS reference in this particular capture to diff against, but
+its chunk addressing (`$1766`→`$179A`→`$17CE`, 52/52/48 bytes) is internally consistent with the
+fixed encoding.
+
+🔴 **Open, unrelated to this fix, found by the same dry run — do not let this quietly drop**: real
+ETS also sends a single-byte `MemWrite X=$17FD $01`, immediately after a `PropValueWrite OX=0 P=14`
+(an object-0 load-state property), that koolenex's current step derivation does not produce at all.
+`0x17FD` doesn't fall inside any of the four objects' own relmem tables (object 3 ends at
+`0x170E+0x58=0x1766`, object 4 starts there) — looks like a separate step this app declares that
+koolenex doesn't yet parse/model. Needs identifying: check what `OX=0 P=14` and the real app's own
+`LoadProcedures` XML declare around this point in the sequence.
+
 ### 4.2 The 9-byte "LoadData" declaration
 
 Before writing the real content, the tool declares what's about to come, as 9 extra bytes on the

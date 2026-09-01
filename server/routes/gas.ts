@@ -5,6 +5,7 @@ import * as db from '../db.ts';
 import { buildGAMaps } from '../../shared/ga-maps.ts';
 import { validateBody, paramId } from '../validate.ts';
 import { makeUpdateBuilder, markDeviceModifiedIfProgrammed } from './shared.ts';
+import type { PendingChangeInput } from './shared.ts';
 import { invalidateGaDptCache } from './bus.ts';
 import { buildFlags } from '../ets-parser.ts';
 import type {
@@ -269,9 +270,18 @@ router.patch(
     let deviceStatus: string | null = null;
     let verifyCleared = false;
     if (oldGAs !== newGAs) {
+      const pendingChanges: PendingChangeInput[] = [
+        {
+          kind: 'ga_link',
+          key: String(co.object_number),
+          oldVal: oldGAs,
+          newVal: newGAs,
+        },
+      ];
       ({ status: deviceStatus, verifyCleared } = markDeviceModifiedIfProgrammed(
         pid,
         co.device_id as number,
+        pendingChanges,
       ));
     }
     db.scheduleSave();
@@ -377,9 +387,33 @@ router.patch(
         `CO ${co.object_number}`,
         `${changeParts.join(', ')} on "${(co.name as string) || co.object_number}"`,
       );
+      // Tracked as one composite unit (kind 'group_object_flag'), not one
+      // row per field - Object 3's real per-object byte encodes read/
+      // write/comm/tx/upd/read_on_init/priority together (computeGroupObjectByte(),
+      // knx-tables.ts), so a partial download needs to know the object's
+      // combined before/after state to detect a genuine revert-to-original,
+      // not just whether ONE of the seven fields happened to move.
+      const oldComposite = {
+        read: !!co.read,
+        write: !!co.write,
+        comm: !!co.comm,
+        tx: !!co.tx,
+        upd: !!co.upd,
+        read_on_init: oldReadOnInit,
+        priority: oldPriority,
+      };
+      const pendingChanges: PendingChangeInput[] = [
+        {
+          kind: 'group_object_flag',
+          key: String(co.object_number),
+          oldVal: oldComposite,
+          newVal: next,
+        },
+      ];
       ({ status: deviceStatus, verifyCleared } = markDeviceModifiedIfProgrammed(
         pid,
         co.device_id as number,
+        pendingChanges,
       ));
       db.scheduleSave();
     }

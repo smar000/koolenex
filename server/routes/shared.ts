@@ -193,6 +193,85 @@ export function makeUpdateBuilder<T extends object>(old: T): UpdateBuilder {
   return { track, sets, vals, diffs };
 }
 
+// ── Pending-change tracking (device_pending_changes) ────────────────────────────
+// Real request, 2026-09-01, replacing an earlier same-day design that read the
+// device's current memory content and diffed it against the computed target:
+// "I don't want to store a device memory cache. I want to log changes in our
+// DB (e.g. by edits). That is all I am interested in." - see the table's own
+// doc comment (db.ts) for the full data-model reasoning.
+export interface PendingChangeInput {
+  kind: string;
+  key: string;
+  oldVal: unknown;
+  newVal: unknown;
+}
+
+// Upserts one (device, kind, key) row. `baseline_value` is set ONCE, from
+// `oldVal`, the first time this key is edited since its last successful
+// download - never overwritten by a later edit to the SAME key, so it always
+// reflects "what this key held before any of today's pending edits", not
+// "what it held before the most recent one". Real request, verbatim: "if
+// user re-edits a previous change back to original value, we clear the
+// tracking/undo modified status" - if a later edit's `newVal` matches that
+// preserved baseline, the row is deleted outright rather than left as a
+// stale no-op entry.
+function trackPendingChange(
+  deviceId: number,
+  kind: string,
+  key: string,
+  oldVal: unknown,
+  newVal: unknown,
+): void {
+  const oldJson = JSON.stringify(oldVal ?? null);
+  const newJson = JSON.stringify(newVal ?? null);
+  const existing = db.get<{ id: number; baseline_value: string }>(
+    'SELECT id, baseline_value FROM device_pending_changes WHERE device_id=? AND kind=? AND key=?',
+    [deviceId, kind, key],
+  );
+  if (existing) {
+    if (newJson === existing.baseline_value) {
+      db.run('DELETE FROM device_pending_changes WHERE id=?', [existing.id]);
+    } else {
+      db.run(
+        "UPDATE device_pending_changes SET current_value=?, updated_at=datetime('now','localtime') WHERE id=?",
+        [newJson, existing.id],
+      );
+    }
+    return;
+  }
+  if (newJson === oldJson) return; // not a real change - nothing to track
+  db.run(
+    'INSERT INTO device_pending_changes (device_id, kind, key, baseline_value, current_value) VALUES (?,?,?,?,?)',
+    [deviceId, kind, key, oldJson, newJson],
+  );
+}
+
+export function hasPendingChanges(deviceId: number): boolean {
+  const row = db.get<{ c: number }>(
+    'SELECT COUNT(*) as c FROM device_pending_changes WHERE device_id=?',
+    [deviceId],
+  );
+  return !!row && row.c > 0;
+}
+
+/** All pending rows for a device - used by resolvePendingWriteRanges() (routes/bus.ts) to build a partial download's write set. */
+export function getPendingChanges(
+  deviceId: number,
+): Array<{ kind: string; key: string }> {
+  return db.all<{ kind: string; key: string }>(
+    'SELECT kind, key FROM device_pending_changes WHERE device_id=?',
+    [deviceId],
+  );
+}
+
+// Called once a download (full or partial) actually completes - "log
+// changes... until we have programmed successfully" (real request,
+// verbatim). A download that throws/fails never reaches this, so pending
+// rows correctly survive a failed attempt for the next try.
+export function clearPendingChanges(deviceId: number): void {
+  db.run('DELETE FROM device_pending_changes WHERE device_id=?', [deviceId]);
+}
+
 // Real request, 2026-08-31: editing a com object's flags/priority, GA
 // links, or parameter values previously left the device's own PROGRAMMED/
 // MODIFIED badge untouched - that badge (devices.status) was only ever
@@ -221,6 +300,21 @@ export function makeUpdateBuilder<T extends object>(old: T): UpdateBuilder {
 // genuine change was made - the caller doesn't need to also predict
 // whether a verify result exists first.
 //
+// Extended 2026-09-01: now also the single choke-point for pending-change
+// tracking (device_pending_changes) - every caller below passes its own
+// per-key before/after values here instead of tracking them itself.
+// Real request, verbatim: "please build in logic such that if user re-edits
+// a previous change back to original value, we clear the tracking/undo
+// modified status" - this now handles BOTH directions, not just
+// programmed->modified: if tracking the given changes leaves the device
+// with zero pending rows (every outstanding edit has been reverted back to
+// its own baseline), a 'modified' device reverts to 'programmed' too, with
+// its own audit entry. Deliberately does NOT try to restore a previously-
+// cleared last_verify_match on a revert - confirmed with the user this is
+// the right call (verify describes a real bus round-trip; a net-zero edit
+// history doesn't recreate the evidence a real Verify would have to
+// provide fresh) - `verifyCleared` reports what happened in THIS call only.
+//
 // Returns the resulting status (for the frontend's SET_DEVICE_STATUS) and
 // whether a verify result was actually cleared (for the frontend to also
 // null out its own cached last_verify_match/last_verify_at without a
@@ -228,6 +322,7 @@ export function makeUpdateBuilder<T extends object>(old: T): UpdateBuilder {
 export function markDeviceModifiedIfProgrammed(
   pid: number,
   deviceId: number,
+  pendingChanges: PendingChangeInput[] = [],
 ): { status: string | null; verifyCleared: boolean } {
   const dev = db.get<{
     status: string;
@@ -239,6 +334,11 @@ export function markDeviceModifiedIfProgrammed(
     [deviceId, pid],
   );
   if (!dev) return { status: null, verifyCleared: false };
+
+  for (const c of pendingChanges) {
+    trackPendingChange(deviceId, c.kind, c.key, c.oldVal, c.newVal);
+  }
+
   const verifyCleared = dev.last_verify_match !== null;
   if (verifyCleared) {
     db.run(
@@ -246,18 +346,40 @@ export function markDeviceModifiedIfProgrammed(
       [deviceId],
     );
   }
-  if (dev.status !== 'programmed') {
-    return { status: dev.status, verifyCleared };
+
+  const stillPending = hasPendingChanges(deviceId);
+
+  if (stillPending) {
+    if (dev.status !== 'programmed') {
+      return { status: dev.status, verifyCleared };
+    }
+    db.run('UPDATE devices SET status=? WHERE id=?', ['modified', deviceId]);
+    db.audit(
+      pid,
+      'update',
+      'device',
+      dev.individual_address || String(deviceId),
+      `status: "programmed" → "modified" on "${dev.name || deviceId}" (edited while programmed)`,
+    );
+    return { status: 'modified', verifyCleared };
   }
-  db.run('UPDATE devices SET status=? WHERE id=?', ['modified', deviceId]);
-  db.audit(
-    pid,
-    'update',
-    'device',
-    dev.individual_address || String(deviceId),
-    `status: "programmed" → "modified" on "${dev.name || deviceId}" (edited while programmed)`,
-  );
-  return { status: 'modified', verifyCleared };
+
+  // No pending changes remain - if THIS call's own tracking was what
+  // brought the count to zero (every outstanding edit reverted to its own
+  // baseline), undo the modified status. A device not currently 'modified'
+  // (e.g. 'unassigned') is left alone, same as the forward direction above.
+  if (dev.status === 'modified') {
+    db.run('UPDATE devices SET status=? WHERE id=?', ['programmed', deviceId]);
+    db.audit(
+      pid,
+      'update',
+      'device',
+      dev.individual_address || String(deviceId),
+      `status: "modified" → "programmed" on "${dev.name || deviceId}" (all pending edits reverted to their last-downloaded values)`,
+    );
+    return { status: 'programmed', verifyCleared };
+  }
+  return { status: dev.status, verifyCleared };
 }
 
 export function saveModelsAndMasterXml(

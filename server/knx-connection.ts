@@ -207,6 +207,29 @@ export interface DownloadExtra {
   // `null`/undefined when the device has never been downloaded to from
   // this project yet - falls back to the live read in that case.
   cachedMaxApduLength?: number | null;
+  // Real redesign, 2026-09-01, replacing 'partial' mode's original
+  // peek-the-device-then-diff mechanism entirely - real user correction:
+  // "I don't want to store a device memory cache. I want to log changes in
+  // our DB (e.g. by edits)." The original approach read each relmem
+  // object's FULL current content before writing anything, purely to
+  // discover what had changed - real measurement showed that read costs as
+  // much wall-clock time as writing the whole object would have, leaving
+  // partial mode no faster than a Full Download for the common case
+  // (confirmed live: ~47.8s peek vs ~0.1s of actual surgical write for one
+  // real single-field change). This field replaces that read-and-diff
+  // entirely: the caller (resolvePendingWriteRanges(), server/routes/
+  // bus.ts) already knows exactly what changed - from device_pending_changes,
+  // a real edit log, not a guess derived from device content - and resolves
+  // each changed key to a byte range using the SAME layout logic that
+  // already builds the target image (paramMemLayout for objIdx 4,
+  // computeGroupObjectByte()'s offset formula for objIdx 3). Keyed by
+  // objIdx; an object with no entry here is skipped entirely in partial
+  // mode - no read, no write, nothing. GA/Association tables (objIdx 1/2)
+  // don't have a stable per-key offset formula (a single link change can
+  // shift every later entry's position), so resolvePendingWriteRanges()
+  // deliberately marks those objects' FULL range dirty whenever any
+  // ga_link change is pending, rather than guessing a sub-range.
+  pendingWriteRanges?: Record<number, Array<{ offset: number; length: number }>>;
 }
 
 // ── Download result type ───────────────────────────────────────────────────────
@@ -1919,14 +1942,12 @@ export class KnxConnection extends EventEmitter {
         // confirmed PID_PROGRAM_VERSION write-back after its memory write
         // finishes, before LoadCompleted - see the WriteRelMem case below.
         isParamObject: boolean;
-        // Set only by partial mode's own peek-and-diff step below (never
-        // by full mode, and never for a job with no successfully-resolved
-        // peek base) - when present, the write loop further down writes
-        // ONLY these byte ranges of `table`, not the whole thing. See
-        // computeDirtyRanges()'s own doc comment for why this exists: the
-        // object-level peek alone only ever decided whole-object skip-or-
-        // write, real request 2026-09-01 after a live single-parameter
-        // change rewrote an entire ~10KB object.
+        // Set only by partial mode (never by full mode, and never for a
+        // job with nothing pending) from DownloadExtra.pendingWriteRanges -
+        // when present, the write loop further down writes ONLY these byte
+        // ranges of `table`, not the whole thing. See that field's own doc
+        // comment for the full reasoning (a real edit log resolved to
+        // ranges, not a device content diff).
         writeRanges?: Array<{ offset: number; length: number }>;
       }
       const relmemJobs: RelmemJob[] = [];
@@ -2161,112 +2182,48 @@ export class KnxConnection extends EventEmitter {
       let activeJobs: RelmemJob[] = relmemJobs;
       if (mode === 'partial') {
         activeJobs = [];
-        // Progress reporting during peek reads, added 2026-09-01 - real
-        // live feedback: "stuck at 0% for very long time (~50 seconds)"
-        // right after the last declared step logs. Root cause: this
-        // whole peek phase (real capture: 98 chunks over ~47s for one
-        // real partial download) previously had no onProgress calls
-        // anywhere in it - readRegionInSession() already supports a
-        // progress callback (used elsewhere, e.g. readMemoryMany()), it
-        // just wasn't wired in here. Landed in a dedicated 0-15% slice,
-        // ahead of the write phase's own 0-80% slice below, so the two
-        // don't collide on the same numbers - a display choice, not
-        // functionally tied to anything else.
-        const totalPeekBytes = relmemJobs.reduce(
-          (sum, j) => sum + j.table.length,
-          0,
-        );
-        let peekBytesReadSoFar = 0;
+        // Real redesign, 2026-09-01 - see DownloadExtra.pendingWriteRanges'
+        // own doc comment for the full reasoning this replaces (peeking
+        // each object's full current content, then diffing). No device
+        // read happens anywhere in this block any more: `extra
+        // .pendingWriteRanges` already tells us exactly which byte ranges
+        // need writing, resolved upstream from the real change log
+        // (device_pending_changes), not from device content. An object
+        // with nothing pending is skipped outright - no PID 7 resolution,
+        // no read, no write, nothing sent to the device at all for it.
         for (const j of relmemJobs) {
-          let resolvedPeekBase: number;
-          if (j.presetBase != null) {
-            resolvedPeekBase = j.presetBase;
-          } else {
-            const buf = await propRead(j.objIdx, 7);
-            resolvedPeekBase = buf && buf.length >= 4 ? buf.readUInt32BE(0) : 0;
-          }
-          if (resolvedPeekBase) {
-            // Reuses the SAME mask-resolved useExtendedMemory this
-            // download session already determined for its own WriteRelMem
-            // chunks above (see that resolution's own doc comment) -
-            // rather than a redundant extra DeviceDescriptor_Read - so
-            // this partial-mode peek read picks the same real memory
-            // service the write itself will use, per the identical fix
-            // applied to the general read path
-            // (_resolveMemoryServiceForSession()'s own doc comment: a
-            // mask 0x07B0 device can return a genuine zero-byte response
-            // to a legacy-service read at an address that fits in 16
-            // bits).
-            const current = await this.readRegionInSession(
-              fns,
-              deviceAddr,
-              resolvedPeekBase + j.offset,
-              j.table.length,
-              MEM_CHUNK,
-              useExtendedMemory,
-              maxApduLengthValue,
-              (bytesJustRead) => {
-                if (onProgress && totalPeekBytes > 0) {
-                  peekBytesReadSoFar += bytesJustRead;
-                  // Real feedback, 2026-09-01: "% doesn't seem to reflect
-                  // what is actually shown as bytes written, e.g. 8% when
-                  // at 8000/11000" - fixed same day by stating this phase's
-                  // own phase-relative percentage explicitly in the message
-                  // text, separate from the bar's own (differently-scaled)
-                  // `pct`.
-                  //
-                  // Second, distinct bug, same day, found from a live
-                  // screenshot: the bar's own `pct` was capped to a 0-15%
-                  // slice here, on the theory that this phase is a short
-                  // prelude to the write phase's own larger 0-80% slice
-                  // below. Real measured evidence says the opposite - peek
-                  // (reading each object's FULL current content to diff
-                  // against target) is the dominant cost, not a prelude:
-                  // one real single-field partial download measured ~47.8s
-                  // of peek against ~0.1s of actual (surgical) write. Capping
-                  // peek to 0-15% meant the visible button sat at "5%" for
-                  // essentially the whole real download, then rocketed to
-                  // 100% almost instantly once the tiny write ran - exactly
-                  // the "% incorrect" behavior reported. Now 0-90% for peek,
-                  // matching its real share of wall-clock time far better;
-                  // the write loop below uses the remaining 90-100% in
-                  // partial mode (see its own comment).
-                  const phasePct = Math.round(
-                    (peekBytesReadSoFar / totalPeekBytes) * 100,
-                  );
-                  onProgress({
-                    msg: `Checking ObjIdx=${j.objIdx} (${j.label}) for changes - ${phasePct}% through this check (${Math.min(peekBytesReadSoFar, totalPeekBytes)}/${totalPeekBytes} bytes read)`,
-                    pct: Math.min(90, (peekBytesReadSoFar / totalPeekBytes) * 90),
-                  });
-                }
-              },
-            );
-            if (current.equals(j.table)) {
-              logDebug(
-                `ObjIdx=${j.objIdx} (${j.label}): partial mode, device already matches - skipping`,
-              );
-              continue;
-            }
-            // Surgical partial write, added 2026-09-01 - real request,
-            // verbatim: "otherwise no real point of partial download".
-            // Real capture evidence this replaces: a live partial
-            // download after ONE changed parameter still wrote the
-            // ENTIRE ~10KB parameter object, base to end (98 peek reads
-            // then ~46 unconditional write chunks) - the object-level
-            // peek above only ever decided whole-object skip-or-write.
-            // computeDirtyRanges() finds the actual differing byte
-            // range(s) between what's on the device now and what this
-            // download wants there; the write loop below writes only
-            // those, when present.
-            j.writeRanges = computeDirtyRanges(current, j.table);
-            const dirtyBytes = j.writeRanges.reduce(
-              (s, r) => s + r.length,
-              0,
-            );
+          const ranges = extra?.pendingWriteRanges?.[j.objIdx];
+          if (!ranges || !ranges.length) {
             logDebug(
-              `ObjIdx=${j.objIdx} (${j.label}): partial mode, ${dirtyBytes}/${j.table.length} bytes differ across ${j.writeRanges.length} region(s) - writing only those`,
+              `ObjIdx=${j.objIdx} (${j.label}): partial mode, no pending changes tracked for this object - skipping`,
             );
+            continue;
           }
+          let resolvedBase: number;
+          if (j.presetBase != null) {
+            resolvedBase = j.presetBase;
+          } else {
+            // Still a real bus round-trip (PID_TABLE_REFERENCE, property 7)
+            // - we need to know WHERE on the device to write, which is a
+            // tiny, cheap property read, not a bulk content read.
+            const buf = await propRead(j.objIdx, 7);
+            resolvedBase = buf && buf.length >= 4 ? buf.readUInt32BE(0) : 0;
+          }
+          if (!resolvedBase) continue; // unallocated - nothing to write against
+          j.writeRanges = ranges
+            .map((r) => ({
+              offset: r.offset,
+              // Defensive clamp - a range resolved against a stale/mismatched
+              // table length (e.g. the app model changed since the pending
+              // row was logged) should never overrun the real buffer.
+              length: Math.max(0, Math.min(r.length, j.table.length - r.offset)),
+            }))
+            .filter((r) => r.length > 0);
+          if (!j.writeRanges.length) continue;
+          const dirtyBytes = j.writeRanges.reduce((s, r) => s + r.length, 0);
+          logDebug(
+            `ObjIdx=${j.objIdx} (${j.label}): partial mode, writing ${dirtyBytes} tracked-change byte(s) across ${j.writeRanges.length} region(s)`,
+          );
           activeJobs.push(j);
         }
       }
@@ -2316,16 +2273,12 @@ export class KnxConnection extends EventEmitter {
           0,
         );
         let bytesWrittenSoFar = 0;
-        // Real fix, 2026-09-01 (see the peek loop's own comment above for
-        // the full story): partial mode's peek phase now occupies 0-90% of
-        // the bar, since it's the real dominant cost, not a short prelude -
-        // so this phase's own slice shrinks to the remaining 90-100% there.
-        // Full mode has no peek phase eating time ahead of this, so it
-        // keeps its original, unchanged 0-80% (the last 80-100% covers the
-        // real, expected long stretch at "80%" before LoadCompleted/Restart
-        // - see that behavior's own doc comment further below).
-        const writePctBase = mode === 'partial' ? 90 : 0;
-        const writePctSpan = mode === 'partial' ? 10 : 80;
+        // 0-80% unconditionally - the last 80-100% covers the real, expected
+        // long stretch at "80%" before LoadCompleted/Restart (see that
+        // behavior's own doc comment further below). Partial mode no longer
+        // has a peek phase ahead of this eating part of the range (see
+        // DownloadExtra.pendingWriteRanges' doc comment), so both modes
+        // share the same scale here.
         const resolvedBase = new Map<number, number>();
         for (const j of activeJobs) {
           let base: number;
@@ -2360,17 +2313,13 @@ export class KnxConnection extends EventEmitter {
             base = 0;
           }
           resolvedBase.set(j.objIdx, base);
-          // Surgical partial write, added 2026-09-01 (see
-          // computeDirtyRanges' own doc comment for the real motivation)
-          // - a job whose peek found the device already differs writes
-          // only its own `writeRanges` (real, actually-differing byte
-          // spans), not the whole table from offset 0. Full mode, or any
-          // job the peek never ran against (no RelSegment declaration,
-          // or a caller-supplied presetBase - see partial mode's own
-          // peek block above), has no `writeRanges` and keeps writing
-          // the whole table exactly as before - this is additive, not a
-          // behavior change for anything outside partial mode's own
-          // diffed jobs.
+          // Surgical partial write - a job with a pending-change-resolved
+          // `writeRanges` (see DownloadExtra.pendingWriteRanges' own doc
+          // comment) writes only those tracked-change byte spans, not the
+          // whole table from offset 0. Full mode, or any job with nothing
+          // pending, has no `writeRanges` and keeps writing the whole
+          // table exactly as before - this is additive, not a behavior
+          // change for anything outside partial mode's own resolved jobs.
           const writeWindows = j.writeRanges ?? [
             { offset: 0, length: j.table.length },
           ];
@@ -2425,11 +2374,11 @@ export class KnxConnection extends EventEmitter {
               ? MEM_CHUNK
               : Math.min(MEM_CHUNK, 63);
             // Bounded by the current window's own end, not just
-            // `stepSize` - a dirty range from computeDirtyRanges() can
-            // (and usually does) end well before a natural stepSize
-            // boundary; Buffer.subarray's own clipping only protects the
-            // end of the whole table, which isn't tight enough once
-            // writeWindows is a sub-range of it.
+            // `stepSize` - a pending-change-resolved range can (and
+            // usually does) end well before a natural stepSize boundary;
+            // Buffer.subarray's own clipping only protects the end of the
+            // whole table, which isn't tight enough once writeWindows is a
+            // sub-range of it.
             const chunkEnd = Math.min(off + stepSize, win.offset + win.length);
             const chunk = j.table.subarray(off, chunkEnd);
             const apdu = useExtendedForThisChunk
@@ -2484,10 +2433,7 @@ export class KnxConnection extends EventEmitter {
             if (onProgress && totalActiveBytes > 0)
               onProgress({
                 msg: `WriteRelMem ObjIdx=${j.objIdx} (${j.label}) ${jobBytesWritten}/${jobBytesToWrite}`,
-                pct:
-                  writePctBase +
-                  ((bytesWrittenSoFar + jobBytesWritten) / totalActiveBytes) *
-                    writePctSpan,
+                pct: ((bytesWrittenSoFar + jobBytesWritten) / totalActiveBytes) * 80,
               });
             off = chunkEnd;
             }
@@ -2814,60 +2760,9 @@ export function maxChunkFromApduLength(
   return Math.max(1, maxApduLengthValue + 1 - headerBytes);
 }
 
-// Two adjacent differing bytes closer together than this get folded into
-// one write region rather than issued as two separate writes - a judgment
-// call, not derived from a specific real-hardware measurement: small
-// enough that a genuinely isolated single-parameter change (surrounded by
-// hundreds of unrelated, unchanged bytes) still produces a small, tight
-// write, large enough that a handful of nearby parameter fields changing
-// together don't fragment into many separate round trips (each with its
-// own real request/response cost) for the sake of skipping a few
-// already-matching bytes in between. Loosely consistent with the "17
-// bytes only, rest skipped" real ETS Partial Download optimization this
-// project's docs already describe, without claiming to reproduce ETS's
-// own exact algorithm.
-export const DIRTY_RANGE_MERGE_GAP = 32;
-
-/**
- * Finds the byte range(s) where `current` (a real region just read off a
- * device) differs from `target` (the freshly-computed image partial mode
- * wants there), merging differences within `mergeGap` bytes of each other
- * into a single contiguous range. Real request, 2026-09-01, after a real
- * live partial download rewrote an entire ~10KB parameter object for a
- * single changed value: "otherwise no real point of partial download" -
- * the object-level peek-and-skip this was already doing (see
- * `downloadDevice()`'s own `mode === 'partial'` block) only ever decided
- * "skip this whole object" or "write this whole object", never anything
- * in between. This is the missing piece: given the two buffers already
- * being compared there anyway, work out exactly which sub-ranges actually
- * need writing.
- *
- * Both buffers must be the same length (the caller already reads exactly
- * `target.length` bytes for `current`) - not re-validated here, a
- * mismatch would be a real caller bug upstream, not a legitimate runtime
- * case to handle gracefully.
- */
-export function computeDirtyRanges(
-  current: Buffer,
-  target: Buffer,
-  mergeGap: number = DIRTY_RANGE_MERGE_GAP,
-): Array<{ offset: number; length: number }> {
-  const ranges: Array<{ offset: number; length: number }> = [];
-  let rangeStart = -1;
-  let lastDiffEnd = -1; // exclusive end of the most recent differing byte
-  for (let i = 0; i < target.length; i++) {
-    if (current[i] !== target[i]) {
-      if (rangeStart === -1) {
-        rangeStart = i;
-      } else if (i - lastDiffEnd > mergeGap) {
-        ranges.push({ offset: rangeStart, length: lastDiffEnd - rangeStart });
-        rangeStart = i;
-      }
-      lastDiffEnd = i + 1;
-    }
-  }
-  if (rangeStart !== -1) {
-    ranges.push({ offset: rangeStart, length: lastDiffEnd - rangeStart });
-  }
-  return ranges;
-}
+// computeDirtyRanges() (device-read-and-diff) lived here briefly, 2026-09-01
+// - removed the same day, replaced by DownloadExtra.pendingWriteRanges (see
+// its own doc comment): a real edit log resolved to write ranges upstream,
+// not a device content read diffed in here. Real user correction: "I don't
+// want to store a device memory cache. I want to log changes in our DB
+// (e.g. by edits)."

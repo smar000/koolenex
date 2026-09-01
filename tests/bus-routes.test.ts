@@ -1401,6 +1401,100 @@ describe('POST /bus/program-device — no longer gates on PID 7 upfront', () => 
   });
 });
 
+// ── program-device: pendingWriteRanges wiring (2026-09-01) ─────────────────
+// Real redesign, replacing partial mode's original device-read-and-diff
+// mechanism - see DownloadExtra.pendingWriteRanges' own doc comment
+// (knx-connection.ts) for the full reasoning. This confirms the actual
+// wiring: a real device_pending_changes row resolves through
+// resolvePendingWriteRanges() and reaches downloadDevice()'s `extra`
+// unchanged, and gets cleared once the download completes.
+describe('POST /bus/program-device — pendingWriteRanges wiring', () => {
+  let projectId: number;
+  const deviceAddr = '1.1.36';
+  const paramKey = `${RELMEM_APP}_P-1_R-1`;
+
+  before(() => {
+    writeModel(RELMEM_APP, RELMEM_MODEL);
+    ts.db.run(`INSERT INTO projects (name) VALUES ('program-pending-ranges')`);
+    projectId = ts.db.get<{ id: number }>(
+      `SELECT id FROM projects WHERE name='program-pending-ranges'`,
+    )!.id;
+    seedDevice(ts.db, projectId, deviceAddr, RELMEM_APP, [], []);
+  });
+
+  it('resolves a real pending param_value row into extra.pendingWriteRanges and clears it on success', async () => {
+    mockBus.connected = true;
+    mockBus.propImage = new Map([['4/7', Buffer.from('00000000', 'hex')]]);
+    const dev = ts.db.get<{ id: number }>(
+      'SELECT id FROM devices WHERE project_id=? AND individual_address=?',
+      [projectId, deviceAddr],
+    )!;
+    ts.db.run(
+      'INSERT INTO device_pending_changes (device_id, kind, key, baseline_value, current_value) VALUES (?,?,?,?,?)',
+      [dev.id, 'param_value', paramKey, '1', '5'],
+    );
+
+    const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+      mode: 'partial',
+    });
+    mockBus.propImage = null;
+    assert.equal(r.status, 200);
+
+    const call = mockBus.calls
+      .filter((c) => c.method === 'downloadDevice')
+      .at(-1)!;
+    const extra = call.args[6] as {
+      pendingWriteRanges?: Record<number, Array<{ offset: number; length: number }>>;
+    };
+    assert.deepEqual(extra.pendingWriteRanges, { 4: [{ offset: 0, length: 1 }] });
+
+    const rows = ts.db.all(
+      'SELECT * FROM device_pending_changes WHERE device_id=?',
+      [dev.id],
+    );
+    assert.equal(rows.length, 0, 'pending changes should be cleared after a successful download');
+  });
+
+  it('passes an empty pendingWriteRanges when nothing is pending for this device', async () => {
+    mockBus.connected = true;
+    mockBus.propImage = new Map([['4/7', Buffer.from('00000000', 'hex')]]);
+    const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+      mode: 'partial',
+    });
+    mockBus.propImage = null;
+    assert.equal(r.status, 200);
+
+    const call = mockBus.calls
+      .filter((c) => c.method === 'downloadDevice')
+      .at(-1)!;
+    const extra = call.args[6] as {
+      pendingWriteRanges?: Record<number, Array<{ offset: number; length: number }>>;
+    };
+    assert.deepEqual(extra.pendingWriteRanges, {});
+  });
+
+  it('omits pendingWriteRanges entirely in full mode (the default)', async () => {
+    mockBus.connected = true;
+    mockBus.propImage = new Map([['4/7', Buffer.from('00000000', 'hex')]]);
+    const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    mockBus.propImage = null;
+    assert.equal(r.status, 200);
+
+    const call = mockBus.calls
+      .filter((c) => c.method === 'downloadDevice')
+      .at(-1)!;
+    const extra = call.args[6] as { pendingWriteRanges?: unknown };
+    assert.equal(extra.pendingWriteRanges, undefined);
+  });
+});
+
 // ── program-device: address-by-serial choice, real request 2026-09-01 ──────
 // A serial on record was previously only ever used for the fast-path check
 // (readDeviceInfo at deviceAddress) - if that failed (e.g. a factory-reset

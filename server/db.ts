@@ -484,6 +484,47 @@ export async function init(
     `CREATE INDEX IF NOT EXISTS idx_audit_project ON audit_log(project_id, timestamp)`,
   );
 
+  // Real change-log, added 2026-09-01, replacing an earlier (same-day,
+  // never-shipped-to-real-hardware) design that read the device's current
+  // memory content and diffed it against the computed target - real user
+  // correction: "I don't want to store a device memory cache. I want to
+  // log changes in our DB (e.g. by edits)." This table IS that log: one row
+  // per (device, kind, key) currently mid-edit, holding only the value from
+  // BEFORE any of the edits pending against it (`baseline_value`, set once,
+  // never overwritten while the row exists) and the latest edited value
+  // (`current_value`, overwritten on every further edit to the same key).
+  // No device bytes, no offsets, no "what we think is on the device" -
+  // purely "what we've changed since the last successful download",
+  // exactly the data model requested. `kind` is one of 'param_value' /
+  // 'ga_link' / 'group_object_flag' (see resolvePendingWriteRanges() in
+  // routes/bus.ts for how each maps to a specific relmem object/offset at
+  // download time - deliberately NOT resolved or stored here, so a layout
+  // fix never requires a data migration). Rows are upserted by
+  // trackPendingChange() (routes/shared.ts): editing a key back to its own
+  // baseline_value deletes the row outright (real request: "if user
+  // re-edits a previous change back to original value, we clear the
+  // tracking/undo modified status") rather than leaving a stale no-op row
+  // around. Cleared entirely for a device once a download actually
+  // completes ('until we have programmed successfully', per the same
+  // request) - see clearPendingChanges(), called from /bus/program-device's
+  // completion block alongside its existing status/verify resets.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS device_pending_changes (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id      INTEGER NOT NULL,
+      kind           TEXT NOT NULL,
+      key            TEXT NOT NULL,
+      baseline_value TEXT,
+      current_value  TEXT,
+      created_at     TEXT DEFAULT (datetime('now','localtime')),
+      updated_at     TEXT DEFAULT (datetime('now','localtime')),
+      UNIQUE(device_id, kind, key)
+    )
+  `);
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_pending_changes_device ON device_pending_changes(device_id)`,
+  );
+
   // ── Indexes on project_id for query performance ───────────────────────────
   db.run(
     'CREATE INDEX IF NOT EXISTS idx_devices_project ON devices(project_id)',

@@ -12,7 +12,9 @@ import {
   makeUpdateBuilder,
   MAX_UPLOAD_BYTES,
   markDeviceModifiedIfProgrammed,
+  clearPendingChanges,
 } from './shared.ts';
+import type { PendingChangeInput } from './shared.ts';
 import type { Device } from '../../shared/types.ts';
 
 const router = express.Router();
@@ -313,6 +315,10 @@ router.patch(
       'UPDATE devices SET has_address=0, individual_address=?, status=?, last_verify_match=NULL, last_verify_at=NULL WHERE id=?',
       [placeholder, 'unassigned', did],
     );
+    // Pending-change tracking cleared too, same reasoning as verify above -
+    // an unassigned device has no address to program against, so whatever
+    // edits were pending have nothing left to be "pending" for.
+    clearPendingChanges(did);
     db.audit(
       pid,
       'update',
@@ -509,11 +515,13 @@ router.patch(
     }
     const newVals = validateBody(req, z.record(z.string(), z.unknown()));
     const diffs: string[] = [];
+    const pendingChanges: PendingChangeInput[] = [];
     for (const k of Object.keys(newVals)) {
       const ov = oldVals[k];
       const nv = newVals[k];
       if (JSON.stringify(ov) !== JSON.stringify(nv)) {
         diffs.push(`${k}: "${ov ?? ''}" → "${nv}"`);
+        pendingChanges.push({ kind: 'param_value', key: k, oldVal: ov, newVal: nv });
       }
     }
     // Merged into the existing values, not a full replace - real request
@@ -549,6 +557,7 @@ router.patch(
       ({ status: deviceStatus, verifyCleared } = markDeviceModifiedIfProgrammed(
         pid,
         did,
+        pendingChanges,
       ));
     }
     db.scheduleSave();

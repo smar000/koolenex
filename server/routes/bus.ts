@@ -5,6 +5,7 @@ import fs from 'fs';
 import { z } from 'zod';
 import * as db from '../db.ts';
 import { APPS_DIR, getDptInfo } from './shared.ts';
+import { getPendingChanges, clearPendingChanges } from './shared.ts';
 import { logger, safeErrorOrConnection } from '../log.ts';
 import { resolveRelmemBases } from '../knx-segment-base.ts';
 import { validateBody } from '../validate.ts';
@@ -22,7 +23,11 @@ import {
   diffMemory,
   decodeParamMem,
 } from './knx-tables.ts';
-import type { GroupObjectFlags, GroupObjectEntryFlags } from './knx-tables.ts';
+import type {
+  GroupObjectFlags,
+  GroupObjectEntryFlags,
+  ParamMemEntry,
+} from './knx-tables.ts';
 import type {
   Setting,
   Device,
@@ -1241,6 +1246,77 @@ function buildDeviceProgramming(dev: Device): DeviceProgramming {
 // going through the write-triggering /bus/program-device route at all.
 export const _buildDeviceProgramming = buildDeviceProgramming;
 
+// Resolves a device's device_pending_changes rows (routes/shared.ts) into
+// the byte ranges DownloadExtra.pendingWriteRanges expects (see that
+// field's own doc comment in knx-connection.ts for the full redesign this
+// is part of, 2026-09-01). Deliberately does NOT read the device or diff
+// anything - each key is mapped to an offset using the SAME layout logic
+// that already builds the target image, from data koolenex already has.
+//
+// - 'param_value': resolved via paramMemLayout, the same map buildParamMem()
+//   itself uses. A key absent from the map, or with `offset: null` (a real,
+//   separate, already-tracked gap - see koolenex_checkbox_param_no_memory_offset
+//   memory), simply contributes nothing here - there's no byte to write for
+//   it, same as buildParamMem() itself would produce.
+// - 'ga_link': GA/Association table (objIdx 1/2) entry positions can shift
+//   entirely when one link changes (not a fixed per-key offset the way the
+//   other two kinds are) - marks both tables' FULL length dirty rather than
+//   guessing a sub-range. A comm object's Object 3 byte (bit 2: Communication
+//   AND has-a-GA-link) can also change alongside a link edit, so this ALSO
+//   marks that object's own 2-byte entry dirty, same as 'group_object_flag'.
+// - 'group_object_flag': resolved via the same `object_number * 2` formula
+//   computeGroupObjectByte()/buildGroupObjectTable() already use.
+function resolvePendingWriteRanges(
+  deviceId: number,
+  paramMemLayout: Record<string, unknown>,
+): Record<number, Array<{ offset: number; length: number }>> {
+  const pending = getPendingChanges(deviceId);
+  const ranges: Record<number, Array<{ offset: number; length: number }>> = {};
+  const add = (objIdx: number, offset: number, length: number): void => {
+    (ranges[objIdx] ??= []).push({ offset, length });
+  };
+  let touchedGaOrAssoc = false;
+  const touchedComObjNums = new Set<number>();
+
+  for (const row of pending) {
+    if (row.kind === 'param_value') {
+      const layout = (paramMemLayout as Record<string, ParamMemEntry>)[
+        row.key
+      ];
+      if (layout && layout.offset != null) {
+        const length = Math.max(
+          1,
+          Math.ceil((layout.bitOffset + layout.bitSize) / 8),
+        );
+        add(4, layout.offset, length);
+      }
+    } else if (row.kind === 'ga_link') {
+      touchedGaOrAssoc = true;
+      const n = Number(row.key);
+      if (Number.isFinite(n)) touchedComObjNums.add(n);
+    } else if (row.kind === 'group_object_flag') {
+      const n = Number(row.key);
+      if (Number.isFinite(n)) touchedComObjNums.add(n);
+    }
+  }
+
+  // GA/Association tables: no stable per-key offset, so any link change
+  // marks the whole table dirty. The caller fills in the real length (it
+  // has gaTable/assocTable already built); a length of -1 here is a
+  // sentinel the caller expands to "whole table".
+  if (touchedGaOrAssoc) {
+    add(1, 0, -1);
+    add(2, 0, -1);
+  }
+  for (const n of touchedComObjNums) {
+    add(3, n * 2, 2);
+  }
+  return ranges;
+}
+
+// Test-only export alias (same convention as _buildDeviceProgramming above).
+export const _resolvePendingWriteRanges = resolvePendingWriteRanges;
+
 // Full (or, since 2026-08-29, partial) application download for a device.
 // mode defaults to 'full' - the original, only-ever-tested behavior, kept
 // as the default so existing callers/tests see zero change. mode='partial'
@@ -1327,6 +1403,35 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     isSecureEnabled,
     cachedMaxApduLength,
   } = built;
+
+  // Real edit log -> write ranges, 2026-09-01 - only meaningful in
+  // 'partial' mode (full mode always writes everything regardless of what
+  // changed). The `-1` sentinel length from resolvePendingWriteRanges()
+  // (GA/Association tables have no stable per-key offset) gets expanded
+  // here to each table's real, already-built length.
+  let pendingWriteRanges:
+    | Record<number, Array<{ offset: number; length: number }>>
+    | undefined;
+  if (mode === 'partial') {
+    const resolved = resolvePendingWriteRanges(
+      dev.id,
+      built.paramMemLayout,
+    );
+    for (const [objIdxStr, ranges] of Object.entries(resolved)) {
+      for (const r of ranges) {
+        if (r.length === -1) {
+          const objIdx = Number(objIdxStr);
+          r.length =
+            objIdx === 1
+              ? (gaTable?.length ?? 0)
+              : objIdx === 2
+                ? (assocTable?.length ?? 0)
+                : 0;
+        }
+      }
+    }
+    pendingWriteRanges = resolved;
+  }
 
   // Real device-resident relmem bases (PID 7) are no longer pre-resolved
   // (and no longer gate the download with a 409) here - downloadDevice()
@@ -1680,6 +1785,7 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
         groupObjectTable,
         isSecureEnabled,
         cachedMaxApduLength,
+        pendingWriteRanges,
       },
     );
     // Real bug, found live 2026-08-31: this only ever updated `status` -
@@ -1759,6 +1865,15 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
         ],
       );
     }
+    // Real request, 2026-09-01: "track changes we have made, until we have
+    // programmed successfully" - reaching here means downloadDevice()
+    // completed without throwing, so whatever was pending (full or
+    // partial) has now genuinely been written. A device now matches its
+    // own DB state either way: full mode always writes everything
+    // regardless of what was tracked, partial mode just wrote exactly the
+    // tracked deltas - so the log is cleared unconditionally here, not
+    // gated on mode.
+    clearPendingChanges(dev.id);
     // Real request, 2026-08-31: "the log doesn't say that the download was
     // successful. We should show this in the logs, including serial
     // number of the device, and the number of bytes written." - the

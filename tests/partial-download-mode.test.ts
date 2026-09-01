@@ -8,18 +8,29 @@
  * koolenex-reference memory and docs/data/captures/README.md in the
  * knx-ets-manager repo for the real capture backing this.
  *
+ * REWRITTEN 2026-09-01: partial mode's original mechanism (peek each
+ * object's full current content off the device, diff against target) was
+ * replaced with DownloadExtra.pendingWriteRanges - a real edit log
+ * (device_pending_changes, resolved upstream in routes/bus.ts) tells
+ * downloadDevice() exactly which byte ranges to write, with NO device read
+ * at all. Real user correction: "I don't want to store a device memory
+ * cache. I want to log changes in our DB (e.g. by edits)." Every test below
+ * now drives that field directly rather than pre-seeding a `backing` buffer
+ * for downloadDevice() to read and diff.
+ *
  * This is a protocol-level "virtual device" test (subclasses KnxConnection,
  * intercepts sendCEMI, answers both reads AND writes against its own backing
- * buffer) - proves the SKIP-IF-UNCHANGED and mode-byte logic deterministically,
- * without needing real hardware for every run. The real-hardware round trip
- * (see the capture above) is what proves the same logic actually works on a
- * real device; this file is the fast, repeatable regression guard for it.
+ * buffer) - proves the skip-when-nothing-pending and mode-byte logic
+ * deterministically, without needing real hardware for every run. The
+ * real-hardware round trip (see the capture above) is what proves the same
+ * underlying protocol sequence actually works on a real device; this file is
+ * the fast, repeatable regression guard for it.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { parseCEMI, buildCEMI, apduConnectedFull, apduGroup, APCI_EXT, TPCI } from '../server/knx-cemi.ts';
-import { KnxConnection, computeDirtyRanges } from '../server/knx-connection.ts';
+import { KnxConnection } from '../server/knx-connection.ts';
 import type { DownloadStep } from '../server/knx-connection.ts';
 
 /**
@@ -206,13 +217,12 @@ class FakeRWMemoryDevice extends KnxConnection {
   }
 }
 
-describe("downloadDevice() mode='partial' (2026-08-29)", () => {
+describe("downloadDevice() mode='partial' (2026-09-01 rewrite)", () => {
   const BASE = 0x5f0e; // within 16 bits, matches 1.1.9's real relmem base shape
 
-  it('skips the object entirely when the device already matches (no Unload/StartLoading/LoadData/write at all)', async () => {
+  it('skips the object entirely when nothing is pending for it (no Unload/StartLoading/LoadData/write, no read either)', async () => {
     const payload = Buffer.from('deadbeefcafef00d', 'hex');
-    const backing = Buffer.alloc(0x10000);
-    payload.copy(backing, BASE); // device already holds the target content
+    const backing = Buffer.alloc(0x10000); // deliberately left all-zero - genuinely differs from payload
     const dev = new FakeRWMemoryDevice('1.1.9', backing);
 
     const relSeg: DownloadStep = {
@@ -233,15 +243,16 @@ describe("downloadDevice() mode='partial' (2026-08-29)", () => {
     await dev.downloadDevice('1.1.9', [relSeg, write], null, null, payload, undefined, {
       resolvedBases: { 4: BASE },
       mode: 'partial',
+      pendingWriteRanges: {}, // nothing tracked for objIdx 4
     });
 
     assert.equal(dev.writeCount(), 0, 'no Memory_Write/MemoryExtended_Write should have been sent');
     assert.equal(dev.loadDataModeBytes().length, 0, 'no LoadData step should have been sent either - the whole cycle was skipped');
   });
 
-  it('writes (with the real Partial mode byte 0x00) when the device genuinely differs', async () => {
+  it('writes (with the real Partial mode byte 0x00) exactly the pending-write-range bytes, nothing more', async () => {
     const payload = Buffer.from('deadbeefcafef00d', 'hex');
-    const backing = Buffer.alloc(0x10000); // starts all-zero - genuinely different from payload
+    const backing = Buffer.alloc(0x10000); // starts all-zero
     const dev = new FakeRWMemoryDevice('1.1.9', backing);
 
     const relSeg: DownloadStep = {
@@ -262,9 +273,10 @@ describe("downloadDevice() mode='partial' (2026-08-29)", () => {
     await dev.downloadDevice('1.1.9', [relSeg, write], null, null, payload, undefined, {
       resolvedBases: { 4: BASE },
       mode: 'partial',
+      pendingWriteRanges: { 4: [{ offset: 0, length: payload.length }] },
     });
 
-    assert.ok(dev.writeCount() > 0, 'expected real write chunks since the device genuinely differed');
+    assert.ok(dev.writeCount() > 0, 'expected real write chunks - a range was tracked as pending');
     assert.deepEqual(dev.loadDataModeBytes(), [0x00], 'partial mode must force the LoadData mode byte to 0x00 (real captured Partial semantic), not the model-declared combined shape');
     assert.deepEqual([...dev.memory.subarray(BASE, BASE + payload.length)], [...payload]);
   });
@@ -341,106 +353,61 @@ describe('FakeRWMemoryDevice.setProperty() - PropertyValue_Read support (2026-08
     assert.equal(dev.writeCount(), 0, 'no write should be attempted when the base can\'t be resolved');
   });
 
-  it('partial mode: skips the GA table write entirely when the device already matches at the resolved base', async () => {
+  it('partial mode: skips the GA table entirely when nothing is pending for objIdx 1 (no PID 7 resolution even attempted)', async () => {
     const gaTable = Buffer.from('000249014905', 'hex');
     const backing = Buffer.alloc(0x10000);
-    gaTable.copy(backing, GA_TABLE_BASE); // device already holds the target content
+    const dev = new FakeRWMemoryDevice('1.1.9', backing);
+    // Deliberately NOT configured via setProperty() - if the new code
+    // tried to resolve objIdx 1's base at all, this read would go
+    // unanswered and the object would be treated as "no base" rather than
+    // genuinely skipped for having nothing pending. Asserting writeCount
+    // 0 here holds either way, but the real intent (see
+    // DownloadExtra.pendingWriteRanges' doc comment) is "skip before any
+    // bus round-trip happens for this object", not just "no write lands".
+
+    await dev.downloadDevice('1.1.9', [], gaTable, null, null, undefined, {
+      mode: 'partial',
+      pendingWriteRanges: {},
+    });
+
+    assert.equal(dev.writeCount(), 0, 'partial mode should skip the whole cycle when nothing is pending for this object');
+  });
+
+  it('partial mode: writes the GA table when a ga_link change is pending, resolving the base via PID 7 as normal', async () => {
+    const gaTable = Buffer.from('000249014905', 'hex');
+    const backing = Buffer.alloc(0x10000);
     const dev = new FakeRWMemoryDevice('1.1.9', backing);
     dev.setProperty(1, 7, Buffer.from([0x00, 0x00, 0x40, 0x00]));
 
-    await dev.downloadDevice('1.1.9', [], gaTable, null, null, undefined, { mode: 'partial' });
+    await dev.downloadDevice('1.1.9', [], gaTable, null, null, undefined, {
+      mode: 'partial',
+      pendingWriteRanges: { 1: [{ offset: 0, length: gaTable.length }] },
+    });
 
-    assert.equal(dev.writeCount(), 0, 'partial mode should skip the whole cycle when content already matches');
+    assert.deepEqual(
+      [...dev.memory.subarray(GA_TABLE_BASE, GA_TABLE_BASE + gaTable.length)],
+      [...gaTable],
+      'the GA table should still land at the address resolved from the configured PID 7 property',
+    );
   });
 });
 
-describe('computeDirtyRanges() (2026-09-01)', () => {
-  it('returns an empty array when the buffers are identical', () => {
-    const a = Buffer.from('deadbeefcafef00d', 'hex');
-    assert.deepEqual(computeDirtyRanges(a, Buffer.from(a)), []);
-  });
-
-  it('finds a single isolated differing byte as one 1-byte range', () => {
-    const target = Buffer.alloc(100, 0x00);
-    target[50] = 0xff;
-    const current = Buffer.alloc(100, 0x00);
-    assert.deepEqual(computeDirtyRanges(current, target), [
-      { offset: 50, length: 1 },
-    ]);
-  });
-
-  it('merges two differences closer together than the merge gap into one range', () => {
-    const target = Buffer.alloc(100, 0x00);
-    target[40] = 0xff;
-    target[50] = 0xff; // 9 bytes apart - inside the default 32-byte gap
-    const current = Buffer.alloc(100, 0x00);
-    assert.deepEqual(computeDirtyRanges(current, target), [
-      { offset: 40, length: 11 },
-    ]);
-  });
-
-  it('keeps two differences farther apart than the merge gap as separate ranges', () => {
-    const target = Buffer.alloc(200, 0x00);
-    target[10] = 0xff;
-    target[150] = 0xff; // 139 bytes apart - well past the default 32-byte gap
-    const current = Buffer.alloc(200, 0x00);
-    assert.deepEqual(computeDirtyRanges(current, target), [
-      { offset: 10, length: 1 },
-      { offset: 150, length: 1 },
-    ]);
-  });
-
-  it('respects a caller-supplied merge gap', () => {
-    const target = Buffer.alloc(100, 0x00);
-    target[10] = 0xff;
-    target[50] = 0xff; // 39 bytes apart
-    const current = Buffer.alloc(100, 0x00);
-    // Default gap (32) keeps these separate...
-    assert.equal(computeDirtyRanges(current, target).length, 2);
-    // ...a wider gap merges them.
-    assert.equal(computeDirtyRanges(current, target, 40).length, 1);
-  });
-
-  it('handles a difference at the very start and the very end of the buffer', () => {
-    const target = Buffer.alloc(50, 0x00);
-    target[0] = 0xff;
-    target[49] = 0xff;
-    const current = Buffer.alloc(50, 0x00);
-    assert.deepEqual(computeDirtyRanges(current, target), [
-      { offset: 0, length: 1 },
-      { offset: 49, length: 1 },
-    ]);
-  });
-
-  it('treats a fully differing buffer as one single range spanning it entirely', () => {
-    const target = Buffer.from('deadbeefcafef00d', 'hex');
-    const current = Buffer.alloc(target.length, 0x00);
-    assert.deepEqual(computeDirtyRanges(current, target), [
-      { offset: 0, length: target.length },
-    ]);
-  });
-});
-
-describe("downloadDevice() mode='partial' surgical write (2026-09-01)", () => {
+describe("downloadDevice() mode='partial' surgical write (2026-09-01 rewrite)", () => {
   const BASE = 0x5f0e;
 
-  it('writes only the byte range that actually changed, not the whole object, for a single-value change in a large buffer', async () => {
-    // Real motivation: a live partial download after ONE changed
-    // parameter rewrote an entire ~10KB object (98 peek-read chunks then
-    // ~46 unconditional write chunks) - "otherwise no real point of
-    // partial download". This proves the fix: a large (1000-byte) object
-    // with a tiny, isolated 2-byte change produces exactly ONE small
+  it('writes only the pending-write-range bytes, not the whole object, for a single tracked change in a large buffer', async () => {
+    // Real motivation, unchanged from the original version of this test:
+    // a live partial download after ONE changed parameter rewrote an
+    // entire ~10KB object. Now driven directly by pendingWriteRanges
+    // (what resolvePendingWriteRanges() would produce for one changed
+    // param key) instead of a device-content diff - a large (1000-byte)
+    // object with one tracked 2-byte range produces exactly ONE small
     // write, not the ~5 chunks (Math.ceil(1000/228)) a full rewrite of
     // this size would need.
     const size = 1000;
     const target = Buffer.alloc(size);
     for (let i = 0; i < size; i++) target[i] = i % 256;
-    const backing = Buffer.alloc(0x10000);
-    target.copy(backing, BASE);
-    // The one real change: 2 bytes near the middle differ from the
-    // device's current content.
-    backing[BASE + 500] = 0xaa;
-    backing[BASE + 501] = 0xbb;
+    const backing = Buffer.alloc(0x10000); // device starts genuinely different - irrelevant now, never read
     const dev = new FakeRWMemoryDevice('1.1.9', backing);
 
     const relSeg: DownloadStep = {
@@ -461,30 +428,32 @@ describe("downloadDevice() mode='partial' surgical write (2026-09-01)", () => {
     await dev.downloadDevice('1.1.9', [relSeg, write], null, null, target, undefined, {
       resolvedBases: { 4: BASE },
       mode: 'partial',
+      pendingWriteRanges: { 4: [{ offset: 500, length: 2 }] },
     });
 
     assert.equal(
       dev.writeCount(),
       1,
-      'expected exactly one small write covering the 2 changed bytes, not ~5 chunks for a full 1000-byte rewrite',
+      'expected exactly one small write covering the tracked 2-byte range, not ~5 chunks for a full 1000-byte rewrite',
     );
-    // The device's final content is still fully correct, byte-for-byte -
-    // surgical writing must never leave stale bytes behind anywhere else
-    // in the object.
+    // Only the tracked range actually lands on the device - surgical
+    // writing must never write bytes outside what was tracked as pending.
     assert.deepEqual(
-      [...dev.memory.subarray(BASE, BASE + size)],
-      [...target],
+      [...dev.memory.subarray(BASE + 500, BASE + 502)],
+      [...target.subarray(500, 502)],
+    );
+    assert.deepEqual(
+      [...dev.memory.subarray(BASE, BASE + 500)],
+      [...Buffer.alloc(500)],
+      'bytes outside the tracked range must be untouched, still zero',
     );
   });
 
-  it('writes multiple separate regions when changes are scattered far apart in a large buffer', async () => {
+  it('writes multiple separate regions when multiple pending-write-ranges are given', async () => {
     const size = 1000;
     const target = Buffer.alloc(size);
     for (let i = 0; i < size; i++) target[i] = i % 256;
     const backing = Buffer.alloc(0x10000);
-    target.copy(backing, BASE);
-    backing[BASE + 10] = 0xaa; // near the start
-    backing[BASE + 900] = 0xbb; // near the end, far past the merge gap
     const dev = new FakeRWMemoryDevice('1.1.9', backing);
 
     const relSeg: DownloadStep = {
@@ -505,16 +474,22 @@ describe("downloadDevice() mode='partial' surgical write (2026-09-01)", () => {
     await dev.downloadDevice('1.1.9', [relSeg, write], null, null, target, undefined, {
       resolvedBases: { 4: BASE },
       mode: 'partial',
+      pendingWriteRanges: {
+        4: [
+          { offset: 10, length: 1 }, // near the start
+          { offset: 900, length: 1 }, // near the end, a separate region
+        ],
+      },
     });
 
     assert.equal(
       dev.writeCount(),
       2,
-      'two isolated, far-apart changes should produce two separate small writes',
+      'two separate tracked ranges should produce two separate small writes',
     );
     assert.deepEqual(
-      [...dev.memory.subarray(BASE, BASE + size)],
-      [...target],
+      [dev.memory[BASE + 10], dev.memory[BASE + 900]],
+      [target[10], target[900]],
     );
   });
 });

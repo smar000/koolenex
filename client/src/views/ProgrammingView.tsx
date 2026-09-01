@@ -10,6 +10,7 @@ import {
   SectionHeader,
   DeviceAddr,
   Badge,
+  Chip,
 } from '../primitives.tsx';
 import { DeviceTypeIcon, IconSerial, IconAttention } from '../icons.tsx';
 import { api } from '../api.ts';
@@ -686,18 +687,17 @@ export function ProgrammingView() {
             // once checked). Toggling it also settles the choice for any
             // in-flight "device not found" prompt going forward, since
             // programDevice() reads this same setting fresh each call.
-            <label
+            // Chip (not a plain checkbox) to match the page's existing
+            // badge/pill visual language - real request 2026-09-01: "keeps
+            // things looking consistent".
+            <Chip
               key="auto-serial"
-              className={styles.headerCheckboxRow}
+              active={autoAddressBySerial}
+              onClick={toggleAutoAddressBySerial}
               title="When a device doesn't answer at its assigned address (e.g. after a factory reset) but a serial is on record, locate/readdress it by serial automatically instead of asking each time."
             >
-              <input
-                type="checkbox"
-                checked={autoAddressBySerial}
-                onChange={toggleAutoAddressBySerial}
-              />
               Auto-address by serial
-            </label>,
+            </Chip>,
             <Btn
               key="address"
               onClick={() => setAddressModalFor('scan')}

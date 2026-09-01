@@ -26,11 +26,13 @@ interface ChipProps {
   children: React.ReactNode;
   active?: boolean;
   onClick?: () => void;
+  title?: string;
 }
 
-export const Chip = ({ children, active, onClick }: ChipProps) => (
+export const Chip = ({ children, active, onClick, title }: ChipProps) => (
   <button
     onClick={onClick}
+    title={title}
     className={`${styles.chip} ${active ? styles.chipActive : styles.chipInactive}`}
   >
     {children}

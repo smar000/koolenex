@@ -1448,7 +1448,16 @@ describe('POST /bus/program-device — pendingWriteRanges wiring', () => {
     const extra = call.args[6] as {
       pendingWriteRanges?: Record<number, Array<{ offset: number; length: number }>>;
     };
-    assert.deepEqual(extra.pendingWriteRanges, { 4: [{ offset: 0, length: 1 }] });
+    // RELMEM_MODEL's param object is 4 bytes (WriteRelMem size:4) - real
+    // ETS trailer-byte behavior (see resolvePendingWriteRanges()'s own doc
+    // comment) means the object's own final byte (offset 3) is expected
+    // alongside the real edit (offset 0), not just the edit alone.
+    assert.deepEqual(extra.pendingWriteRanges, {
+      4: [
+        { offset: 0, length: 1 },
+        { offset: 3, length: 1 },
+      ],
+    });
 
     const rows = ts.db.all(
       'SELECT * FROM device_pending_changes WHERE device_id=?',

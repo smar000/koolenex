@@ -281,6 +281,56 @@ describe('resolvePendingWriteRanges()', () => {
     assert.deepEqual(ranges[4], [{ offset: 172, length: 1 }]);
   });
 
+  // Real ETS quirk, confirmed 2026-09-01 via a byte-for-byte capture of a
+  // genuine real ETS Partial Download: it wrote both the edited byte AND
+  // the parameter object's own final byte (a device-required trailer),
+  // unconditionally. See resolvePendingWriteRanges()'s own doc comment.
+  it('appends the parameter object\'s own final byte (trailer) alongside a real edit, when paramSize is given', () => {
+    const { did } = seedProject('resolve-param-trailer');
+    ts.db.run(
+      'INSERT INTO device_pending_changes (device_id, kind, key, baseline_value, current_value) VALUES (?,?,?,?,?)',
+      [did, 'param_value', 'P-1', 'null', '5'],
+    );
+    const layout = { 'P-1': { offset: 172, bitOffset: 0, bitSize: 8 } };
+    const ranges = _resolvePendingWriteRanges(did, layout, 10433);
+    assert.deepEqual(ranges[4], [
+      { offset: 172, length: 1 },
+      { offset: 10432, length: 1 },
+    ]);
+  });
+
+  it('does not duplicate the trailer byte when the real edit already covers it', () => {
+    const { did } = seedProject('resolve-param-trailer-dup');
+    ts.db.run(
+      'INSERT INTO device_pending_changes (device_id, kind, key, baseline_value, current_value) VALUES (?,?,?,?,?)',
+      [did, 'param_value', 'P-1', 'null', '5'],
+    );
+    const layout = { 'P-1': { offset: 10432, bitOffset: 0, bitSize: 8 } };
+    const ranges = _resolvePendingWriteRanges(did, layout, 10433);
+    assert.deepEqual(ranges[4], [{ offset: 10432, length: 1 }]);
+  });
+
+  it('does not append a trailer byte when paramSize is not given (backward-compatible)', () => {
+    const { did } = seedProject('resolve-param-trailer-no-size');
+    ts.db.run(
+      'INSERT INTO device_pending_changes (device_id, kind, key, baseline_value, current_value) VALUES (?,?,?,?,?)',
+      [did, 'param_value', 'P-1', 'null', '5'],
+    );
+    const layout = { 'P-1': { offset: 172, bitOffset: 0, bitSize: 8 } };
+    const ranges = _resolvePendingWriteRanges(did, layout);
+    assert.deepEqual(ranges[4], [{ offset: 172, length: 1 }]);
+  });
+
+  it('does not append a trailer byte when objIdx 4 has nothing pending at all (e.g. a ga_link-only change)', () => {
+    const { did } = seedProject('resolve-param-trailer-no-obj4-activity');
+    ts.db.run(
+      'INSERT INTO device_pending_changes (device_id, kind, key, baseline_value, current_value) VALUES (?,?,?,?,?)',
+      [did, 'ga_link', '5', '""', '"1/2/3"'],
+    );
+    const ranges = _resolvePendingWriteRanges(did, {}, 10433);
+    assert.equal(ranges[4], undefined);
+  });
+
   it('spans multiple bytes for a bitfield crossing a byte boundary', () => {
     const { did } = seedProject('resolve-param-multibyte');
     ts.db.run(

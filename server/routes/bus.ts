@@ -1266,9 +1266,29 @@ export const _buildDeviceProgramming = buildDeviceProgramming;
 //   marks that object's own 2-byte entry dirty, same as 'group_object_flag'.
 // - 'group_object_flag': resolved via the same `object_number * 2` formula
 //   computeGroupObjectByte()/buildGroupObjectTable() already use.
+//
+// Real ETS quirk, confirmed 2026-09-01 via a byte-for-byte capture analysis
+// (koolenex's own parseCEMI(), not tshark's one-line summaries, which had
+// already been shown to silently drop single-byte MemoryExtended_Write
+// frames entirely - the earlier "ETS wrote nothing" conclusion from reading
+// those summaries was wrong): a real ETS Partial Download that changes one
+// parameter value (`MemoryExtended_Write X=$0C30AC $19`, offset 172) also
+// unconditionally writes the parameter object's own FINAL byte in the same
+// download (`MemoryExtended_Write X=$0C58C0 $01`, offset paramSize-1) -
+// even though nothing about that trailing byte changed. Almost certainly a
+// device-required trailer/commit byte for this segment, not something tied
+// to what was actually edited. Reproduced the real mismatch this project
+// chased for a whole session: koolenex's own partial write only sent the
+// edited byte, never the trailer, leaving the device's trailer byte at
+// whatever it last held. `paramSize` is optional so callers/tests that
+// don't have it (or don't care about objIdx 4 at all) see no behavior
+// change - only applied when objIdx 4 already has at least one real write
+// pending, matching real ETS's own "alongside whatever else it writes"
+// behavior, not as a write on its own.
 function resolvePendingWriteRanges(
   deviceId: number,
   paramMemLayout: Record<string, unknown>,
+  paramSize?: number,
 ): Record<number, Array<{ offset: number; length: number }>> {
   const pending = getPendingChanges(deviceId);
   const ranges: Record<number, Array<{ offset: number; length: number }>> = {};
@@ -1310,6 +1330,16 @@ function resolvePendingWriteRanges(
   }
   for (const n of touchedComObjNums) {
     add(3, n * 2, 2);
+  }
+  // See this function's own doc comment above for the real-capture evidence
+  // behind this - real ETS always includes the parameter object's own
+  // final byte in any partial write to that object.
+  if (ranges[4] && ranges[4].length && paramSize && paramSize > 0) {
+    const lastByteOffset = paramSize - 1;
+    const alreadyCovered = ranges[4].some(
+      (r) => lastByteOffset >= r.offset && lastByteOffset < r.offset + r.length,
+    );
+    if (!alreadyCovered) add(4, lastByteOffset, 1);
   }
   return ranges;
 }
@@ -1416,6 +1446,7 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     const resolved = resolvePendingWriteRanges(
       dev.id,
       built.paramMemLayout,
+      paramMem?.length,
     );
     for (const [objIdxStr, ranges] of Object.entries(resolved)) {
       for (const r of ranges) {

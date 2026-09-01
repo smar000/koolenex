@@ -1730,9 +1730,14 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       (groupObjectTable?.length ?? 0);
     const unconfirmedWritesCount = downloadResult.unconfirmedWrites;
     const unconfirmedWritesDetail = JSON.stringify(downloadResult.unconfirmedDetails);
+    // last_verify_match/last_verify_at cleared back to NULL here too -
+    // real request, 2026-09-01: "clear last verify on each download" - a
+    // verify result describes content that this download just replaced,
+    // so it can't still be trusted regardless of whether this specific
+    // download's own writes were all confirmed.
     if (serialNumber) {
       db.run(
-        'UPDATE devices SET status=?, last_download=?, serial_number=?, unconfirmed_writes_count=?, unconfirmed_writes_detail=? WHERE id=?',
+        'UPDATE devices SET status=?, last_download=?, serial_number=?, unconfirmed_writes_count=?, unconfirmed_writes_detail=?, last_verify_match=NULL, last_verify_at=NULL WHERE id=?',
         [
           'programmed',
           new Date().toISOString(),
@@ -1744,7 +1749,7 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       );
     } else {
       db.run(
-        'UPDATE devices SET status=?, last_download=?, unconfirmed_writes_count=?, unconfirmed_writes_detail=? WHERE id=?',
+        'UPDATE devices SET status=?, last_download=?, unconfirmed_writes_count=?, unconfirmed_writes_detail=?, last_verify_match=NULL, last_verify_at=NULL WHERE id=?',
         [
           'programmed',
           new Date().toISOString(),
@@ -2375,8 +2380,21 @@ async function runVerifyDevice(
         'UPDATE devices SET unconfirmed_writes_count=0, unconfirmed_writes_detail=? WHERE id=?',
         ['[]', dev.id],
       );
-      db.scheduleSave();
     }
+    // Persisted verify indicator, added 2026-09-01 - real request: "we
+    // should consider an indicator for both successful verify and
+    // failed". Written unconditionally (both match and mismatch), unlike
+    // the unconfirmed_writes reset above which only applies on a clean
+    // match - a real, live bus verify just happened either way, and the
+    // whole point is to surface a failed one just as visibly as a clean
+    // one. See last_verify_match's own migration comment (db.ts) for why
+    // this only ever happens here (a real live bus read), never from the
+    // cache-only recompute path below.
+    db.run(
+      'UPDATE devices SET last_verify_match=?, last_verify_at=? WHERE id=?',
+      [match ? 1 : 0, new Date().toISOString(), dev.id],
+    );
+    db.scheduleSave();
     res.json({
       deviceAddress,
       family: plan.family,

@@ -93,6 +93,15 @@ export interface Device {
   // verify. unconfirmed_writes_detail is a JSON-encoded string[].
   unconfirmed_writes_count: number;
   unconfirmed_writes_detail: string;
+  // Persisted last-verify outcome, added 2026-09-01 - real request: "we
+  // should consider an indicator for both successful verify and failed".
+  // null = never verified (distinct from a real failed verify, hence
+  // nullable rather than a plain boolean) - see server/db.ts's own
+  // migration comment for the full write/clear trail (written by a real
+  // live bus verify only; cleared on the next download, on unassign, and
+  // on any edit made after a verify recorded a result).
+  last_verify_match: number | null;
+  last_verify_at: string | null;
 }
 
 export interface GroupAddress {

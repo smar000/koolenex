@@ -207,18 +207,48 @@ export function makeUpdateBuilder<T extends object>(old: T): UpdateBuilder {
 // 'programmed' -> 'modified' - 'unassigned'/other statuses are left alone
 // (nothing to mark dirty if the device was never programmed in the first
 // place), and it's a no-op (no audit spam) if the device is already
-// 'modified'. Returns the resulting status so the caller can include it
-// in its response for the frontend to dispatch SET_DEVICE_STATUS.
+// 'modified'.
+//
+// Extended 2026-09-01, same real reasoning applied to the new persisted
+// verify indicator: a manual edit invalidates whatever the last verify
+// found, whether or not the status transition above actually fires (a
+// device already 'modified' from an earlier edit can still carry a real
+// last_verify_match from a verify that ran since - editing it again must
+// still clear that). Real user instruction, verbatim: "Yes to clear last
+// verify on each download AND if any changes made (edits) manually after
+// verification." Unconditional (not gated on dev.status), since this
+// function is only ever called after a caller has already confirmed a
+// genuine change was made - the caller doesn't need to also predict
+// whether a verify result exists first.
+//
+// Returns the resulting status (for the frontend's SET_DEVICE_STATUS) and
+// whether a verify result was actually cleared (for the frontend to also
+// null out its own cached last_verify_match/last_verify_at without a
+// separate reload).
 export function markDeviceModifiedIfProgrammed(
   pid: number,
   deviceId: number,
-): string | null {
-  const dev = db.get<{ status: string; name: string; individual_address: string }>(
-    'SELECT status, name, individual_address FROM devices WHERE id=? AND project_id=?',
+): { status: string | null; verifyCleared: boolean } {
+  const dev = db.get<{
+    status: string;
+    name: string;
+    individual_address: string;
+    last_verify_match: number | null;
+  }>(
+    'SELECT status, name, individual_address, last_verify_match FROM devices WHERE id=? AND project_id=?',
     [deviceId, pid],
   );
-  if (!dev) return null;
-  if (dev.status !== 'programmed') return dev.status;
+  if (!dev) return { status: null, verifyCleared: false };
+  const verifyCleared = dev.last_verify_match !== null;
+  if (verifyCleared) {
+    db.run(
+      'UPDATE devices SET last_verify_match=NULL, last_verify_at=NULL WHERE id=?',
+      [deviceId],
+    );
+  }
+  if (dev.status !== 'programmed') {
+    return { status: dev.status, verifyCleared };
+  }
   db.run('UPDATE devices SET status=? WHERE id=?', ['modified', deviceId]);
   db.audit(
     pid,
@@ -227,7 +257,7 @@ export function markDeviceModifiedIfProgrammed(
     dev.individual_address || String(deviceId),
     `status: "programmed" → "modified" on "${dev.name || deviceId}" (edited while programmed)`,
   );
-  return 'modified';
+  return { status: 'modified', verifyCleared };
 }
 
 export function saveModelsAndMasterXml(

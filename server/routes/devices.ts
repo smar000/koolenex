@@ -150,12 +150,24 @@ router.put(
     if (b.comment !== undefined) track('comment', b.comment);
     if (b.installation_hints !== undefined)
       track('installation_hints', b.installation_hints);
-    if (b.serial_number !== undefined)
-      track('serial_number', b.serial_number.trim());
+    // last_verify_match/last_verify_at cleared whenever either genuinely
+    // changes - real request, 2026-09-01: "clear verify if... its
+    // serial/device address changed". Deliberately checked against the
+    // OLD value, not just "present in the request body" - serial_number
+    // in particular is resent unchanged by some callers (e.g. the address
+    // PUT alongside an unrelated field), which must not spuriously
+    // invalidate a real, still-accurate verify result.
+    let verifyInvalidated = false;
+    if (b.serial_number !== undefined) {
+      const trimmed = b.serial_number.trim();
+      track('serial_number', trimmed);
+      if (trimmed !== (old.serial_number ?? '')) verifyInvalidated = true;
+    }
     if (
       b.individual_address !== undefined &&
       b.individual_address !== old.individual_address
     ) {
+      verifyInvalidated = true;
       track('individual_address', b.individual_address);
       sets.push('has_address=1');
       // Real bug found live, 2026-08-31: the address badge went straight
@@ -200,6 +212,9 @@ router.put(
     if (b.floor_y !== undefined) {
       sets.push('floor_y=?');
       vals.push(b.floor_y);
+    }
+    if (verifyInvalidated) {
+      sets.push('last_verify_match=NULL', 'last_verify_at=NULL');
     }
     if (!sets.length) {
       res.status(400).json({ error: 'No fields to update' });
@@ -290,8 +305,12 @@ router.patch(
     while (used.has(`${dev.area}.${dev.line}.${n}`)) n++;
     const placeholder = `${dev.area}.${dev.line}.${n}`;
 
+    // last_verify_match/last_verify_at cleared too - real request,
+    // 2026-09-01: "clear verify if the device is unassigned" - whatever a
+    // prior verify found was about a specific physical address this
+    // device no longer occupies.
     db.run(
-      'UPDATE devices SET has_address=0, individual_address=?, status=? WHERE id=?',
+      'UPDATE devices SET has_address=0, individual_address=?, status=?, last_verify_match=NULL, last_verify_at=NULL WHERE id=?',
       [placeholder, 'unassigned', did],
     );
     db.audit(
@@ -525,11 +544,21 @@ router.patch(
         `Updated parameters on "${(devPV.name as string) || String(did)}"`,
     );
     let deviceStatus: string | null = null;
+    let verifyCleared = false;
     if (diffs.length) {
-      deviceStatus = markDeviceModifiedIfProgrammed(pid, did);
+      ({ status: deviceStatus, verifyCleared } = markDeviceModifiedIfProgrammed(
+        pid,
+        did,
+      ));
     }
     db.scheduleSave();
-    res.json({ ok: true, ...(deviceStatus ? { device_status: deviceStatus } : {}) });
+    res.json({
+      ok: true,
+      ...(deviceStatus ? { device_status: deviceStatus } : {}),
+      ...(verifyCleared
+        ? { last_verify_match: null, last_verify_at: null }
+        : {}),
+    });
   },
 );
 

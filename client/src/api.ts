@@ -254,7 +254,12 @@ export const api = {
     did: number,
     values: Record<string, unknown>,
   ) =>
-    req<{ ok: boolean; device_status?: string }>(
+    req<{
+      ok: boolean;
+      device_status?: string;
+      last_verify_match?: null;
+      last_verify_at?: null;
+    }>(
       'PATCH',
       `/projects/${pid}/devices/${did}/param-values`,
       values,

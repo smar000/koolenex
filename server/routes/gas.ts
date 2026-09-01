@@ -267,8 +267,12 @@ router.patch(
       `ga_address: "${oldGAs}" → "${newGAs}" on "${(co.name as string) || co.object_number}"`,
     );
     let deviceStatus: string | null = null;
+    let verifyCleared = false;
     if (oldGAs !== newGAs) {
-      deviceStatus = markDeviceModifiedIfProgrammed(pid, co.device_id as number);
+      ({ status: deviceStatus, verifyCleared } = markDeviceModifiedIfProgrammed(
+        pid,
+        co.device_id as number,
+      ));
     }
     db.scheduleSave();
     res.json({
@@ -277,6 +281,9 @@ router.patch(
       ga_send: gaSend,
       ga_receive: gaRecv,
       ...(deviceStatus ? { device_status: deviceStatus } : {}),
+      ...(verifyCleared
+        ? { last_verify_match: null, last_verify_at: null }
+        : {}),
     });
   },
 );
@@ -361,6 +368,7 @@ router.patch(
         `read_on_init: ${oldReadOnInit} → ${next.read_on_init}`,
       );
     let deviceStatus: string | null = null;
+    let verifyCleared = false;
     if (changeParts.length) {
       db.audit(
         pid,
@@ -369,7 +377,10 @@ router.patch(
         `CO ${co.object_number}`,
         `${changeParts.join(', ')} on "${(co.name as string) || co.object_number}"`,
       );
-      deviceStatus = markDeviceModifiedIfProgrammed(pid, co.device_id as number);
+      ({ status: deviceStatus, verifyCleared } = markDeviceModifiedIfProgrammed(
+        pid,
+        co.device_id as number,
+      ));
       db.scheduleSave();
     }
 
@@ -378,6 +389,9 @@ router.patch(
       ...next,
       flags: nextFlags,
       ...(deviceStatus ? { device_status: deviceStatus } : {}),
+      ...(verifyCleared
+        ? { last_verify_match: null, last_verify_at: null }
+        : {}),
     });
   },
 );

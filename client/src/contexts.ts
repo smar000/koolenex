@@ -104,6 +104,13 @@ export interface ProjectActions {
   // markDeviceModifiedIfProgrammed() flip immediately without a redundant
   // second PATCH /devices/:id/status round trip.
   applyDeviceStatus: (deviceId: number, status: string) => void;
+  // Same local-only pattern, added 2026-09-01 for the persisted verify
+  // indicator (server/db.ts's last_verify_match/last_verify_at) - see
+  // applyDeviceStatus's own doc comment above.
+  applyDeviceVerifyCleared: (deviceId: number) => void;
+  // The other side - records a real verify outcome the server already
+  // persisted (see runVerifyDevice(), server/routes/bus.ts).
+  applyDeviceVerifyResult: (deviceId: number, match: boolean) => void;
 }
 
 export const ProjectActionsCtx = createContext<ProjectActions | null>(null);

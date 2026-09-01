@@ -115,7 +115,7 @@ export function DeviceParameters({ dev, projectId }: DeviceParametersProps) {
   const [comObjects, setComObjects] = useState<any[]>([]);
 
   const devId = dev.id;
-  const { applyDeviceStatus } = useProjectActions();
+  const { applyDeviceStatus, applyDeviceVerifyCleared } = useProjectActions();
 
   // Related communication objects (and their GA links) grouped by channel -
   // parameters and com objects are separate KNX concepts with no direct
@@ -199,6 +199,13 @@ export function DeviceParameters({ dev, projectId }: DeviceParametersProps) {
       // already wrote and audited it) so the Programming page's badge
       // reflects the edit immediately, not only after the next Verify.
       if (result?.device_status) applyDeviceStatus(devId, result.device_status);
+      // See applyDeviceVerifyCleared's own doc comment (contexts.ts) -
+      // 'in' rather than a truthiness check, since the field is only
+      // present (as null) when the server actually cleared a real prior
+      // verify result.
+      if (result && 'last_verify_match' in result) {
+        applyDeviceVerifyCleared(devId);
+      }
       setDirty(false);
     } catch (e: any) {
       setSaveErr(e.message || 'Save failed');

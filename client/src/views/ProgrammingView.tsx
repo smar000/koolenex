@@ -40,7 +40,7 @@ function parseUnconfirmedDetail(raw: string): string[] {
 export function ProgrammingView() {
   const { projectData: data } = useAppData();
   const { deviceStatus: onDeviceStatus } = useBusActions();
-  const { updateDevice } = useProjectActions();
+  const { updateDevice, applyDeviceVerifyResult } = useProjectActions();
   const {
     cache: verifyCache,
     setResult: setVerifyResult,
@@ -439,6 +439,14 @@ export function ProgrammingView() {
       // once." Deliberately does NOT touch 'unassigned' - only match/no
       // match, not "never verified".
       onDeviceStatus(deviceId, r.match ? 'programmed' : 'modified');
+      // Persisted verify indicator, added 2026-09-01 - real request: "we
+      // should consider an indicator for both successful verify and
+      // failed". The server already persisted this in the same call (see
+      // runVerifyDevice()'s own doc comment, server/routes/bus.ts) -
+      // reflect it into local state immediately, both outcomes (unlike
+      // the unconfirmed-writes sync below, which is deliberately only for
+      // a clean match).
+      applyDeviceVerifyResult(deviceId, r.match);
       // A clean verify is real, positive confirmation the device's actual
       // content matches the project - the server already cleared
       // unconfirmed_writes_count/detail for this device (see /bus/verify-
@@ -926,6 +934,43 @@ export function ProgrammingView() {
                               <IconAttention size={12} />
                             </span>
                           )}
+                          {/* Persisted verify indicator, added 2026-09-01 -
+                              real request: "we should consider an indicator
+                              for both successful verify and failed"
+                              (server/db.ts's last_verify_match/
+                              last_verify_at). Distinct from unconfirmed
+                              writes above: that one is about whether the
+                              LAST DOWNLOAD's writes all got a confirmed
+                              reply; this one is about whether a REAL LIVE
+                              VERIFY (device actually re-read and compared)
+                              found the device's content still matches the
+                              project. `!= null` (not `!==`) deliberately
+                              catches both null and undefined, since a
+                              never-verified device may have either
+                              depending on how the row was last fetched.
+                              Cleared back to null on the next download,
+                              on unassign, or on any edit made after a
+                              verify recorded a result (server/routes/
+                              shared.ts's markDeviceModifiedIfProgrammed,
+                              server/routes/devices.ts's PUT/unassign) - a
+                              verify result only means something until the
+                              thing it verified changes. */}
+                          {d.last_verify_match != null && (
+                            <Badge
+                              label={d.last_verify_match ? 'VERIFIED' : 'MISMATCH'}
+                              color={
+                                d.last_verify_match ? 'var(--green)' : 'var(--red)'
+                              }
+                              title={
+                                (d.last_verify_match
+                                  ? 'Last verify matched the project'
+                                  : 'Last verify found differences from the project') +
+                                (d.last_verify_at
+                                  ? ` — ${new Date(d.last_verify_at).toLocaleString()}`
+                                  : '')
+                              }
+                            />
+                          )}
                         </span>
                         {d.last_download && (
                           <span
@@ -1198,6 +1243,20 @@ export function ProgrammingView() {
             >
               LOG
               <div className={styles.logHeaderActions}>
+                {/* Real request, 2026-09-01: moved to leftmost, with extra
+                    space (styles.logClearBtn's own margin-right, not just
+                    the container's uniform gap) separating it from the
+                    debug/collapse icons - a destructive one-click action
+                    (no confirm) sitting right next to frequently-clicked
+                    icons was an accidental-click risk. */}
+                <button
+                  type="button"
+                  className={`${styles.iconChipBtn} ${styles.clearCacheBtn} ${styles.logClearBtn}`}
+                  onClick={() => clearLog()}
+                  title="Clear log"
+                >
+                  🗑
+                </button>
                 {/* Real request, 2026-09-01: the write-service-resolution
                     work added a lot of low-level protocol detail to the
                     log (per-step Unload/StartLoading/WriteProp/mask-
@@ -1218,14 +1277,6 @@ export function ProgrammingView() {
                   }
                 >
                   🐛
-                </button>
-                <button
-                  type="button"
-                  className={`${styles.iconChipBtn} ${styles.clearCacheBtn}`}
-                  onClick={() => clearLog()}
-                  title="Clear log"
-                >
-                  🗑
                 </button>
                 <button
                   type="button"

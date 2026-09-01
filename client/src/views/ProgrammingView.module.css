@@ -243,6 +243,13 @@
   align-items: center;
   gap: 6px;
 }
+/* Real request, 2026-09-01: extra space beyond the container's own 6px
+   gap, so the destructive Clear Log icon (leftmost, no confirm) doesn't
+   sit close enough to the debug/collapse icons to be an accidental-click
+   risk. */
+.logClearBtn {
+  margin-right: 10px;
+}
 .logCollapseBtn {
   background: none;
   border: none;

@@ -436,6 +436,8 @@ export default function App() {
       updateComObjectFlags: projectHandlers.handleUpdateComObjectFlags,
       addScannedDevice: projectHandlers.handleAddScannedDevice,
       applyDeviceStatus: projectHandlers.applyDeviceStatus,
+      applyDeviceVerifyCleared: projectHandlers.applyDeviceVerifyCleared,
+      applyDeviceVerifyResult: projectHandlers.applyDeviceVerifyResult,
     }),
     [projectHandlers],
   );

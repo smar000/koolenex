@@ -293,6 +293,23 @@ export async function init(
   // successful verify.
   migrate('devices', 'unconfirmed_writes_count', 'INTEGER DEFAULT 0');
   migrate('devices', 'unconfirmed_writes_detail', "TEXT DEFAULT '[]'");
+  // Persisted last-verify outcome, added 2026-09-01 - real request: "we
+  // should consider an indicator for both successful verify and failed"
+  // (mirrors the existing status/last_download persistence pattern for
+  // downloads, immediately above). NULL means "never verified" (distinct
+  // from a real 0/false failed verify) - a plain boolean column can't
+  // represent that third state, hence nullable INTEGER, not
+  // "DEFAULT 0"/BOOLEAN. Written by runVerifyDevice() (server/routes/
+  // bus.ts) after a real live bus verify only - the cache-only recompute
+  // path deliberately does not touch this column (see its own doc
+  // comment: it never re-reads the device, so persisting a "verified"
+  // result from it would be misleading). Cleared back to NULL on the next
+  // download (/bus/program-device) and on any edit to data feeding a real
+  // device write while a prior verify result exists
+  // (markDeviceModifiedIfProgrammed, server/routes/shared.ts) - a verify
+  // result only means something until the thing it verified changes.
+  migrate('devices', 'last_verify_match', 'INTEGER');
+  migrate('devices', 'last_verify_at', 'TEXT');
   db.run(`INSERT OR IGNORE INTO settings VALUES ('demo_mode', '')`);
   db.run(`INSERT OR IGNORE INTO settings VALUES ('demo_addr_map', '')`);
 

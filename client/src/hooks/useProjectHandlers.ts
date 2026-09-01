@@ -443,6 +443,8 @@ export function useProjectHandlers(
         ga_receive: string;
         device_id: number;
         device_status?: string;
+        last_verify_match?: null;
+        last_verify_at?: null;
       };
       dispatch({
         type: 'PATCH_COMOBJECT',
@@ -461,6 +463,18 @@ export function useProjectHandlers(
       // Programming page's badge reflects the edit immediately, not only
       // after the next Verify. Real user feedback, 2026-08-31: "If we make
       // a change, we need to indicate this somehow."
+      // Extended 2026-09-01: same reasoning for the persisted verify
+      // indicator - markDeviceModifiedIfProgrammed() also clears
+      // last_verify_match/last_verify_at server-side when a prior verify
+      // result exists; only present in the response (as `null`) when it
+      // actually fired, so 'in' rather than a truthiness check.
+      if ('last_verify_match' in updated) {
+        dispatch({
+          type: 'PATCH_DEVICE',
+          id: updated.device_id,
+          patch: { last_verify_match: null, last_verify_at: null },
+        });
+      }
       if (updated.device_status) {
         dispatch({
           type: 'SET_DEVICE_STATUS',
@@ -505,6 +519,8 @@ export function useProjectHandlers(
         flags: string;
         device_id: number;
         device_status?: string;
+        last_verify_match?: null;
+        last_verify_at?: null;
       };
       dispatch({
         type: 'PATCH_COMOBJECT',
@@ -523,6 +539,13 @@ export function useProjectHandlers(
       // See the matching comments in handleUpdateComObjectGAs above - same
       // server-side markDeviceModifiedIfProgrammed() mechanism, and same
       // local-recompute reasoning for the refreshVerifyCache call.
+      if ('last_verify_match' in updated) {
+        dispatch({
+          type: 'PATCH_DEVICE',
+          id: updated.device_id,
+          patch: { last_verify_match: null, last_verify_at: null },
+        });
+      }
       if (updated.device_status) {
         dispatch({
           type: 'SET_DEVICE_STATUS',
@@ -547,6 +570,44 @@ export function useProjectHandlers(
       void refreshVerifyCache(deviceId);
     },
     [refreshVerifyCache],
+  );
+
+  // Local-only store update (no API call), added 2026-09-01 alongside the
+  // persisted verify indicator - same reasoning as applyDeviceStatus
+  // above: DeviceParameters.tsx's param-value save already gets
+  // last_verify_match/last_verify_at back from the server (see
+  // markDeviceModifiedIfProgrammed(), server/routes/shared.ts) when a
+  // prior verify result existed and this edit invalidated it - this just
+  // reflects that into the client's own devices array immediately,
+  // without a redundant extra round trip.
+  const applyDeviceVerifyCleared = useCallback((deviceId: number) => {
+    dispatch({
+      type: 'PATCH_DEVICE',
+      id: deviceId,
+      patch: { last_verify_match: null, last_verify_at: null },
+    });
+  }, []);
+
+  // The other side of applyDeviceVerifyCleared above - records a REAL
+  // verify outcome (server already persisted this in the same
+  // /bus/verify-device call, see runVerifyDevice()'s own doc comment,
+  // server/routes/bus.ts). Local-only, same reasoning as applyDeviceStatus
+  // - the timestamp is computed here rather than round-tripped from the
+  // server response, which is fine for display purposes (the two are at
+  // most a network round trip apart) without adding a new response field
+  // just for this.
+  const applyDeviceVerifyResult = useCallback(
+    (deviceId: number, match: boolean) => {
+      dispatch({
+        type: 'PATCH_DEVICE',
+        id: deviceId,
+        patch: {
+          last_verify_match: match ? 1 : 0,
+          last_verify_at: new Date().toISOString(),
+        },
+      });
+    },
+    [],
   );
 
   const handleAddScannedDevice = useCallback(
@@ -599,5 +660,7 @@ export function useProjectHandlers(
     handleUpdateComObjectFlags,
     handleAddScannedDevice,
     applyDeviceStatus,
+    applyDeviceVerifyCleared,
+    applyDeviceVerifyResult,
   };
 }

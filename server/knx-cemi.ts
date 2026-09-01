@@ -240,6 +240,28 @@ export function apduMemoryRead(
   return apduConnectedFull(seq, fullApci, addr);
 }
 
+export function apduMemoryWrite(
+  seq: number,
+  address: number,
+  data: Buffer,
+): Buffer {
+  // APCI Memory_Write = 0b1010; the 6-bit byte count sits in octet7[5:0] -
+  // same short-APCI encoding as apduMemoryRead above. Real bug, found
+  // 2026-09-01 against a real HDL device: every prior caller built this
+  // frame by hand via apduConnected() + a leading count byte tacked onto
+  // extraBuf. apduConnected() never sets those low 6 bits at all, so the
+  // count byte callers thought they were sending was actually parsed by the
+  // receiving device as the high byte of the memory address (the real
+  // address/data bytes then land shifted by one), producing a garbage
+  // target address for every legacy Memory_Write chunk. Never caught
+  // earlier because every previously-tested device (Jung 1.1.9/1.1.10) used
+  // the extended write service instead, which already went through
+  // apduConnectedFull() correctly.
+  const fullApci = (APCI.Memory_Write! << 6) | (data.length & 0x3f);
+  const addr = Buffer.from([(address >> 8) & 0xff, address & 0xff]);
+  return apduConnectedFull(seq, fullApci, Buffer.concat([addr, data]));
+}
+
 export function apduMemoryExtendedRead(
   seq: number,
   count: number,

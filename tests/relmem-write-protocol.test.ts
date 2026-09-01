@@ -106,10 +106,13 @@ class FakeWritableMemoryDevice extends KnxConnection {
     }
 
     if (frame.apciName === 'Memory_Write') {
-      // extraBuf layout from apduConnected: [count(1)][addrHi][addrLo][data...]
-      const count = frame.apduData[0]!;
-      const address = (frame.apduData[1]! << 8) | frame.apduData[2]!;
-      const data = frame.apduData.subarray(3, 3 + count);
+      // extraBuf layout from apduMemoryWrite: [addrHi][addrLo][data...] -
+      // count lives in the low 6 bits of the APCI header word itself, not
+      // as a leading data byte (fixed 2026-09-01, see apduMemoryWrite's own
+      // doc comment in knx-cemi.ts for the real-hardware bug this replaced).
+      const count = frame.apdu[1]! & 0x3f;
+      const address = (frame.apduData[0]! << 8) | frame.apduData[1]!;
+      const data = frame.apduData.subarray(2, 2 + count);
       data.copy(this.memory, address);
       // downloadDevice()'s WriteRelMem loop now waits for each chunk's
       // real response before sending the next (2026-08-30 fix, see its own
@@ -167,8 +170,11 @@ class FakeWritableMemoryDevice extends KnxConnection {
         }
         return {
           extended: false,
-          address: (f.apduData[1]! << 8) | f.apduData[2]!,
-          count: f.apduData[0]!,
+          // extraBuf layout from apduMemoryWrite: [addrHi][addrLo][data...];
+          // count lives in the header word's low 6 bits (see the sendCEMI
+          // handler above for the fuller note).
+          address: (f.apduData[0]! << 8) | f.apduData[1]!,
+          count: f.apdu[1]! & 0x3f,
         };
       });
   }
@@ -292,20 +298,27 @@ describe('WriteRelMem protocol-level test — 1.1.10 (real captured memory, base
     ];
     // Base/length chosen so the write region straddles 0xFFFF with the
     // real MEM_CHUNK=228 (see knx-connection.ts's own comment - confirmed
-    // 2026-08-30 against a real ETS capture, not the old, unverified 10):
-    // downloadDevice()'s WriteRelMem loop chunks at 228 bytes; base
-    // 0xFFDC (65500) + off 0 = 0xFFDC (fits in 16 bits), base 0xFFDC + off
-    // 228 = 65728 = 0x100C0 (doesn't).
+    // 2026-08-30 against a real ETS capture, not the old, unverified 10).
+    // downloadDevice()'s WriteRelMem loop chunks at up to 228 bytes for a
+    // chunk resolved to the extended service, but re-caps to 63 for any
+    // chunk resolved to legacy (its 6-bit wire count field, fixed
+    // 2026-09-01 - see knx-connection.ts's own comment on `stepSize`, next
+    // to apduMemoryWrite's doc comment in knx-cemi.ts for the real-hardware
+    // bug this replaced): base 0xFFDC (65500) + off 0 = 0xFFDC fits in 16
+    // bits, so chunk 1 is legacy and capped at 63 bytes; base 0xFFDC + off
+    // 63 = 65563 = 0xFFFB already exceeds 0xFFFF, so chunk 2 (the remaining
+    // 187 bytes, one extended write) switches to extended.
     await dev.downloadDevice('1.1.10', steps, null, null, payload, undefined, {
       resolvedBases: { 4: 0xffdc },
     });
 
     const sentWrites = dev.writesSent();
-    assert.equal(sentWrites.length, 2, 'expected 2 chunks for a 250-byte write at MEM_CHUNK=228');
+    assert.equal(sentWrites.length, 2, 'expected 2 chunks: 63 legacy bytes then 187 extended bytes');
     assert.equal(sentWrites[0]!.extended, false, 'fallback heuristic: first chunk (0xFFDC) fits in 16 bits');
     assert.equal(sentWrites[0]!.address, 0xffdc);
-    assert.equal(sentWrites[1]!.extended, true, 'fallback heuristic: second chunk (0x100C0) does not fit');
-    assert.equal(sentWrites[1]!.address, 0x100c0);
+    assert.equal(sentWrites[0]!.count, 63, 'legacy chunk capped at its 6-bit wire count-field max');
+    assert.equal(sentWrites[1]!.extended, true, 'fallback heuristic: second chunk (0xFFFB) does not fit');
+    assert.equal(sentWrites[1]!.address, 0xffdc + 63);
     assert.deepEqual(
       [...dev.memory.subarray(0xffdc, 0xffdc + 250)],
       [...payload],

@@ -473,6 +473,58 @@ it with a genuine `Memory_Response returned zero bytes` failure. Fixed by cappin
 count to the real limit of whichever service is in use (63 legacy / 255 extended) before building
 the request, rather than only after receiving a response.
 
+### 4.1c Legacy `A_Memory_Write` wire-encoding bug, fixed 2026-09-01 🟢
+
+Every legacy `A_Memory_Write` frame koolenex ever sent was malformed on the wire, in every code
+path that used it (the main `WriteRelMem` chunk loop, the raw `memWrite` download-step handler, and
+`identify()`'s single-byte blink write). The bug had gone uncaught because every previously
+real-hardware-confirmed write (both Jung testbed devices, 1.1.9/1.1.10) resolves to the *extended*
+write service (§4.1) — this legacy path was never actually exercised against real hardware until
+HDL (the first tested device requiring legacy writes) was added to the testbed.
+
+**Root cause**: `A_Memory_Write`'s byte count is a short-APCI field — it belongs in the low 6 bits
+of the 2-byte TPCI/APCI header word itself (the same encoding `apduMemoryRead()` already used
+correctly for the read side). The frame builder every write call site used, `apduConnected()`, has
+no parameter for this at all — it always leaves those 6 bits at zero. Every caller worked around
+this by prepending a literal count byte onto the data buffer passed as `extraBuf`, which is not
+where a real device looks for it: the receiving device parses the two bytes immediately after the
+header as the 16-bit memory address, so that leading "count" byte was read as the *address's own
+high byte*, shifting the intended address and every data byte after it by one position.
+
+**Confirmed from a real capture**, not inferred: a real Full Download to 1.1.20 (HDL) sent a 52-byte
+chunk intended for object 4's real relmem base (`0x1766`) that landed on the wire as address
+`0x3417` with an encoded count of 0 (`0x34` = 52 decimal, the stray count byte, read as the
+address's high byte; `0x17` = the real address's own high byte, read as the low byte) —
+`captures/hdl-full-download-1120-2026-09-01.pcapng`, frame 702, manually decoded byte-for-byte
+against the KNX standard's own short-APCI bit layout (not read from a capture tool's summary
+column — see §8's dissector caveat). Two further chunks in the same session repeat the pattern at
+addresses `0x3417` and `0x3017`, matching the same off-by-one-byte shift for different chunk
+contents. The device's response confirmations stopped arriving for every write after this point,
+and the next three objects' `PID_TABLE_REFERENCE` reads (object indices 1, 2, 3) got no response at
+all — the malformed frame is the direct explanation for that session's cascading "4 unconfirmed
+writes" and completely-skipped Object 3 write, not general device flakiness.
+
+**Fix**: added `apduMemoryWrite()` (`server/knx-cemi.ts`), mirroring `apduMemoryRead()`'s existing,
+correct pattern — count folded into the header word's low 6 bits via `apduConnectedFull()`, address
+and data following as a plain buffer with no leading count byte. All three call sites in
+`server/knx-connection.ts` now use it instead of hand-building the frame through `apduConnected()`.
+
+**A second, related bug surfaced once the encoding was fixed and count was actually reaching the
+wire**: `MEM_CHUNK` (sized up to 228 bytes, correct for the extended service's full 1-byte count
+field) was being used unconditionally for legacy chunks too, whose 6-bit count field caps out at 63
+— exactly the same shape as the already-documented legacy `Memory_Read` count-wraparound bug above,
+just never triggered on the write side because no real count was ever reaching the wire before this
+fix. The address-size fallback heuristic (no known mask version) can resolve a *different* service
+per chunk within the same write when the resolved base straddles `0xFFFF`, so this could not be
+fixed by capping `MEM_CHUNK` once for the whole loop — the `WriteRelMem` chunk loop now computes
+each chunk's own step size from that chunk's own resolved service (`Math.min(MEM_CHUNK, 63)` for
+legacy, `MEM_CHUNK` for extended), decided before slicing rather than after.
+
+Regression-tested against the real captured frame's own bytes
+(`tests/memory-read.test.ts`, `describe('apduMemoryWrite')`) and against the mixed-service chunking
+behavior (`tests/relmem-write-protocol.test.ts`). Not yet re-verified on real hardware — the next
+real Full Download to 1.1.20 is the actual confirmation this fix needs.
+
 ### 4.2 The 9-byte "LoadData" declaration
 
 Before writing the real content, the tool declares what's about to come, as 9 extra bytes on the

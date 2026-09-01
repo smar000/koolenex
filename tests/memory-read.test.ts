@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 
 import {
   apduMemoryRead,
+  apduMemoryWrite,
   parseMemoryResponse,
   apduMemoryExtendedRead,
   apduMemoryExtendedWrite,
@@ -312,6 +313,66 @@ describe('apduMemoryExtendedWrite', () => {
     );
     assert.equal(apdu[2], 5);
     assert.equal(apdu.length, 2 + 1 + 3 + 5); // header(2) + count(1) + addr(3) + data(5)
+  });
+});
+
+describe('apduMemoryWrite', () => {
+  it('encodes seq, byte-count in octet7, and 2-byte address (standard layout)', () => {
+    // seq=0 → TPCI DATA_CONNECTED = 0x10; APCI Memory_Write = 0xA (10);
+    // count=3; address=0x1234. fullApci = (0xA<<6)|3 = 0x283.
+    // word = (0x10<<10)|0x283 = 0x4283.
+    const apdu = apduMemoryWrite(0, 0x1234, Buffer.from([0xaa, 0xbb, 0xcc]));
+    assert.deepEqual(
+      [...apdu],
+      [0x42, 0x83, 0x12, 0x34, 0xaa, 0xbb, 0xcc],
+    );
+  });
+
+  it('carries the sequence number in the TPCI field', () => {
+    // seq=5 → TPCI = 0x15; count=1; address=0x0060.
+    // fullApci = (0xA<<6)|1 = 0x281; word = (0x15<<10)|0x281 = 0x5681.
+    const apdu = apduMemoryWrite(5, 0x0060, Buffer.from([0x01]));
+    assert.deepEqual([...apdu], [0x56, 0x81, 0x00, 0x60, 0x01]);
+  });
+
+  it('derives count from the data length, not a separate parameter', () => {
+    const apdu = apduMemoryWrite(0, 0x0000, Buffer.from([1, 2, 3, 4, 5]));
+    // header(2) + address(2) + data(5); count lives inside the header word,
+    // not as a standalone byte - unlike apduMemoryExtendedWrite's layout.
+    assert.equal(apdu.length, 2 + 2 + 5);
+  });
+
+  it('regression, 2026-09-01: reproduces the real captured HDL bug fix byte-for-byte', () => {
+    // Real bug: every caller used to build this frame by hand via
+    // apduConnected() + a leading count byte tacked onto extraBuf.
+    // apduConnected() never sets the low 6 bits of the header word at all,
+    // so that leading "count" byte was actually parsed by the receiving
+    // device as the high byte of the memory address - shifting everything
+    // by one byte. A real Full Download to 1.1.20 (HDL) sent a 52-byte
+    // chunk meant for object 4's real relmem base (0x1766) and it went out
+    // on the wire as address 0x3417 (0x34 = the stray count byte = 52
+    // decimal, 0x17 = the real address's own high byte) with count=0 -
+    // captured and manually decoded byte-for-byte from
+    // captures/hdl-full-download-1120-2026-09-01.pcapng, frame 702. This
+    // test locks in the fixed encoding: the real address (0x1766) and real
+    // count (52, inside the header) must appear correctly, and the
+    // previously-mis-parsed address (0x3417) must not appear anywhere in
+    // the frame.
+    const chunk = Buffer.alloc(52);
+    chunk[0] = 0x66;
+    const apdu = apduMemoryWrite(3, 0x1766, chunk);
+    // fullApci = (0xA<<6)|52 = 0x2B4; tpci(seq=3) = 0x13;
+    // word = (0x13<<10)|0x2B4 = 0x4EB4. Byte 0 (0x4E) matches the real
+    // captured frame's own TPCI+seq+APCI-high byte exactly (same seq=3,
+    // same object) - only byte 1 differs, since only the low 6 bits (count)
+    // change between the real device's count=0 and this fix's count=52.
+    assert.equal(apdu[0], 0x4e);
+    assert.equal(apdu[1], 0xb4);
+    assert.equal(apdu[2], 0x17);
+    assert.equal(apdu[3], 0x66);
+    assert.equal(apdu[4], 0x66); // first real data byte
+    // The bug's garbage address must not be reachable from this encoding.
+    assert.notEqual((apdu[2]! << 8) | apdu[3]!, 0x3417);
   });
 });
 

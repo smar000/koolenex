@@ -17,6 +17,7 @@ import {
   apduConnected,
   apduControl,
   apduMemoryRead,
+  apduMemoryWrite,
   parseMemoryResponse,
   apduMemoryExtendedRead,
   apduMemoryExtendedWrite,
@@ -1521,11 +1522,7 @@ export class KnxConnection extends EventEmitter {
                 const chunk = op.bytes.subarray(off, off + MEM_CHUNK);
                 const addr = op.addr + off;
                 const seq = nextSeq();
-                const chunkExtra = Buffer.concat([
-                  Buffer.from([chunk.length, (addr >> 8) & 0xff, addr & 0xff]),
-                  chunk,
-                ]);
-                const apdu = apduConnected(seq, 'Memory_Write', chunkExtra);
+                const apdu = apduMemoryWrite(seq, addr, chunk);
                 const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
                 await this.sendCEMI(cemi);
                 await delay(30);
@@ -2231,8 +2228,7 @@ export class KnxConnection extends EventEmitter {
             base = 0;
           }
           resolvedBase.set(j.objIdx, base);
-          for (let off = 0; off < j.table.length; off += MEM_CHUNK) {
-            const chunk = j.table.subarray(off, off + MEM_CHUNK);
+          for (let off = 0; off < j.table.length; ) {
             const seq = nextSeq();
             const addr = base + j.offset + off;
             // A_Memory_Write only carries a 16-bit address - same problem as
@@ -2261,16 +2257,25 @@ export class KnxConnection extends EventEmitter {
             // explicit `false` skip the floor entirely).
             const useExtendedForThisChunk =
               (useExtendedMemory ?? false) || addr > 0xffff;
+            // Legacy A_Memory_Write packs its byte count into a 6-bit APCI
+            // field (max 63) - the extended service's own 1-byte count
+            // field allows MEM_CHUNK up to 228. The address-size fallback
+            // heuristic above can resolve a DIFFERENT service per chunk
+            // (e.g. a write straddling 0xFFFF), so a chunk sized for
+            // extended can't just be sent legacy as-is once it lands there
+            // - it must be re-capped to 63 for this specific chunk, mirroring
+            // the read-side protocolMaxN fix (2026-08-30). Not caught until
+            // 2026-09-01: the legacy write path's separate byte-encoding bug
+            // (see apduMemoryWrite's own doc comment, knx-cemi.ts) meant no
+            // real count was ever actually reaching the wire before now, so
+            // this 6-bit overflow had nothing to silently corrupt yet.
+            const stepSize = useExtendedForThisChunk
+              ? MEM_CHUNK
+              : Math.min(MEM_CHUNK, 63);
+            const chunk = j.table.subarray(off, off + stepSize);
             const apdu = useExtendedForThisChunk
               ? apduMemoryExtendedWrite(seq, addr, chunk)
-              : apduConnected(
-                  seq,
-                  'Memory_Write',
-                  Buffer.concat([
-                    Buffer.from([chunk.length, (addr >> 8) & 0xff, addr & 0xff]),
-                    chunk,
-                  ]),
-                );
+              : apduMemoryWrite(seq, addr, chunk);
             const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
             // Real bug, found live 2026-08-30: this loop used to fire each
             // chunk with a flat 30ms pace and never confirm the device
@@ -2313,6 +2318,7 @@ export class KnxConnection extends EventEmitter {
                 msg: `WriteRelMem ObjIdx=${j.objIdx} (${j.label}) ${off}/${j.table.length}`,
                 pct: ((bytesWrittenSoFar + off) / totalActiveBytes) * 80,
               });
+            off += stepSize;
           }
           bytesWrittenSoFar += j.table.length;
           // Real ETS reads PID_PROGRAM_VERSION (property 13) on the
@@ -2392,15 +2398,8 @@ export class KnxConnection extends EventEmitter {
   async identify(deviceAddr: string): Promise<void> {
     if (!this.connected) throw new Error('Not connected');
 
-    const memWrite = (seq: number, addr: number, dataByte: number): Buffer => {
-      const extra = Buffer.from([
-        0x01,
-        (addr >> 8) & 0xff,
-        addr & 0xff,
-        dataByte,
-      ]);
-      return apduConnected(seq, 'Memory_Write', extra);
-    };
+    const memWrite = (seq: number, addr: number, dataByte: number): Buffer =>
+      apduMemoryWrite(seq, addr, Buffer.from([dataByte]));
 
     await this.managementSession(deviceAddr, async ({ nextSeq }) => {
       const seq0 = nextSeq();

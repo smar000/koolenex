@@ -342,6 +342,42 @@ export interface ParamModel {
   // Object 3 space for every com object the app could ever expose, not
   // just the ones a given device instance currently links.
   groupObjectTableSize?: number;
+  // 🔴 SPECULATIVE - a real, unproven hypothesis for which memory-write
+  // service (legacy A_Memory_Write vs A_MemoryExtended_Write) a device's
+  // app actually requires, from the app's own real `IsSecureEnabled`
+  // attribute (`<ApplicationProgram>` root element - real request,
+  // 2026-08-31). NEEDS REAL-HARDWARE TESTING before being trusted -
+  // added because it's consistent with every real data point available
+  // right now, not because it's been independently confirmed causal.
+  //
+  // Real background: mask `0x07B0` ("System B") alone does NOT reliably
+  // predict this - real ETS uses extended for two real mask-0x07B0
+  // devices (1.1.9, 1.1.10, both Albrecht Jung) even at addresses that
+  // fit in 16 bits, confirmed by a verbatim-replay experiment
+  // (2026-08-28) and reconfirmed via a fresh live capture (2026-08-31) -
+  // but uses LEGACY for a third mask-0x07B0 device (HDL `M/AG40B.1`,
+  // this project's own testbed) at an address that also fits in 16 bits
+  // (confirmed live, 2026-08-31). The one clean, binary distinction
+  // found across all four real apps in this project's own testbed
+  // `.knxproj`: `IsSecureEnabled="true"` is present on all three Jung
+  // apps (the two confirmed-extended ones, plus the router's own base
+  // app, untested) and completely ABSENT (not `false` - never written)
+  // from the HDL app (confirmed-legacy). A segment-SIZE-based theory
+  // (152 vs 8178/10433 bytes) was considered too - also consistent with
+  // the same data - but rejected in favor of this one specifically
+  // because it's a real declared boolean, not a threshold guessed
+  // across the wide, unconfirmed gap between the two known segment
+  // sizes.
+  //
+  // What would actually confirm or kill this: a device/app with
+  // IsSecureEnabled=false (or absent) and a LARGE parameter segment, or
+  // one with IsSecureEnabled=true and a SMALL segment - neither
+  // combination has ever been tested. Until then, treat this as the
+  // best available guess, not a settled rule. See CLAUDE.md's (koolenex
+  // repo) standing-gaps list and docs/knx-device-write-protocol.md's
+  // "Genuinely open questions" section - both should carry this same
+  // caveat; update both if this gets confirmed OR disproven later.
+  isSecureEnabled?: boolean;
 }
 
 // ─── AppIndex return type ───────────────────────────────────────────────────
@@ -396,6 +432,11 @@ export interface AppIndex {
   // linked/active subset, is the right basis for Object 3's real size. 0 if
   // the app declares no ComObjects at all.
   maxComObjectNumber: number;
+  // 🔴 SPECULATIVE, not yet confirmed - real request, 2026-08-31. See
+  // ParamModel.isSecureEnabled's own doc comment (same file) for the full
+  // real-hardware evidence this is based on and what still needs testing
+  // before this can be trusted as a real rule.
+  isSecureEnabled: boolean;
   paramRefKeys: string[];
   moduleKeys: string[];
   getDefault: (prKey: string) => string | null;
@@ -443,6 +484,10 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
   if (!ap) return null;
 
   const appId = attr(ap, 'Id');
+  // 🔴 SPECULATIVE input for the memory-write-service guess - see
+  // AppIndex.isSecureEnabled's own doc comment for the full real-hardware
+  // evidence and what's still needed to actually confirm this.
+  const isSecureEnabled = attr(ap, 'IsSecureEnabled') === 'true';
 
   // Parse entire app XML with order-preserving parser to extract Dynamic sections
   // and ParameterBlock indent levels (leading spaces in Text attributes that the
@@ -1793,6 +1838,7 @@ export function buildAppIndex(buf: Buffer): AppIndex | null {
     buildParamModel,
     appId,
     maxComObjectNumber,
+    isSecureEnabled,
     paramRefKeys: Object.keys(paramRefDefs),
     moduleKeys: Object.keys(modArgs), // "{appId}_MD-n_M-k" — one per instantiated module
     getDefault,

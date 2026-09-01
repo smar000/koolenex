@@ -266,6 +266,25 @@ export async function init(
   migrate('catalog_items', 'is_power_supply', 'INTEGER DEFAULT 0');
   migrate('catalog_items', 'is_coupler', 'INTEGER DEFAULT 0');
   migrate('catalog_items', 'is_rail_mounted', 'INTEGER DEFAULT 0');
+  // Real request, 2026-08-31: `LastUsedAPDULength` was already being
+  // parsed off each real `<DeviceInstance>` (ets-parser.ts) but silently
+  // dropped before reaching the DB - never persisted, never used. Found
+  // while investigating real per-device chunk-size limits
+  // (`PID_MAX_APDULENGTH`, see knx-connection.ts's own doc comment on
+  // `_resolveMaxApduLength()`): the project file already caches this
+  // value from ETS's own last real session with the device (confirmed
+  // exact match against a live property-56 read for one real device,
+  // 55==55), so it's a real, free, no-bus-round-trip source - preferred
+  // over the live read when present, which now only serves as a fallback
+  // for a device never downloaded to from this project.
+  migrate('devices', 'apdu_length', "TEXT DEFAULT ''");
+  // Count/detail of writes whose response never arrived during this
+  // device's last download - see knx-connection.ts's DownloadResult doc
+  // comment. Persisted so the "verify recommended" indicator survives a
+  // reload; cleared (set back to 0/'[]') on the next download or a
+  // successful verify.
+  migrate('devices', 'unconfirmed_writes_count', 'INTEGER DEFAULT 0');
+  migrate('devices', 'unconfirmed_writes_detail', "TEXT DEFAULT '[]'");
   db.run(`INSERT OR IGNORE INTO settings VALUES ('demo_mode', '')`);
   db.run(`INSERT OR IGNORE INTO settings VALUES ('demo_addr_map', '')`);
 

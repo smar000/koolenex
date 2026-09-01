@@ -181,20 +181,213 @@ this is unlikely to mean "an error occurred"; more likely a status/return code w
 meaning per the KNX spec isn't confirmed here) plus a 2-byte trailing value that looks like a
 checksum of the written data 🔴 (pattern observed, not verified against a specific algorithm).
 
-**Mask-version gating** (the most consequential finding here — it directly gates whether a write
-silently fails):
+**Mask-version gating — 🔴 DISPROVEN as a sole/reliable rule, 2026-08-31, see the
+`IsSecureEnabled` hypothesis below for the current candidate replacement**:
 
-- 🟢 Both real devices tested report mask `0x07B0` ("System B").
-- 🟢 Real ETS used the extended write service exclusively for both.
+- 🟢 Both real Jung devices tested (1.1.9, 1.1.10) report mask `0x07B0` ("System B") and both
+  used the extended write service exclusively — reconfirmed with a fresh live capture 2026-08-31,
+  same result.
 - 🟢 A verbatim byte-for-byte replay of a real captured ETS write against real hardware
   persisted correctly. An identical write attempted using the legacy service instead (chosen
   because the target address happened to fit in 16 bits) failed to persist — reproducibly, with
-  no error returned at any protocol layer.
-- 🟡 **INFERRED, not proven**: that mask `0x07B0` ⇒ "requires the extended service" generalizes
-  to every System B device, not just these two. Reasonable given the shape of KNX's own device
-  classification, but the sample is two devices from one manufacturer.
+  no error returned at any protocol layer. (This was originally believed to be an address-size
+  wraparound bug — koolenex genuinely was using the 16-bit legacy service unconditionally at the
+  time — but the controlled replay specifically isolated a SEPARATE effect: even a legacy write
+  built for an address that itself fits within 16 bits still failed to persist, meaning the fix
+  needed is not just "switch to extended once the address exceeds 0xFFFF".)
+- 🔴 **The generalization "mask `0x07B0` ⇒ requires the extended service" is now known FALSE**: a
+  third mask-`0x07B0` device (HDL `M/AG40B.1`, this project's own testbed, added 2026-08-31) used
+  **legacy** `A_Memory_Write` for its own real Full Download — confirmed via a live capture, at an
+  address (`0x170E`) that also fits comfortably in 16 bits. koolenex forcing extended for this
+  device (inherited from the mask-based rule) produced a real, reproducible silent write failure —
+  the device link-layer ACKed every chunk but never sent the real
+  `MemoryExtended_Write_Response`, and a direct read-back afterward confirmed the content never
+  persisted. Mask alone cannot be trusted as the discriminant; do not reintroduce a mask-only rule
+  without new evidence.
 - 🔴 Whether legacy (pre-System-B) mask families genuinely *require* the legacy service, or would
-  also tolerate the extended one, is untested — no such device has ever been available to test.
+  also tolerate the extended one, is still untested — no such device has ever been available to
+  test.
+
+**Candidate rule #1 (`IsSecureEnabled`) — 🔴 SPECULATIVE, NOT YET CONFIRMED, real request
+2026-08-31**: comparing the real `<ApplicationProgram>` XML of all four apps in this project's own
+testbed `.knxproj`, the one clean, binary signal consistent with every known real data point is
+the app's own `IsSecureEnabled` attribute — `true` on all three Jung apps (including both
+confirmed-extended devices, 1.1.9/1.1.10), completely **absent** (not `false` — never written at
+all) from the HDL app (confirmed-legacy). Implemented in `server/ets-app.ts`
+(`ParamModel.isSecureEnabled`/`AppIndex.isSecureEnabled`) and threaded through
+`DownloadExtra.isSecureEnabled` into `downloadDevice()`'s write-service decision
+(`server/knx-connection.ts`) — now the second fallback layer, since candidate rule #2 below
+(a live, per-device signal) takes priority when available; the real mask read remains the third
+fallback, and the plain address-size heuristic (`addr > 0xFFFF`) stays underneath all three as a
+hard floor that can never be suppressed by any of them.
+
+A segment-SIZE-based theory (HDL's segment is 152 bytes; the two Jung devices' segments are 8178
+and 10433 bytes) was considered too, and is also consistent with the same data — rejected as the
+implemented rule specifically because it would require guessing a numeric threshold across a wide,
+completely unconfirmed gap (anywhere from ~200 to ~4000 bytes would fit the three known points
+equally well), whereas `IsSecureEnabled` is a real declared boolean requiring no threshold at all.
+
+**A fourth real device reinforces the same pattern, same day**: Jung 5292 1ST (a 2-gang
+pushbutton panel, product `M-0004_H-4.20.2F.2F.2052921ST-0-O000A_P-52921ST`, app
+`M-0004_A-D142-21-8848-O000A`) — a genuine **live production device** at a second, unrelated real
+site, downloaded to directly via real ETS (never touched by koolenex, so zero risk to the live
+installation). `IsSecureEnabled="true"`, segment `Size="6152"`, real capture confirms
+`MemExtWrite` used throughout, including at least one chunk (`X=$00F000`) whose address fits
+comfortably in 16 bits — the same decisive shape as the original 1.1.9 evidence. 4 for 4 now
+(`IsSecureEnabled=true` → extended on all three Jung/production apps; absent → legacy on the one
+HDL app), and the segment-size gap the size-based theory would need to resolve narrows
+considerably too (152↔6152, down from 152↔8178).
+
+**This is still only a hypothesis that happens to fit today's small (five-app, two-manufacturer)
+sample — not an independently confirmed rule**, and every one of the confirming data points so
+far is a real ETS write, not a koolenex one (koolenex's own extended-service write to a device
+with `IsSecureEnabled` absent has been tested exactly once — HDL, and it correctly used legacy per
+this rule, matching real ETS — but that's the only case where koolenex's OWN write, gated on this
+rule, has been confirmed against real hardware end-to-end; the Jung/production devices' evidence
+is entirely from watching what real ETS does, not from koolenex writing to them). What would
+actually settle it as a rule, not just a pattern: a real device/app with `IsSecureEnabled=false`
+(or absent) and a LARGE parameter segment, or one with `IsSecureEnabled=true` and a SMALL segment
+— neither combination has ever been tested. Re-test against a new device/app before trusting this
+in any context where a silent write failure would matter. Tracked in the `knx-ets-manager` repo's
+`CLAUDE.md` ("Track B write-path status" section, standing-gaps list) too — update both if this
+gets confirmed or disproven.
+
+**Candidate rule #2 / real mechanism (`PID_MCB_TABLE`, property 27) — 🟢 CONFIRMED for apps that
+declare it.** Property 27 is `PID_MCB_TABLE` ("Memory Control Table" — confirmed against
+calimero-core's `properties.xml`, `<usage>subsegmentation of memory space and checksum</usage>`,
+`pdt="24"`). Its value is a sequence of 8-byte elements (size prefix, a status byte, and a
+checksum); an app can declare more than one element per object via `Count` on its
+`LdCtrlLoadImageProp` step.
+
+The write-service decision is determined by **byte 5 of this property's value for object index 4**,
+and the mechanism differs by how the app declares it:
+
+- **Apps that declare `LdCtrlWriteProp` for `ObjIdx="4" PropId="27"`** (e.g. the Jung apps in this
+  project's testbed and at the Hampden Way site): the value ETS writes is literal `InlineData`
+  baked into the app XML at compile time, not computed or read from the device. Byte 5 of that
+  literal data is ground truth for the write service, available statically from the project file —
+  no bus round-trip required. Example (Hampden Way pushbutton, `M-0004_A-D142-21-8848-O000A`):
+
+  ```xml
+  <LdCtrlWriteProp ObjIdx="4" PropId="27" Verify="false" InlineData="00001804003300000000" />
+  <LdCtrlWriteProp ObjIdx="4" PropId="27" StartElement="2" Verify="false" InlineData="00000004013300000000" />
+  ```
+
+  Byte 5 here is `0x33` → extended memory writes, matching the app's own known-correct behavior.
+  These apps also declare the separate, read-only `LdCtrlLoadImageProp` step for all four objects
+  (a verification pass, confirmed by real capture to run after every write and never change the
+  value) — reading it back simply returns what `LdCtrlWriteProp` already wrote.
+
+- **Apps with no `LdCtrlWriteProp` for `PropId="27"`** (e.g. HDL's `M-0073_A-20A9-10-EAA5`): there
+  is no static value to read. `PID_MCB_TABLE` is only ever read via `LdCtrlLoadImageProp`, and real
+  capture evidence shows this read happening as a trailing verification pass, after every write for
+  the session has already gone out — too late to have informed anything. For these apps, byte 5 of
+  a *live* read is used as a fallback correlate (`0xFF` = legacy, confirmed across 5 real HDL
+  captures), but the real decision mechanism ETS itself uses for this app family is not confirmed.
+
+**Implementation** (`server/knx-connection.ts`): `downloadDevice()` scans its `steps` for a
+`WriteProp` step with `propId === 27` before resolving `useExtendedMemory`; when found, byte 5 of
+its `data` is used directly and nothing else (`IsSecureEnabled`, the mask read, or the live
+`LoadImageProp` read) is allowed to override it. `MEM_CHUNK` is recomputed to match whenever the
+resolution changes.
+
+**Confirmed against real captures on two independent apps** — a re-run of testbed device 1.1.10,
+and the actual production Hampden Way pushbutton (`192.168.0.14`, device 1.1.240, serial
+`000A06CB3118`, "PB4-240: Bedroom 4 Entrance") — both writing `PID_MCB_TABLE` for object 4 early in
+the session, well before any data write, matching their apps' own `LdCtrlWriteProp` `InlineData`
+exactly. HDL's app was checked directly and confirmed to have no such declaration.
+
+🔴 **Open**: the exact KNX-spec meaning of byte 5 is not confirmed by any primary source checked
+(calimero's `properties.xml`, Wireshark's dissector, KNX Association's support forum). For apps
+without a declared `LdCtrlWriteProp`, the real write-service decision mechanism remains unknown —
+only that reading `PID_MCB_TABLE` isn't it. What would settle the open question: a device/app
+without `LdCtrlWriteProp` for property 27 whose live byte-5 read doesn't match its actual required
+service — not yet seen.
+
+### 4.1a Real per-device memory-chunk size ceiling (`PID_MAX_APDULENGTH`) 🟢
+
+**A device's own declared max APDU length — not a fixed protocol-theoretical constant — is the
+real, deterministic basis for safe chunk sizing**, confirmed 2026-08-31 after a real Full Download
+to the HDL device stalled silently: koolenex sent a single 152-byte `MemoryExtended_Write` chunk
+(well under the previously-assumed-universal 228-byte "safe" ceiling, itself only ever confirmed
+against 1.1.10) and got no response at all — not a NAK, total silence — leaving the device
+backlogged and unable to answer the next few objects' `PID_TABLE_REFERENCE` reads (confirmed via
+direct capture comparison against real ETS: those reads came back genuinely NAK'd on koolenex's
+own attempt, not merely unanswered).
+
+Real ETS reads `PID_MAX_APDULENGTH` (property 56, object index 0 — the Device Object; confirmed
+against this project's own bundled KNX Master Data, `PID-0-56`, "Max. APDU-Length") once per
+session and computes the exact safe chunk size from it — this is *why* "ETS sends larger chunks to
+other devices": a device with a larger declared value gets a larger real chunk, deterministically,
+no trial-and-error involved. Verified by decoding a real ETS-written frame's raw wire bytes against
+the HDL device: `PID_MAX_APDULENGTH` read back `55`; the real wire NPDU Length byte on ETS's own
+52-byte `MemWrite` to the same device was `0x37`=`55` too — the classic KNX convention that the
+wire Length field equals (real octet count − 1), so real capacity = `55+1` = `56` octets.
+Subtracting the real per-service header size — read directly off the APDU-builder functions'
+own byte layout (`knx-cemi.ts`), not a separate guess — gives the exact formula:
+
+```
+maxUsableChunk = (declared PID_MAX_APDULENGTH value + 1) − headerBytes
+  legacy:   headerBytes = 4  (2 TPCI+APCI+count, packed together, + 2-byte address)
+  extended: headerBytes = 6  (2 TPCI+APCI_EXT + 1-byte count + 3-byte address)
+```
+
+For the HDL device this gives `(55+1)−4 = 52` — exactly the number found by direct empirical
+bisection of real legacy reads against the same device earlier the same session (52 succeeds, 53
+fails, every time, independent of starting address). Implemented in
+`KnxConnection._resolveMaxApduLength()`/`maxChunkFromApduLength()` (`server/knx-connection.ts`),
+used by both the read path (`readMemory()`/`readMemoryMany()`) and the write path
+(`downloadDevice()`'s `MEM_CHUNK`), replacing the fixed 63/255 (reads) and 228 (writes) constants
+with this per-device real value, falling back to those same constants only when the property read
+fails. Confirmed end-to-end on real hardware the same day: a fresh Full Download to the HDL device,
+correctly chunked at ~50 bytes (safely under the real 52-byte ceiling), completed with zero NAKs
+and all four interface objects (parameter memory, GA table, Association table, Object 3) genuinely
+persisting — independently verified via direct read-back after the download.
+
+🟢 **The extended-service header formula (6 bytes) is now independently cross-checked too**, not
+just derived from code — the project file itself caches a real device's own `PID_MAX_APDULENGTH`
+(see §4.1b below): 1.1.10's cached value is `233`, and `(233+1)−6 = 228` — exactly the real
+228-byte extended chunk ceiling already established from a separate 2026-08-30 capture analysis, a
+genuine independent confirmation, not a coincidence of re-deriving the same number.
+
+### 4.1b The project file caches this value — no live read needed for a previously-downloaded device 🟢
+
+**Real ETS stores its own resolved `PID_MAX_APDULENGTH` directly on each `<DeviceInstance>`
+element in the `.knxproj`** — `LastUsedAPDULength` and `ReadMaxAPDULength`, confirmed present on
+every real device instance checked across two separate real projects (this project's own testbed,
+and a second, unrelated live/production site). Found 2026-08-31 while cross-checking the
+`IsSecureEnabled` hypothesis against a fourth real device (Jung 5292 1ST, a production device an
+ETS Full Download was done to directly — not touched by koolenex at all, since it's a live
+production device).
+
+Confirmed exact match against a live read for one real device: HDL's cached
+`LastUsedAPDULength`/`ReadMaxAPDULength` are both `55`, identical to the live `PID_MAX_APDULENGTH`
+property-56 read decoded earlier the same session (§4.1a). For 1.1.9 the two cached fields
+*differ* — `LastUsedAPDULength=239`, `ReadMaxAPDULength=248` — 🟡 **INFERRED, not independently
+confirmed**: `ReadMaxAPDULength` looks like the device's raw declared capability (what a live
+property-56 read would itself return), while `LastUsedAPDULength` is what ETS actually chose to
+use for its last real write — slightly less, plausibly a safety margin or a router/tunnel-imposed
+cap layered on top of the device's own raw maximum. This distinction has not been tested directly
+(e.g. by doing a live property-56 read against 1.1.9 and comparing it to both cached values) - said
+here as the most likely reading of the two field names, not a confirmed fact.
+
+**Implemented 2026-08-31**: `ets-parser.ts` already parsed `LastUsedAPDULength` per device
+(`apdu_length` on the parsed device record) but silently dropped it before it ever reached the
+database — never persisted, never used anywhere. Fixed: `devices.apdu_length` is now a real
+persisted column (`server/db.ts` migration, `server/routes/projects.ts`'s insert), threaded
+through `buildDeviceProgramming()` → `DownloadExtra.cachedMaxApduLength` /
+`KnxConnection.readMemory()`/`readMemoryMany()`'s new optional parameter, and preferred over the
+live `_resolveMaxApduLength()` read whenever present — a real device that's already been
+downloaded to from this project needs zero extra bus round-trips to get its correct chunk size.
+The live read remains the fallback for a device that's never been downloaded to from this project
+(no cached value yet, e.g. right after import, before any real session).
+
+🔴 This has not yet been exercised end-to-end on real hardware in its NEW cached-path form (the
+HDL Full Download that confirmed the 52-byte ceiling used the LIVE property-56 read, since the
+caching code didn't exist yet at that point in the same session) - typechecked and covered by the
+existing PID_MAX_APDULENGTH test suite (which exercises the underlying `maxChunkFromApduLength()`
+formula, not the new cached-value plumbing specifically), but a real download that actually takes
+the cached-value branch (not the live-read fallback) has not been independently confirmed yet.
 
 **Gotcha**: at least one common packet-capture tool's own protocol dissector has repeatedly
 mis-displayed this write's target address in its one-line summary view (observed showing one

@@ -65,8 +65,8 @@ export function insertParsedData(
     const { lastInsertRowid } = run(
       `
       INSERT OR REPLACE INTO devices
-      (project_id,individual_address,has_address,name,description,comment,installation_hints,manufacturer,model,order_number,serial_number,product_ref,area,line,device_type,status,last_modified,last_download,app_number,app_version,space_id,medium,parameters,app_ref,param_values,model_translations,bus_current,width_mm,is_power_supply,is_coupler,is_rail_mounted)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (project_id,individual_address,has_address,name,description,comment,installation_hints,manufacturer,model,order_number,serial_number,product_ref,area,line,device_type,status,last_modified,last_download,app_number,app_version,space_id,medium,parameters,app_ref,param_values,model_translations,bus_current,width_mm,is_power_supply,is_coupler,is_rail_mounted,apdu_length)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         pid,
         d.individual_address,
@@ -99,6 +99,13 @@ export function insertParsedData(
         d.is_power_supply ? 1 : 0,
         d.is_coupler ? 1 : 0,
         d.is_rail_mounted ? 1 : 0,
+        // Real request, 2026-08-31: `LastUsedAPDULength`, off the real
+        // `<DeviceInstance>` XML - was already parsed (ets-parser.ts) but
+        // silently dropped before this insert, never persisted. See
+        // db.ts's migration comment for the real evidence this is worth
+        // keeping (an exact match against a live PID_MAX_APDULENGTH
+        // read for one real device).
+        d.apdu_length || '',
       ],
     );
     deviceIdMap[d.individual_address] = lastInsertRowid;

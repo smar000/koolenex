@@ -127,6 +127,11 @@ export interface DownloadProgress {
   // every subsequent message (found, ambiguous, written, confirmed, or a
   // real error) omits it, which is the client's own cue to dismiss.
   awaitingButton?: boolean;
+  // Present only on the final "Download complete" message - count of
+  // writes whose response never arrived during this download. 0 (or
+  // absent) means every write was confirmed; see DownloadResult's own doc
+  // comment for the full detail list this summarizes.
+  unconfirmedWrites?: number;
 }
 
 /** Extra context needed to plan an AbsoluteSegment (MDT-style) download. */
@@ -166,6 +171,37 @@ export interface DownloadExtra {
   // rather than trying to replicate the checksum-based skip - a deliberately
   // conservative choice pending real-hardware validation of this exact path.
   groupObjectTable?: Buffer | null;
+  // 🔴 SPECULATIVE - see ParamModel.isSecureEnabled's own doc comment
+  // (ets-app.ts) for the full real-hardware evidence and status. Used by
+  // downloadDevice()'s memory-write-service decision as a candidate
+  // signal alongside the real mask-version read; NEEDS REAL-HARDWARE
+  // TESTING before being trusted as a settled rule - don't cite it as
+  // confirmed elsewhere.
+  isSecureEnabled?: boolean;
+  // 🟢 CONFIRMED real, 2026-08-31 - this device's own cached
+  // `LastUsedAPDULength` from the project file (`Device.apdu_length`,
+  // shared/types.ts), preferred over a live `PID_MAX_APDULENGTH`
+  // property-56 read when present (verified to exactly match a live
+  // read for one real device: 55==55) - see
+  // `KnxConnection._resolveMaxApduLength()`'s own doc comment for the
+  // full real-hardware evidence behind the live read this replaces.
+  // `null`/undefined when the device has never been downloaded to from
+  // this project yet - falls back to the live read in that case.
+  cachedMaxApduLength?: number | null;
+}
+
+// ── Download result type ───────────────────────────────────────────────────────
+// downloadDevice() completing without throwing means the protocol sequence
+// ran to completion, not that every write was confirmed — a device may not
+// answer an individual write (a real, occasionally-legitimate occurrence,
+// see the per-chunk write loop's own comment), and previously that was only
+// ever logged, with no way for a caller to detect or report it. This
+// surfaces a count and per-write detail of every write whose response never
+// arrived, so callers can report a real "completed with N unconfirmed
+// writes" state instead of an unconditional success.
+export interface DownloadResult {
+  unconfirmedWrites: number;
+  unconfirmedDetails: string[];
 }
 
 // ── Device info type ───────────────────────────────────────────────────────────
@@ -906,16 +942,34 @@ export class KnxConnection extends EventEmitter {
     length: number,
     chunkSize: number = 228,
     onChunk?: (bytesRead: number) => void,
+    // Real request, 2026-08-31: the project file's own cached
+    // `LastUsedAPDULength` (see `DownloadExtra.cachedMaxApduLength`'s own
+    // doc comment for the real evidence), preferred over a live
+    // property-56 read when the caller has it - a real, free source
+    // (no bus round-trip), confirmed to exactly match a live read for
+    // one real device. `undefined`/`null` (the default) falls back to
+    // the live read exactly as before this parameter existed.
+    cachedMaxApduLength?: number | null,
   ): Promise<Buffer> {
     if (!this.connected) throw new Error('Not connected');
     let out: Buffer = Buffer.alloc(length);
     await this.managementSession(deviceAddr, async (fns) => {
+      const useExtendedMemory = await this._resolveMemoryServiceForSession(
+        fns,
+        deviceAddr,
+      );
+      const maxApduLengthValue =
+        cachedMaxApduLength != null
+          ? cachedMaxApduLength
+          : await this._resolveMaxApduLength(fns, deviceAddr);
       out = await this.readRegionInSession(
         fns,
         deviceAddr,
         address,
         length,
         chunkSize,
+        useExtendedMemory,
+        maxApduLengthValue,
         onChunk,
       );
     });
@@ -943,11 +997,21 @@ export class KnxConnection extends EventEmitter {
     regions: Array<{ address: number; length: number }>,
     chunkSize: number = 228,
     onChunk?: (bytesRead: number) => void,
+    // See readMemory()'s identical parameter for the real evidence/doc.
+    cachedMaxApduLength?: number | null,
   ): Promise<Buffer[]> {
     if (!this.connected) throw new Error('Not connected');
     const results: Buffer[] = [];
     let cumulative = 0;
     await this.managementSession(deviceAddr, async (fns) => {
+      const useExtendedMemory = await this._resolveMemoryServiceForSession(
+        fns,
+        deviceAddr,
+      );
+      const maxApduLengthValue =
+        cachedMaxApduLength != null
+          ? cachedMaxApduLength
+          : await this._resolveMaxApduLength(fns, deviceAddr);
       for (const r of regions)
         results.push(
           await this.readRegionInSession(
@@ -956,6 +1020,8 @@ export class KnxConnection extends EventEmitter {
             r.address,
             r.length,
             chunkSize,
+            useExtendedMemory,
+            maxApduLengthValue,
             onChunk
               ? (n) => {
                   cumulative += n;
@@ -966,6 +1032,110 @@ export class KnxConnection extends EventEmitter {
         );
     });
     return results;
+  }
+
+  /**
+   * Determines which memory-READ service (legacy A_Memory_Read vs
+   * A_MemoryExtended_Read) a device actually requires, from its real mask
+   * version (A_DeviceDescriptor_Read) - mirrors the identical real-
+   * hardware-confirmed gating already used for WriteRelMem's memory
+   * WRITES (see downloadDevice()'s own inline version of this same read,
+   * and its extensive comment on why: real ETS itself reads the device
+   * descriptor as the first frame of every session).
+   *
+   * Real bug, found live 2026-08-31: readRegionInSession() picked its
+   * service purely from whether the requested address numerically fits
+   * in 16 bits, with no mask-version check at all - unlike the write
+   * path, which already learned (2026-08-28) that a mask `0x07B0`
+   * ("System B") device can silently fail a legacy-service WRITE at an
+   * address that happens to fit in 16 bits. This is the read-side
+   * analogue of that exact problem: a real Verify against a mask 0x07B0
+   * device (HDL `M/AG40B.1`, freshly re-addressed to 1.1.20) got a
+   * genuine, reproducible zero-byte `A_Memory_Read` response at a real
+   * in-range address (`0x1766`, seen twice, identical both times) - while
+   * real ETS reads that exact same device/address without issue
+   * ("ETS reads it fine" / "I just did a read on ETS on the device
+   * without any issues" - ruling out "device still settling after
+   * reboot" as the explanation). ETS uses the extended service for this
+   * mask family for reads just as much as writes; koolenex's read path
+   * only ever did that for writes. Same fallback semantics as the write
+   * path: if the mask can't be determined, fall back to the original
+   * address-size heuristic rather than guessing.
+   */
+  private async _resolveMemoryServiceForSession(
+    fns: ManagementSessionFns,
+    deviceAddr: string,
+  ): Promise<boolean | null> {
+    const { waitResponse } = fns;
+    try {
+      const apdu = apduGroup('DeviceDescriptor_Read');
+      const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
+      const respP = waitResponse('DeviceDescriptor_Response', 3000);
+      await this.sendCEMI(cemi);
+      const resp = await respP;
+      const mask =
+        resp.apduData.length >= 2
+          ? (resp.apduData[0]! << 8) | resp.apduData[1]!
+          : null;
+      if (mask == null) return null;
+      const useExtendedMemory = (mask & 0xff) === 0xb0;
+      logger.info(
+        'knx',
+        `DeviceDescriptor mask=0x${mask.toString(16).padStart(4, '0')} ` +
+          `(${useExtendedMemory ? 'SystemB family - extended memory reads' : 'legacy family - address-size heuristic applies'})`,
+        { deviceAddr },
+      );
+      return useExtendedMemory;
+    } catch (_e) {
+      logger.info(
+        'knx',
+        'No DeviceDescriptor_Response received for memory read - falling back to address-size heuristic',
+        { deviceAddr },
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Resolves a device's own declared `PID_MAX_APDULENGTH` (property 56 on
+   * objIdx 0, the Device Object - confirmed against this project's own
+   * bundled KNX Master Data, `data/knx_master_*.xml`: `PID-0-56`, "Max.
+   * APDU-Length") - the real, per-device basis for computing a safe
+   * A_Memory_Read/Write or A_MemoryExtended_Read/Write chunk size. See
+   * `maxChunkFromApduLength()`'s own doc comment for the full derivation
+   * and real-hardware evidence; this method only performs the read.
+   * `restartDevice()` already reads this same property as part of its
+   * pre-Restart identity sequence, but discards the value - this is a
+   * dedicated, value-preserving read for the read/write chunk-sizing use.
+   */
+  private async _resolveMaxApduLength(
+    fns: ManagementSessionFns,
+    deviceAddr: string,
+  ): Promise<number | null> {
+    const { waitResponse, nextSeq } = fns;
+    try {
+      const seq = nextSeq();
+      const apdu = apduPropertyValueRead(seq, 0, 56);
+      const respP = waitResponse('OTHER', 3000);
+      await this.sendCEMI(buildCEMI(this.localAddr, deviceAddr, apdu, false));
+      const res = await respP;
+      const data = res?.apduData;
+      // 4-byte PropertyValue_Response header (objIdx, propId, count,
+      // startIndex) + the value itself - PID_MAX_APDULENGTH is PDT-4
+      // (2-byte unsigned), matching every real value seen so far (e.g.
+      // 0x0037 for the HDL device this fix was built against).
+      if (!data || data.length < 6) return null;
+      const value = data.readUInt16BE(4);
+      logger.info('knx', `PID_MAX_APDULENGTH=${value}`, { deviceAddr });
+      return value;
+    } catch (_e) {
+      logger.info(
+        'knx',
+        'No PID_MAX_APDULENGTH response - falling back to default chunk size',
+        { deviceAddr },
+      );
+      return null;
+    }
   }
 
   /**
@@ -981,6 +1151,8 @@ export class KnxConnection extends EventEmitter {
     address: number,
     length: number,
     chunkSize: number,
+    useExtendedMemory: boolean | null,
+    maxApduLengthValue: number | null,
     onChunk?: (bytesJustRead: number) => void,
   ): Promise<Buffer> {
     const { waitResponse, nextSeq } = fns;
@@ -999,7 +1171,28 @@ export class KnxConnection extends EventEmitter {
       // that one, so this is deliberately the minimum change, not a blanket
       // switch to extended, based on real-hardware evidence of which
       // service each device family actually answers.
+      //
+      // 🔴 REVERTED, 2026-08-31, same live session: briefly gated this on
+      // the device's real mask version instead (mirroring WriteRelMem's
+      // own real, hardware-confirmed mask-0x07B0-requires-extended
+      // finding - see _resolveMemoryServiceForSession()'s own doc
+      // comment, kept below, unused for now). That generalization from
+      // "writes need extended on this mask" to "reads need extended on
+      // this mask" was never independently confirmed and turned out
+      // wrong on the first real test: forcing extended reads on the real
+      // HDL 1.1.20 device changed the failure from a prompt zero-byte
+      // legacy response to a full 3s timeout with NO response at all -
+      // evidence AGAINST the hypothesis, not for it. It also risked
+      // regressing 1.1.9/1.1.10 (the two Jung devices this entire
+      // write-path investigation was built and verified on) - both are
+      // ALSO mask 0x07B0, and every prior real Verify success documented
+      // for them relied on legacy reads working fine; forcing extended
+      // for every 0x07B0 device untested could have broken those too.
+      // Back to the plain address-size heuristic pending a real capture
+      // of what ETS itself actually does for its own read of 0x1766 on
+      // this device - don't guess again without that evidence.
       const useExtended = wantAddr > 0xffff;
+      void useExtendedMemory; // resolved but not yet trusted for reads - see above
       // Real bug, found live 2026-08-30, same session as the short-response
       // fix below: `apduMemoryRead`'s legacy A_Memory_Read packs its byte
       // count into a 6-bit APCI field (`count & 0x3f`, max 63) - NOT a
@@ -1011,10 +1204,27 @@ export class KnxConnection extends EventEmitter {
       // 0`, a request for literally zero bytes. The device answered
       // exactly what was asked (nothing); the "zero bytes returned" safety
       // check below caught the SYMPTOM correctly, but the actual cause was
-      // upstream. Cap `n` to each service's own real wire-format limit
-      // BEFORE building the request, not just AFTER interpreting the
+      // upstream. Cap `n` to each service's own real wire-format protocol
+      // limit BEFORE building the request, not just AFTER interpreting the
       // response.
-      const maxN = useExtended ? 255 : 63;
+      //
+      // Real request, 2026-08-31: prefer the device's own declared
+      // PID_MAX_APDULENGTH-derived real ceiling over the protocol's
+      // theoretical max, when known - a real device can (and, for at
+      // least the HDL unit this fix was built against, does) support
+      // meaningfully less than the protocol allows. See
+      // `maxChunkFromApduLength()`'s own doc comment for the full
+      // real-hardware derivation and evidence. Falls back to the old
+      // protocol-theoretical-max heuristic only when the device's own
+      // value couldn't be read this session.
+      const protocolMaxN = useExtended ? 255 : 63;
+      const maxN =
+        maxApduLengthValue != null
+          ? Math.min(
+              protocolMaxN,
+              maxChunkFromApduLength(maxApduLengthValue, useExtended),
+            )
+          : protocolMaxN;
       const n = Math.min(chunkSize, length - off, maxN);
       if (useExtended) {
         const apdu = apduMemoryExtendedRead(seq, n, wantAddr);
@@ -1075,12 +1285,63 @@ export class KnxConnection extends EventEmitter {
           )}, device answered 0x${gotAddr.toString(16)}`,
         );
       // Same real-short-response protection as the extended branch above.
-      const gotLen = Math.min(data.length, n);
+      let gotLen = Math.min(data.length, n);
+      let usedData = data;
+      // Real bug, found live 2026-08-31: at least one real device (HDL
+      // `M/AG40B.1`, mask 0x07B0) enforces a real legacy A_Memory_Read
+      // request-SIZE ceiling well below the 6-bit APCI field's
+      // theoretical 63-byte max. Empirically bisected directly against
+      // real hardware via /bus/read-memory: 52 bytes succeeds, 53 fails,
+      // every time - and it's a pure size limit, not a bad/protected
+      // address: a 1-byte read at the exact address that failed as part
+      // of a 53-byte request succeeded on its own, and a 52-byte read
+      // starting well past that address ALSO succeeded. This is why "ETS
+      // reads it fine" (an earlier live claim) turned out not to be
+      // comparable evidence - a real capture of that same ETS action
+      // showed it never sent a single Memory_Read/MemoryExtended_Read
+      // frame at all, just property reads; ETS has no user-facing
+      // equivalent to this bulk read ("Compare" is membership-gated,
+      // confirmed live), so there was no ETS ground truth to check this
+      // against directly - only direct empirical bisection settled it.
+      //
+      // Rather than hardcode this device's specific number as a
+      // universal constant (very possibly model/firmware-specific -
+      // unknown whether it generalizes to any other device), retry ONCE
+      // at a conservatively small size (32 - confirmed safely under the
+      // discovered 52-byte ceiling) before treating a zero-byte response
+      // as genuine. Devices that support the full request size (every
+      // device this project has tested before this one) never hit this
+      // branch - `gotLen` is already nonzero, so this is a no-op for
+      // them. `off` only advances by however much this chunk actually
+      // returns, so a smaller-than-requested successful retry just means
+      // the loop's next iteration picks up the remainder normally - no
+      // special handling needed beyond this one chunk.
+      if (gotLen === 0 && n > 32) {
+        logger.info(
+          'knx',
+          `Memory_Response returned zero bytes at 0x${wantAddr.toString(16)} (requested ${n}) - retrying at a smaller size`,
+          { deviceAddr, wantAddr: wantAddr.toString(16), originalN: n },
+        );
+        const retryN = 32;
+        const retrySeq = nextSeq();
+        const retryApdu = apduMemoryRead(retrySeq, retryN, wantAddr);
+        const retryRespP = waitResponse('Memory_Response', 3000);
+        await this.sendCEMI(
+          buildCEMI(this.localAddr, deviceAddr, retryApdu, false),
+        );
+        const retryFrame = await retryRespP;
+        const { address: retryGotAddr, data: retryData } =
+          parseMemoryResponse(retryFrame);
+        if (retryGotAddr === wantAddr) {
+          gotLen = Math.min(retryData.length, retryN);
+          usedData = retryData;
+        }
+      }
       if (gotLen === 0)
         throw new Error(
           `Memory_Response returned zero bytes at 0x${wantAddr.toString(16)} (requested ${n})`,
         );
-      data.copy(out, off, 0, gotLen);
+      usedData.copy(out, off, 0, gotLen);
       onChunk?.(gotLen);
       off += gotLen;
     }
@@ -1186,12 +1447,16 @@ export class KnxConnection extends EventEmitter {
     paramMem: Buffer | null,
     onProgress?: (progress: DownloadProgress) => void,
     extra?: DownloadExtra,
-  ): Promise<void> {
+  ): Promise<DownloadResult> {
     if (!this.connected) throw new Error('Not connected');
 
     const log = (msg: string): void => {
       if (onProgress) onProgress({ msg });
     };
+
+    // Every write whose response never arrived, across the whole session -
+    // see DownloadResult's own doc comment for why this exists.
+    const unconfirmed: string[] = [];
 
     // AbsoluteSegment (MDT-style) load procedures — Connect/Unload/Load/
     // AbsSegment/TaskSegment/LoadCompleted/Restart/Disconnect — are planned
@@ -1266,7 +1531,9 @@ export class KnxConnection extends EventEmitter {
         if (onProgress)
           onProgress({ msg: 'Download complete', pct: 100, done: true });
       });
-      return;
+      // AbsSegment (MDT-style) procedures don't yet track unconfirmed
+      // writes the way the RelSegment path below does.
+      return { unconfirmedWrites: 0, unconfirmedDetails: [] };
     }
 
     await this.managementSession(deviceAddr, async (fns) => {
@@ -1283,7 +1550,15 @@ export class KnxConnection extends EventEmitter {
       // 228", using the smaller values only for a segment's tail remainder
       // or genuinely small segments, never a fixed small pace. 228 matches
       // exactly, confirmed against the real wire bytes rather than assumed.
-      const MEM_CHUNK = 228;
+      // Real request, 2026-08-31: this is a PROTOCOL-theoretical ceiling
+      // (confirmed against ONE device, 1.1.10), not necessarily every
+      // device's own real capacity - reassigned below, once the device's
+      // real PID_MAX_APDULENGTH is known, to whichever is smaller. See
+      // `maxChunkFromApduLength()`'s own doc comment for why this matters:
+      // a real HDL device silently stalled a whole Full Download when
+      // sent a 152-byte chunk under this ceiling but over its own real,
+      // smaller declared capacity.
+      let MEM_CHUNK = 228;
       // See DownloadExtra.mode's doc comment above for what 'partial' does.
       const mode: 'full' | 'partial' = extra?.mode ?? 'full';
 
@@ -1314,7 +1589,9 @@ export class KnxConnection extends EventEmitter {
         try {
           await respP;
         } catch (_e) {
+          const detail = `PropertyValue write ObjIdx=${objIdx} PropId=${propId} unconfirmed`;
           log(`No PropertyValue_Response for ObjIdx=${objIdx} PropId=${propId} (continuing)`);
+          unconfirmed.push(detail);
         }
       };
 
@@ -1340,30 +1617,67 @@ export class KnxConnection extends EventEmitter {
         }
       };
 
-      // Which memory-write service this device actually requires -
-      // determined from its real mask version (A_DeviceDescriptor_Read),
-      // not assumed. 2026-08-28: WriteRelMem was briefly changed to always
-      // use A_MemoryExtended_Write unconditionally, based on real-hardware
-      // evidence from exactly two devices (1.1.9, 1.1.10) - both real
-      // mask-version reads on this testbed came back `0x07B0` ("System B"
-      // per this project's own bundled KNX Master Data,
-      // `data/knx_master_*.xml`'s `<MaskVersion>` table: `ManagementModel`
-      // "SystemB" for masks `07B0`/`17B0`/`27B0`/`57B0`, vs. legacy
-      // `Bcu1`/`Bcu2`/`BimM112`/`PropertyBased` families for older masks).
-      // Generalizing "always extended" from a same-family two-device
-      // sample would be unsound - a genuinely older Bcu1/Bcu2/System-7
-      // device could still require the legacy service. Real ETS itself
-      // reads the device descriptor as the very first frame
-      // of every download session (confirmed in every real capture this
-      // project has) - almost certainly for exactly this reason. Mirror
-      // that: read it here, and gate on the mask's low byte being `0xB0`
-      // (true for every SystemB medium variant in the master table) rather
-      // than hardcoding a blanket choice. If the read fails or the device
-      // isn't in a recognized family, fall back to the original,
-      // conservative address-size heuristic (extended only when the
-      // resolved address doesn't fit in 16 bits) rather than guessing.
+      // Which memory-write service this device actually requires. Real
+      // history, all still relevant: 2026-08-28 found mask `0x07B0`
+      // ("System B") devices needing A_MemoryExtended_Write even at
+      // addresses that fit in 16 bits, from exactly two devices (1.1.9,
+      // 1.1.10, both Albrecht Jung) - a verbatim-replay experiment
+      // proved real ETS itself chose extended there, not a koolenex
+      // framing bug. That became a mask-gated rule: extended for
+      // mask-`0x07B0`, address-size heuristic otherwise.
+      //
+      // 🔴 SPECULATIVE REVISION, 2026-08-31, NEEDS REAL-HARDWARE TESTING:
+      // that mask-based rule stopped explaining a THIRD mask-`0x07B0`
+      // device (HDL `M/AG40B.1`, this project's own testbed) - real ETS
+      // used LEGACY for it, at an address that also fits in 16 bits,
+      // confirmed live. Mask alone is now known NOT to be a reliable
+      // predictor. The one clean, binary signal found across all four
+      // real apps in this project's testbed `.knxproj` that's consistent
+      // with every known data point: `IsSecureEnabled` on the app's own
+      // `<ApplicationProgram>` root element - `true` on all three Jung
+      // apps (including the two confirmed-extended devices), completely
+      // absent from the HDL app (confirmed-legacy). See
+      // ParamModel.isSecureEnabled's own doc comment (ets-app.ts) for the
+      // full evidence and exactly what combination would confirm or kill
+      // this - NOT YET independently confirmed, this is a guess that
+      // happens to fit today's small sample, not a proven rule. Real
+      // mask read is kept as a fallback for apps this field can't be
+      // resolved for (e.g. no parsed model available at all), and the
+      // address-size heuristic remains a hard floor underneath both (see
+      // `useExtendedForThisChunk`'s own computation below) - an address
+      // that genuinely doesn't fit in 16 bits always needs extended,
+      // regardless of what either signal above says.
+      //
+      // Highest-priority signal: for an app that declares `LdCtrlWriteProp`
+      // for objIdx4/PropId27, the memory-write service is determined by
+      // byte 5 of that step's own `InlineData` — a literal value baked into
+      // the app XML by the manufacturer's build, which ETS writes to the
+      // device verbatim rather than computing at runtime. This is ground
+      // truth from the project file, not a correlate, and takes priority
+      // over IsSecureEnabled/mask/live-read below. Apps that don't declare
+      // this step (e.g. HDL's) fall through to those. See
+      // docs/knx-device-write-protocol.md §4.1 for the full evidence.
       let useExtendedMemory: boolean | null = null;
-      {
+      let staticWriteServiceResolved = false;
+      for (const s of steps) {
+        if (s.type === 'WriteProp' && s.propId === 27 && s.data && s.data.length >= 6) {
+          useExtendedMemory = s.data[5] !== 0xff;
+          staticWriteServiceResolved = true;
+          log(
+            `PID_MCB_TABLE byte5=0x${s.data[5]!.toString(16).padStart(2, '0')} from the app's declared LdCtrlWriteProp InlineData (${useExtendedMemory ? 'extended' : 'legacy'} memory writes)`,
+          );
+          break;
+        }
+      }
+      if (staticWriteServiceResolved) {
+        // Nothing to do - already resolved above, and nothing below is
+        // allowed to override it.
+      } else if (extra?.isSecureEnabled !== undefined) {
+        useExtendedMemory = extra.isSecureEnabled;
+        log(
+          `IsSecureEnabled=${extra?.isSecureEnabled} (${useExtendedMemory ? 'extended' : 'legacy'} memory writes - 🔴 speculative, unconfirmed rule, see code comment)`,
+        );
+      } else {
         const apdu = apduGroup('DeviceDescriptor_Read');
         const cemi = buildCEMI(this.localAddr, deviceAddr, apdu, false);
         const respP = waitResponse('DeviceDescriptor_Response', 3000);
@@ -1377,12 +1691,43 @@ export class KnxConnection extends EventEmitter {
             useExtendedMemory = (mask & 0xff) === 0xb0;
             log(
               `DeviceDescriptor mask=0x${mask.toString(16).padStart(4, '0')} ` +
-                `(${useExtendedMemory ? 'SystemB family - extended memory writes' : 'legacy family - address-size heuristic applies'})`,
+                `(${useExtendedMemory ? 'SystemB family - extended memory writes' : 'legacy family - address-size heuristic applies'} - IsSecureEnabled unavailable, falling back to mask)`,
             );
           }
         } catch (_e) {
           log('No DeviceDescriptor_Response received (falling back to address-size heuristic for memory writes)');
         }
+      }
+
+      // Real request, 2026-08-31, after a real Full Download stalled
+      // silently: cap MEM_CHUNK to this device's own declared real
+      // capacity when known, rather than trusting the protocol-
+      // theoretical 228 unconditionally. See
+      // `maxChunkFromApduLength()`'s own doc comment (below `delay()` in
+      // this file) for the full derivation and real-hardware evidence -
+      // this is the same fix already applied to the read path
+      // (`_resolveMaxApduLength()`), now also driving the write side.
+      // `useExtendedMemory ?? false` picks the smaller (legacy) header
+      // size when the mask itself couldn't be resolved either - the
+      // conservative choice, never risking an over-large chunk when
+      // unsure.
+      //
+      // Prefer the project file's own cached value
+      // (`extra.cachedMaxApduLength`, see its own doc comment) over a
+      // live property-56 read when present - a real, free source (no bus
+      // round-trip at all), confirmed to exactly match a live read for
+      // one real device. Only falls back to the live read for a device
+      // that's never been downloaded to from this project yet.
+      const maxApduLengthValue =
+        extra?.cachedMaxApduLength != null
+          ? extra.cachedMaxApduLength
+          : await this._resolveMaxApduLength(fns, deviceAddr);
+      if (maxApduLengthValue != null) {
+        MEM_CHUNK = Math.min(
+          MEM_CHUNK,
+          maxChunkFromApduLength(maxApduLengthValue, useExtendedMemory ?? false),
+        );
+        log(`Real MEM_CHUNK for this device: ${MEM_CHUNK} bytes`);
       }
 
       // A_Authorize_Request with the well-known/default key - real ETS
@@ -1570,34 +1915,51 @@ export class KnxConnection extends EventEmitter {
             break;
           }
           case 'LoadImageProp': {
-            // Real ETS behavior here is NOT "write the image to this
-            // property" despite the step name, for ANY objIdx - confirmed
-            // 2026-08-29 across 3 independent real downloads (Full + 2
-            // Partials) against 1.1.10's app (M-0004_A-3030-23-F0EA-O000A),
-            // the only app this project has seen declare LoadImageProp at
-            // all. ETS only ever READS this property for every one of
-            // objIdx 1/2/3/4 (identical value before/after the load cycle,
-            // every time, including objIdx4) - it's a read-back/verify step,
-            // not a write. The previous code here blindly WROTE the GA
-            // table to objIdx1, the Association table to objIdx2, a stray
-            // 0x04 byte to objIdx3, and (an earlier, now-corrected fix)
-            // reconstructed an unnecessary "checksum recompute" write for
-            // objIdx4 - all real bugs, none of which real ETS does here.
-            //
-            // objIdx4's property 27 genuinely IS written by real ETS, but
-            // via a completely separate mechanism this app's own model
-            // already declares explicitly: two `WriteProp` steps earlier in
-            // this same loadProcedures list, carrying literal fixed data
-            // straight from the project file (see the WriteProp case
-            // above, and its propId===27 trim fix). Confirmed directly from
-            // the capture's own frame timeline: the only 2 real writes to
-            // objIdx4/P27 land BEFORE the LoadImageProp steps run, timed to
-            // match those WriteProp steps exactly - LoadImageProp
-            // contributes nothing but a read for objIdx4 too.
+            // Despite the name, real ETS only ever reads this property —
+            // it never writes through this step, for any objIdx. Any
+            // genuine write to objIdx4/PropId27 comes from a separate
+            // `LdCtrlWriteProp` step declared earlier in the same app (see
+            // the WriteProp case above); this step is purely a read-back
+            // verification.
             log(
               `LoadImageProp ObjIdx=${step.objIdx} PropId=${step.propId} - read-only per real ETS, not writing`,
             );
-            await propRead(step.objIdx, step.propId);
+            {
+              const val = await propRead(step.objIdx, step.propId);
+              // Fallback signal for apps that don't declare LdCtrlWriteProp
+              // for PropId27 at all (e.g. HDL's). Byte 5 of the live value
+              // correlates with the required write service, but — unlike
+              // the WriteProp case's InlineData — it isn't ETS's own
+              // decision mechanism, just an observed correlate; see
+              // docs/knx-device-write-protocol.md §4.1. Never overrides an
+              // already-resolved static value.
+              if (
+                !staticWriteServiceResolved &&
+                step.propId === 27 &&
+                val &&
+                val.length >= 6
+              ) {
+                const resolved = val[5] !== 0xff;
+                log(
+                  `PID_MCB_TABLE byte5=0x${val[5]!.toString(16).padStart(2, '0')} from a live read (no LdCtrlWriteProp declared for this app - ${resolved ? 'extended' : 'legacy'} memory writes - 🔴 speculative, unconfirmed rule, see code comment)`,
+                );
+                useExtendedMemory = resolved;
+                // MEM_CHUNK was already sized (above, before this step
+                // ran) using whichever service `IsSecureEnabled`/mask
+                // resolved at the time - if this real, live signal just
+                // changed that decision, MEM_CHUNK's own header-byte
+                // assumption (4 legacy / 6 extended) is now stale too.
+                // Recompute it the same way, so the two stay consistent
+                // for the real writes still to come.
+                if (maxApduLengthValue != null) {
+                  MEM_CHUNK = Math.min(
+                    228,
+                    maxChunkFromApduLength(maxApduLengthValue, useExtendedMemory),
+                  );
+                  log(`Real MEM_CHUNK for this device (revised): ${MEM_CHUNK} bytes`);
+                }
+              }
+            }
             break;
           }
         }
@@ -1754,12 +2116,25 @@ export class KnxConnection extends EventEmitter {
             resolvedPeekBase = buf && buf.length >= 4 ? buf.readUInt32BE(0) : 0;
           }
           if (resolvedPeekBase) {
+            // Reuses the SAME mask-resolved useExtendedMemory this
+            // download session already determined for its own WriteRelMem
+            // chunks above (see that resolution's own doc comment) -
+            // rather than a redundant extra DeviceDescriptor_Read - so
+            // this partial-mode peek read picks the same real memory
+            // service the write itself will use, per the identical fix
+            // applied to the general read path
+            // (_resolveMemoryServiceForSession()'s own doc comment: a
+            // mask 0x07B0 device can return a genuine zero-byte response
+            // to a legacy-service read at an address that fits in 16
+            // bits).
             const current = await this.readRegionInSession(
               fns,
               deviceAddr,
               resolvedPeekBase + j.offset,
               j.table.length,
               MEM_CHUNK,
+              useExtendedMemory,
+              maxApduLengthValue,
             );
             if (current.equals(j.table)) {
               log(
@@ -1858,18 +2233,18 @@ export class KnxConnection extends EventEmitter {
             // real hardware, while koolenex's own reconstruction (legacy
             // Memory_Write for this same address, otherwise byte-identical
             // count/address/data) silently failed to persist, twice,
-            // reproducibly. Root cause: this is a SystemB-family device
-            // (mask 0x07B0), which apparently only honors
-            // A_MemoryExtended_Write on the RelSegment-gated download path
-            // regardless of address size. Not a universal rule though -
-            // gate on `useExtendedMemory` (the device's real mask version,
-            // read above) rather than hardcoding "always extended": use
-            // extended unconditionally for a confirmed SystemB device,
-            // fall back to the original per-chunk address-size heuristic
-            // for anything else (unrecognized/unread mask, or a genuine
-            // legacy Bcu1/Bcu2/System-7 device, which real hardware has
-            // never confirmed either way for this specific write path).
-            const useExtendedForThisChunk = useExtendedMemory ?? addr > 0xffff;
+            // reproducibly. Not a universal rule though - see
+            // `useExtendedMemory`'s own resolution above (🔴 speculative
+            // IsSecureEnabled-based guess, mask as fallback) for the
+            // primary decision. `|| addr > 0xffff` is a HARD FLOOR, always
+            // applied regardless of what that resolution says - a
+            // resolved-`false`/legacy decision must never suppress
+            // extended for an address that genuinely doesn't fit in 16
+            // bits (the original 2026-08-26 truncation bug this guards
+            // against), which is why this isn't `??` (that would let an
+            // explicit `false` skip the floor entirely).
+            const useExtendedForThisChunk =
+              (useExtendedMemory ?? false) || addr > 0xffff;
             const apdu = useExtendedForThisChunk
               ? apduMemoryExtendedWrite(seq, addr, chunk)
               : apduConnected(
@@ -1913,6 +2288,9 @@ export class KnxConnection extends EventEmitter {
               await respP;
             } catch (_e) {
               log(`No write response for ObjIdx=${j.objIdx} offset=${off} (continuing)`);
+              unconfirmed.push(
+                `Memory write ObjIdx=${j.objIdx} (${j.label}) offset=${off} size=${chunk.length} unconfirmed`,
+              );
             }
             if (onProgress && totalActiveBytes > 0)
               onProgress({
@@ -1975,10 +2353,22 @@ export class KnxConnection extends EventEmitter {
         await this.sendCEMI(cemi);
       }
 
-      log('Download complete');
+      if (unconfirmed.length) {
+        log(
+          `Download complete with ${unconfirmed.length} unconfirmed write(s) - verify recommended`,
+        );
+      } else {
+        log('Download complete');
+      }
       if (onProgress)
-        onProgress({ msg: 'Download complete', pct: 100, done: true });
+        onProgress({
+          msg: 'Download complete',
+          pct: 100,
+          done: true,
+          unconfirmedWrites: unconfirmed.length,
+        });
     });
+    return { unconfirmedWrites: unconfirmed.length, unconfirmedDetails: unconfirmed };
   }
 
   // ── Identify ──────────────────────────────────────────────────────────────────
@@ -2179,4 +2569,58 @@ export class KnxConnection extends EventEmitter {
 
 export function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Computes the real max per-chunk DATA size for A_Memory_Read/Write
+ * (legacy) or A_MemoryExtended_Read/Write (extended), from a device's own
+ * declared `PID_MAX_APDULENGTH` value (see
+ * `KnxConnection._resolveMaxApduLength()`'s own doc comment for the read
+ * itself) - replaces a fixed constant (previously 63/255 for reads,
+ * `MEM_CHUNK`=228 for writes) with the device's own stated real capacity.
+ *
+ * Real request, 2026-08-31: a real Full Download to a real HDL device
+ * (`M/AG40B.1`, mask 0x07B0) stalled silently mid-session - koolenex sent
+ * a single 152-byte `MemoryExtended_Write` (well under the previously-
+ * assumed-universal 228-byte "safe" ceiling, which was itself only ever
+ * confirmed against a DIFFERENT device, 1.1.10) and got NO response at
+ * all - not a NAK, total silence - leaving the device backlogged and
+ * unable to answer the next few objects' `PID_TABLE_REFERENCE` reads
+ * (confirmed via direct capture comparison against real ETS: those reads
+ * came back genuinely NAK'd, not merely unanswered - the device really
+ * was still busy, exactly as `docs/knx-device-write-protocol.md`'s
+ * already-documented "real per-chunk flow control" finding, 2026-08-30,
+ * predicted for an oversized chunk).
+ *
+ * Real ETS never guesses or retries into this - it reads
+ * `PID_MAX_APDULENGTH` once (property 56, objIdx 0) and computes the
+ * exact safe size up front, which is why it "definitely sends larger
+ * chunks to other devices" (real user observation that prompted this
+ * fix): a device with a larger declared value gets a larger real chunk,
+ * deterministically, no trial and error.
+ *
+ * Verified by decoding a real ETS-written frame's raw wire bytes against
+ * this exact device: `PID_MAX_APDULENGTH` read back 55; ETS's own real
+ * 52-byte `MemWrite` to the same device had a wire NPDU Length byte of
+ * `0x37`=55 too - the classic KNX convention that the wire Length field
+ * equals (real octet count − 1), so real capacity = 55+1 = 56 octets.
+ * Subtracting the real header size - read directly off
+ * `apduMemoryRead()`/`apduMemoryWrite()`'s/`apduMemoryExtendedRead()`'s
+ * own byte layout (`knx-cemi.ts`), not a separate guess - gives exactly
+ * 52 for this device: the exact number found by direct empirical
+ * bisection earlier the same session, confirmed twice, two independent
+ * ways.
+ *
+ * `headerBytes`:
+ * - legacy: 2 (TPCI+APCI+count, packed together into one 2-byte header
+ *   by `apduConnectedFull()`) + 2 (16-bit address) = 4
+ * - extended: 2 (TPCI+APCI_EXT header) + 1 (count) + 3 (24-bit address)
+ *   = 6
+ */
+export function maxChunkFromApduLength(
+  maxApduLengthValue: number,
+  useExtended: boolean,
+): number {
+  const headerBytes = useExtended ? 6 : 4;
+  return Math.max(1, maxApduLengthValue + 1 - headerBytes);
 }

@@ -755,10 +755,18 @@ router.post('/bus/write-memory', async (req: Request, res: Response) => {
       ]
     : [{ type: 'WriteRelMem', objIdx, propId: 0, size: data.length, offset: 0 }];
   try {
-    await b.downloadDevice(deviceAddress, steps, null, null, data, undefined, {
+    const result = await b.downloadDevice(deviceAddress, steps, null, null, data, undefined, {
       resolvedBases: { [objIdx]: address },
     });
-    res.json({ deviceAddress, address, hex, byteCount: data.length, loadSequence: !!relSegment });
+    res.json({
+      deviceAddress,
+      address,
+      hex,
+      byteCount: data.length,
+      loadSequence: !!relSegment,
+      unconfirmedWrites: result.unconfirmedWrites,
+      unconfirmedDetails: result.unconfirmedDetails,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     res
@@ -1023,6 +1031,10 @@ interface DeviceModel {
   // Object 3 (Group Object Table) real buffer size - see ets-app.ts's
   // ParamModel.groupObjectTableSize's doc comment for the formula/rationale.
   groupObjectTableSize?: number;
+  // 🔴 SPECULATIVE - see ets-app.ts's ParamModel.isSecureEnabled's own doc
+  // comment for the full real-hardware evidence and status before
+  // trusting this for anything real.
+  isSecureEnabled?: boolean;
 }
 
 type DeviceProgramming =
@@ -1038,6 +1050,13 @@ type DeviceProgramming =
       appId: string;
       paramMemLayout: Record<string, unknown>;
       params: Record<string, unknown> | null;
+      isSecureEnabled?: boolean;
+      // Real request, 2026-08-31: this device's own cached
+      // `LastUsedAPDULength` (from `Device.apdu_length`) - see that
+      // field's own doc comment (shared/types.ts) for the real evidence.
+      // `null` when this device has never been downloaded to from this
+      // project (no cached value parsed as a valid number yet).
+      cachedMaxApduLength: number | null;
     }
   | { ok: false; status: number; body: Record<string, unknown> };
 
@@ -1203,6 +1222,17 @@ function buildDeviceProgramming(dev: Device): DeviceProgramming {
     appId: model.appId ?? dev.app_ref,
     paramMemLayout: model.paramMemLayout ?? {},
     params: model.params ?? null,
+    isSecureEnabled: model.isSecureEnabled,
+    // Real request, 2026-08-31: parses `dev.apdu_length` (the project's
+    // own cached `LastUsedAPDULength`, see shared/types.ts's own doc
+    // comment) - empty string / non-numeric / non-positive all correctly
+    // fall through to `null` (never downloaded from this project yet, or
+    // a genuinely malformed cached value - either way, the real fallback
+    // is the live property-56 read, not a guessed number here).
+    cachedMaxApduLength:
+      dev.apdu_length && /^\d+$/.test(dev.apdu_length)
+        ? parseInt(dev.apdu_length, 10) || null
+        : null,
   };
 }
 
@@ -1289,6 +1319,8 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     paramBase,
     absSegData,
     appId,
+    isSecureEnabled,
+    cachedMaxApduLength,
   } = built;
 
   // Real device-resident relmem bases (PID 7) are no longer pre-resolved
@@ -1536,7 +1568,7 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     }
     if (aborted) return;
 
-    await b.downloadDevice(
+    const downloadResult = await b.downloadDevice(
       deviceAddress,
       steps,
       gaTable,
@@ -1549,6 +1581,8 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
         appId,
         mode,
         groupObjectTable,
+        isSecureEnabled,
+        cachedMaxApduLength,
       },
     );
     // Real bug, found live 2026-08-31: this only ever updated `status` -
@@ -1597,17 +1631,31 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       (assocTable?.length ?? 0) +
       (paramMem?.length ?? 0) +
       (groupObjectTable?.length ?? 0);
+    const unconfirmedWritesCount = downloadResult.unconfirmedWrites;
+    const unconfirmedWritesDetail = JSON.stringify(downloadResult.unconfirmedDetails);
     if (serialNumber) {
       db.run(
-        'UPDATE devices SET status=?, last_download=?, serial_number=? WHERE id=?',
-        ['programmed', new Date().toISOString(), serialNumber, dev.id],
+        'UPDATE devices SET status=?, last_download=?, serial_number=?, unconfirmed_writes_count=?, unconfirmed_writes_detail=? WHERE id=?',
+        [
+          'programmed',
+          new Date().toISOString(),
+          serialNumber,
+          unconfirmedWritesCount,
+          unconfirmedWritesDetail,
+          dev.id,
+        ],
       );
     } else {
-      db.run('UPDATE devices SET status=?, last_download=? WHERE id=?', [
-        'programmed',
-        new Date().toISOString(),
-        dev.id,
-      ]);
+      db.run(
+        'UPDATE devices SET status=?, last_download=?, unconfirmed_writes_count=?, unconfirmed_writes_detail=? WHERE id=?',
+        [
+          'programmed',
+          new Date().toISOString(),
+          unconfirmedWritesCount,
+          unconfirmedWritesDetail,
+          dev.id,
+        ],
+      );
     }
     // Real request, 2026-08-31: "the log doesn't say that the download was
     // successful. We should show this in the logs, including serial
@@ -1615,7 +1663,23 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     // client's own success log line (ProgrammingView.tsx's programDevice())
     // reads straight from this response.
     db.scheduleSave();
-    res.json({ ok: true, deviceAddress, mode, serialNumber, totalBytes });
+    // downloadDevice() completing without throwing means the protocol
+    // sequence ran to completion, not that every write was confirmed - a
+    // device may not answer an individual write, previously only ever
+    // logged server-side with no way for the client to know. `status` is
+    // still set to 'programmed' above regardless (the device did receive
+    // the download attempt), but the client can use `unconfirmedWrites` to
+    // show a "completed with N unconfirmed writes - verify recommended"
+    // state instead of an unconditional success.
+    res.json({
+      ok: true,
+      deviceAddress,
+      mode,
+      serialNumber,
+      totalBytes,
+      unconfirmedWrites: downloadResult.unconfirmedWrites,
+      unconfirmedDetails: downloadResult.unconfirmedDetails,
+    });
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
     b.broadcast('program:progress', {
@@ -1762,6 +1826,7 @@ async function runVerifyDevice(
     appId,
     paramMemLayout,
     params: paramDefs,
+    cachedMaxApduLength,
   } = built;
 
   // Derive the read-back plan from the SAME artifacts the download would use.
@@ -1889,6 +1954,7 @@ async function runVerifyDevice(
                 ? Math.min(100, Math.round((bytesRead / progressTotal) * 100))
                 : 0,
             }),
+          cachedMaxApduLength,
         )
       : [];
     for (let i = 0; i < plan.mem.length; i++) {
@@ -2017,6 +2083,9 @@ async function runVerifyDevice(
       const countActuals = await b.readMemoryMany(
         deviceAddress,
         gaAssocMem.map((r) => ({ address: r.addr, length: 2 })),
+        undefined,
+        undefined,
+        cachedMaxApduLength,
       );
       const realLengths = gaAssocMem.map((r, i) => {
         const countBuf = countActuals[i];
@@ -2029,6 +2098,9 @@ async function runVerifyDevice(
       const gaAssocActuals = await b.readMemoryMany(
         deviceAddress,
         gaAssocMem.map((r, i) => ({ address: r.addr, length: realLengths[i]! })),
+        undefined,
+        undefined,
+        cachedMaxApduLength,
       );
       const coRows = db.all<ComObject>(
         'SELECT * FROM com_objects WHERE device_id=? ORDER BY object_number',
@@ -2106,9 +2178,18 @@ async function runVerifyDevice(
       r.label.startsWith('object3@'),
     );
     if (object3Region) {
-      const [actualObject3] = await b.readMemoryMany(deviceAddress, [
-        { address: object3Region.addr, length: object3Region.expected.length },
-      ]);
+      const [actualObject3] = await b.readMemoryMany(
+        deviceAddress,
+        [
+          {
+            address: object3Region.addr,
+            length: object3Region.expected.length,
+          },
+        ],
+        undefined,
+        undefined,
+        cachedMaxApduLength,
+      );
       const actual = actualObject3 ?? Buffer.alloc(0);
       // Object 3's own raw byte-level diff count, mirroring `totalBytes`/
       // `totalDiffering` for the named-parameter segment - surfaced
@@ -2187,10 +2268,22 @@ async function runVerifyDevice(
     // computed image"). `match` now requires every decoded row to match
     // too, not just the raw byte scope.
     const allDecodedMatch = !decoded || decoded.every((d) => d.match !== false);
+    const match = totalDiffering === 0 && allDecodedMatch;
+    // A clean verify is real, positive confirmation the device's actual
+    // content matches the project - clears any "verify recommended"
+    // indicator left over from a download with unconfirmed writes (see
+    // /bus/program-device's own unconfirmed_writes_count/detail write).
+    if (match) {
+      db.run(
+        'UPDATE devices SET unconfirmed_writes_count=0, unconfirmed_writes_detail=? WHERE id=?',
+        ['[]', dev.id],
+      );
+      db.scheduleSave();
+    }
     res.json({
       deviceAddress,
       family: plan.family,
-      match: totalDiffering === 0 && allDecodedMatch,
+      match,
       totalBytes,
       totalDiffering,
       segments,

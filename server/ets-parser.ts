@@ -1277,6 +1277,9 @@ export function parseKnxproj(
         if (idx.maxComObjectNumber > 0) {
           m.groupObjectTableSize = 2 * idx.maxComObjectNumber + 2;
         }
+        // 🔴 SPECULATIVE - see ParamModel.isSecureEnabled's own doc
+        // comment (ets-app.ts) before trusting this for anything real.
+        m.isSecureEnabled = idx.isSecureEnabled;
         paramModels[aid] = m;
       }
     } catch (e) {

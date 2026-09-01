@@ -10,6 +10,7 @@ import {
   type DownloadStep,
   type DownloadProgress,
   type DownloadExtra,
+  type DownloadResult,
   type ScanProgress,
   type DeviceInfo,
 } from './knx-connection.ts';
@@ -603,7 +604,7 @@ class KnxBusManager extends EventEmitter {
     paramMem: Buffer | null,
     onProgress?: (p: DownloadProgress) => void,
     extra?: DownloadExtra,
-  ): Promise<void> {
+  ): Promise<DownloadResult> {
     await this._ensureConnected();
     return this.connection!.downloadDevice(
       deviceAddr,
@@ -653,6 +654,9 @@ class KnxBusManager extends EventEmitter {
     regions: Array<{ address: number; length: number }>,
     chunkSize?: number,
     onChunk?: (bytesRead: number) => void,
+    // See KnxConnection.readMemory()'s identical parameter for the real
+    // evidence/doc comment.
+    cachedMaxApduLength?: number | null,
   ): Promise<Buffer[]> {
     await this._ensureConnected();
     return this.connection!.readMemoryMany(
@@ -660,6 +664,7 @@ class KnxBusManager extends EventEmitter {
       regions,
       chunkSize,
       onChunk,
+      cachedMaxApduLength,
     );
   }
 

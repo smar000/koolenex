@@ -76,6 +76,23 @@ export interface Device {
   // ets-parser.ts) purely so it has a stable DB key and is visible in the
   // UI; it is not a real, writable KNX address. 0 for these; 1 otherwise.
   has_address: SqliteBool;
+  // Real request, 2026-08-31: the project's own cached `LastUsedAPDULength`
+  // (off the real `<DeviceInstance>` XML) - what ETS itself last used for
+  // this device's real memory-write chunk size, confirmed to exactly match
+  // a live `PID_MAX_APDULENGTH` (property 56) read for one real device.
+  // Empty string when this device has never been downloaded to from this
+  // project (no cached value yet) - see
+  // `KnxConnection._resolveMaxApduLength()`'s own doc comment
+  // (knx-connection.ts) for how this is used as a preferred, no-bus-
+  // round-trip source ahead of the live property read.
+  apdu_length: string;
+  // Count/detail of writes whose response never arrived during this
+  // device's last download (server/knx-connection.ts's DownloadResult) -
+  // 0/'[]' means every write was confirmed. Drives the "verify
+  // recommended" indicator; cleared on the next download or a successful
+  // verify. unconfirmed_writes_detail is a JSON-encoded string[].
+  unconfirmed_writes_count: number;
+  unconfirmed_writes_detail: string;
 }
 
 export interface GroupAddress {

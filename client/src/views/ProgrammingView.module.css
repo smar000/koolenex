@@ -759,3 +759,15 @@
   line-height: 1.5;
   white-space: normal;
 }
+/* Header-level "Auto-address by serial" toggle - persistently visible next
+   to the page's other action buttons, same visual weight/language as
+   AddressDeviceModal's .checkboxRow. */
+.headerCheckboxRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--dim);
+  white-space: nowrap;
+  cursor: pointer;
+}

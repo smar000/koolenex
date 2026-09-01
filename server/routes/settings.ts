@@ -322,6 +322,7 @@ router.patch('/settings', (req: Request, res: Response): void => {
     'active_project_id',
     'demo_mode',
     'demo_addr_map',
+    'auto_address_by_serial',
   ]);
   for (const [k, v] of Object.entries(body)) {
     if (allowed.has(k))

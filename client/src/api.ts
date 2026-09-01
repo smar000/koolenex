@@ -132,6 +132,11 @@ const BASE = '/api';
 
 class ApiError extends Error {
   code?: string;
+  // Raw parsed error body, for routes that attach extra fields beyond
+  // error/message/code (e.g. /bus/program-device's canUseSerial) - see
+  // req()'s own handling below for why code/message are split the way
+  // they are.
+  data?: Record<string, unknown>;
 }
 
 async function req<T = unknown>(
@@ -170,8 +175,17 @@ async function req<T = unknown>(
   }
   const data = await res.json();
   if (!res.ok) {
-    const e = new ApiError(data.error || res.statusText);
+    // Two conventions exist server-side: some routes (project import)
+    // put the friendly text directly in `error` and a distinct `code`;
+    // most bus routes put a short identifying string in `error` and the
+    // friendly text in `message`. Prefer `message` when present (so the
+    // log shows real prose, not a raw code like
+    // "no_device_in_programming_mode"), and fall back to `error` as the
+    // code for callers that need to branch on which error this was.
+    const e = new ApiError(data.message || data.error || res.statusText);
     if (data.code) e.code = data.code;
+    else if (data.message) e.code = data.error;
+    e.data = data;
     throw e;
   }
   return data as T;
@@ -471,6 +485,12 @@ export const api = {
     deviceId: number,
     mode?: 'full' | 'partial',
     signal?: AbortSignal,
+    // How to locate/(re)address the device when it doesn't currently
+    // answer with a matching serial - omit on the first attempt; the
+    // route returns a distinguishable 'address_needs_confirmation' error
+    // (canUseSerial on the thrown ApiError's `data`) when it needs the
+    // caller to choose. See server/routes/bus.ts's own doc comment.
+    addressMethod?: 'button' | 'serial',
   ) =>
     req<{
       ok: boolean;
@@ -492,7 +512,7 @@ export const api = {
     }>(
       'POST',
       '/bus/program-device',
-      { deviceAddress, projectId, deviceId, mode },
+      { deviceAddress, projectId, deviceId, mode, addressMethod },
       false,
       signal,
     ),

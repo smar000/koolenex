@@ -199,6 +199,11 @@ class MockBus extends EventEmitter {
     return { address: '1.1.20' };
   }
 
+  // Configurable per-test for the address-by-serial choice flow
+  // (/bus/program-device) - real hardware confirmed working (see
+  // docs/knx-device-write-protocol.md §9.2), but a real device can still
+  // fail to answer/verify, and that failure needs its own coverage.
+  assignBySerialVerified = true;
   async assignIndividualAddressBySerial(
     serial: Buffer,
     newAddr: string,
@@ -209,7 +214,11 @@ class MockBus extends EventEmitter {
       args: [serial, newAddr, timeoutMs],
     });
     if (!this.connected) throw new Error('Not connected to KNX bus');
-    return { ok: true, verified: true, address: newAddr };
+    return {
+      ok: true,
+      verified: this.assignBySerialVerified,
+      address: this.assignBySerialVerified ? newAddr : null,
+    };
   }
 
   async downloadDevice(): Promise<{
@@ -1388,6 +1397,160 @@ describe('POST /bus/program-device — no longer gates on PID 7 upfront', () => 
     assert.equal(
       mockBus.calls.some((c) => c.method === 'downloadDevice'),
       true,
+    );
+  });
+});
+
+// ── program-device: address-by-serial choice, real request 2026-09-01 ──────
+// A serial on record was previously only ever used for the fast-path check
+// (readDeviceInfo at deviceAddress) - if that failed (e.g. a factory-reset
+// device no longer sitting at its assigned address), the route went
+// straight into a forced button-press wait with no alternative, even
+// though the same serial can locate/readdress the device with no button
+// press at all (real-hardware confirmed, docs/knx-device-write-protocol.md
+// §9.2). Real ETS offers this as an operator choice; so does this route
+// now, gated on the 'auto_address_by_serial' setting.
+describe('POST /bus/program-device — address-by-serial choice', () => {
+  let projectId: number;
+  const deviceAddr = '1.1.32';
+
+  before(() => {
+    // RELMEM_MODEL already written by an earlier describe block (writeModel/
+    // APPS_DIR is shared, keyed by appId) - no need to re-write it.
+    ts.db.run(`INSERT INTO projects (name) VALUES ('program-address-by-serial')`);
+    projectId = ts.db.get<{ id: number }>(
+      `SELECT id FROM projects WHERE name='program-address-by-serial'`,
+    )!.id;
+    seedDevice(ts.db, projectId, deviceAddr, RELMEM_APP, [], []);
+  });
+
+  after(() => {
+    // This setting is a single global row (server/routes/settings.ts), not
+    // scoped per-project - reset it so later describe blocks in this file
+    // that also call /bus/program-device aren't silently affected by
+    // whatever this block last left it as.
+    ts.db.run("UPDATE settings SET value='' WHERE key='auto_address_by_serial'");
+    // mockBus is a single shared, file-scoped instance (see `before()`
+    // above) - the global beforeEach() only resets calls/connected/host/
+    // port/type/projectId, not these two fields, so leaving them set
+    // would silently affect every /bus/program-device test elsewhere in
+    // this file that runs after this block.
+    mockBus.deviceInfoSerialOverride = undefined;
+    mockBus.assignBySerialVerified = true;
+  });
+
+  beforeEach(() => {
+    mockBus.connected = true;
+    // seedDevice() always sets serial_number to match readDeviceInfo()'s
+    // own default ('aabbccddeeff') - override it here so the fast-path
+    // check genuinely fails and the choice logic actually runs, matching
+    // a real factory-reset device no longer answering at deviceAddress.
+    mockBus.deviceInfoSerialOverride = null;
+    mockBus.assignBySerialVerified = true;
+    ts.db.run("UPDATE settings SET value='' WHERE key='auto_address_by_serial'");
+  });
+
+  it('offers a choice instead of forcing the button-press wait, when auto_address_by_serial is off', async () => {
+    const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    assert.equal(r.status, 409);
+    assert.equal((r.data as any).error, 'address_needs_confirmation');
+    assert.equal((r.data as any).canUseSerial, true);
+    // No download attempted, no button-press wait started either - a pure
+    // "ask the client" response.
+    assert.equal(
+      mockBus.calls.some((c) => c.method === 'downloadDevice'),
+      false,
+    );
+    assert.equal(
+      mockBus.calls.some((c) => c.method === 'checkProgrammingMode'),
+      false,
+    );
+  });
+
+  it('uses serial-based addressing automatically when auto_address_by_serial is on', async () => {
+    ts.db.run("UPDATE settings SET value='true' WHERE key='auto_address_by_serial'");
+    const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(
+      mockBus.calls.some((c) => c.method === 'assignIndividualAddressBySerial'),
+      true,
+    );
+    assert.equal(
+      mockBus.calls.some((c) => c.method === 'downloadDevice'),
+      true,
+    );
+    // The setting decided this on its own - no button-press wait involved.
+    assert.equal(
+      mockBus.calls.some((c) => c.method === 'checkProgrammingMode'),
+      false,
+    );
+  });
+
+  it('uses serial-based addressing when the client explicitly chooses it (addressMethod:"serial")', async () => {
+    const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+      addressMethod: 'serial',
+    });
+    assert.equal(r.status, 200);
+    assert.equal(
+      mockBus.calls.some((c) => c.method === 'assignIndividualAddressBySerial'),
+      true,
+    );
+    assert.equal(
+      mockBus.calls.some((c) => c.method === 'downloadDevice'),
+      true,
+    );
+  });
+
+  it('falls through to the button-press flow when the client explicitly chooses it (addressMethod:"button")', async () => {
+    const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+      addressMethod: 'button',
+    });
+    // mockBus.checkProgrammingMode() reports a device by default (see its
+    // own doc comment) and readDeviceInfo() always resolves once
+    // connected, so this reaches a real download here - the pre-existing
+    // button-press flow already has its own dedicated coverage elsewhere
+    // in this file (found/ambiguous/unconfirmed cases). What matters here
+    // is that the CHOICE was honored - the serial-based branch was never
+    // touched, even though a serial is on record and the fast-path check
+    // failed, exactly the same starting condition the other tests in this
+    // block use to go the OTHER way.
+    assert.equal(r.status, 200);
+    assert.equal(
+      mockBus.calls.some((c) => c.method === 'assignIndividualAddressBySerial'),
+      false,
+    );
+    assert.equal(
+      mockBus.calls.some((c) => c.method === 'checkProgrammingMode'),
+      true,
+    );
+    assert.equal(
+      mockBus.calls.some((c) => c.method === 'programIA'),
+      true,
+    );
+  });
+
+  it('returns serial_address_failed when the serial-based write cannot be verified', async () => {
+    mockBus.assignBySerialVerified = false;
+    const r = await req(ts.baseUrl, 'POST', '/bus/program-device', {
+      deviceAddress: deviceAddr,
+      projectId,
+      addressMethod: 'serial',
+    });
+    assert.equal(r.status, 409);
+    assert.equal((r.data as any).error, 'serial_address_failed');
+    assert.equal(
+      mockBus.calls.some((c) => c.method === 'downloadDevice'),
+      false,
     );
   });
 });

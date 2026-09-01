@@ -943,13 +943,11 @@ router.post(
 );
 
 // Assign an individual address via the device's own serial number
-// (NM_IndividualAddress_SerialNumber_Write/_Read, spec 3/5/2 §2.5/§2.4) -
+// (A_IndividualAddressSerialNumber_Write/_Read, spec 3/5/2 §2.5/§2.4) -
 // unlike /bus/program-ia above, this needs no physical programming-button
-// press and no programming-mode precondition. See
-// docs/knx-device-write-protocol.md §9: sourced from the Falcon
-// SDK's own doc comments + Calimero's real implementation, but has NO
-// real-hardware confirmation in this project yet - every other write path
-// this app exposes has a real capture behind it, this one doesn't.
+// press and no programming-mode precondition. Real-hardware confirmed
+// (a device moved from its factory-default address to a real target
+// address) - see docs/knx-device-write-protocol.md §9.2.
 router.post(
   '/bus/assign-address-by-serial',
   async (req: Request, res: Response) => {
@@ -1283,9 +1281,16 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       projectId: z.number().int().optional(),
       deviceId: z.number().int().optional(),
       mode: z.enum(['full', 'partial']).optional().default('full'),
+      // How to locate/(re)address the device when it doesn't currently
+      // answer at `deviceAddress` and a serial is on record - see the
+      // 'address_needs_confirmation' response below. Omitted on a fresh
+      // request (the client hasn't chosen yet); set on the client's
+      // follow-up call once the user (or the 'auto_address_by_serial'
+      // setting) has decided.
+      addressMethod: z.enum(['button', 'serial']).optional(),
     }),
   );
-  const { deviceAddress, projectId, deviceId, mode } = body;
+  const { deviceAddress, projectId, deviceId, mode, addressMethod } = body;
 
   // Load device data
   const dev = deviceId
@@ -1433,6 +1438,70 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       });
     }
 
+    if (!addressConfirmed) {
+      // Real gap, found live 2026-09-01: a serial on record was only ever
+      // used for the fast-path check above - if that failed (e.g. a
+      // factory-reset device, no longer sitting at deviceAddress), this
+      // route went straight into the button-press flow below with no
+      // alternative offered, even though the same serial can locate and
+      // readdress the device directly - A_IndividualAddressSerialNumber_
+      // Write/_Read, no button press needed, real-hardware confirmed (see
+      // docs/knx-device-write-protocol.md §9.2). Real ETS offers this as
+      // an operator choice; so does this route now, unless
+      // 'auto_address_by_serial' (server/routes/settings.ts) says to just
+      // do it automatically. `addressMethod` carries the choice once
+      // made (the client's follow-up request after the prompt below).
+      const canUseSerial = !!dev.serial_number;
+      // Guards a client sending addressMethod:'serial' for a device with
+      // no serial on record (shouldn't happen - the client only offers
+      // this choice when canUseSerial is true - but falls through to the
+      // button-press flow below rather than crashing on a null serial).
+      let useSerial = addressMethod === 'serial' && canUseSerial;
+      if (addressMethod === undefined && canUseSerial) {
+        const autoSetting = db.get<{ value: string }>(
+          "SELECT value FROM settings WHERE key='auto_address_by_serial'",
+        );
+        if (autoSetting?.value === 'true') {
+          useSerial = true;
+        } else {
+          return res.status(409).json({
+            error: 'address_needs_confirmation',
+            message: `Device not found at ${deviceAddress} with a matching serial - choose how to locate/address it.`,
+            canUseSerial: true,
+          });
+        }
+      }
+
+      if (useSerial) {
+        onProgress({
+          msg: `Locating device by serial ${dev.serial_number}…`,
+        });
+        let bySerial;
+        try {
+          bySerial = await b.assignIndividualAddressBySerial(
+            Buffer.from(dev.serial_number!, 'hex'),
+            deviceAddress,
+          );
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return res
+            .status(msg.includes('Not connected') ? 409 : 502)
+            .json({
+              error: safeErrorOrConnection('bus', 'Locate device by serial failed', e),
+            });
+        }
+        if (!bySerial.verified) {
+          return res.status(409).json({
+            error: 'serial_address_failed',
+            message: `No device with serial ${dev.serial_number} answered, or the address write to ${deviceAddress} could not be verified. Try Press Programming Button instead.`,
+          });
+        }
+        onProgress({
+          msg: `Confirmed device at ${deviceAddress} via serial - continuing with the rest of the download`,
+        });
+        addressConfirmed = true;
+      }
+    }
     if (!addressConfirmed) {
       // `awaitingButton: true` is the client's cue to show a dedicated
       // modal (Cancel-only, auto-dismisses once the wait resolves either

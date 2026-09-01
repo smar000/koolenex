@@ -61,10 +61,9 @@ function CopyButton({ text }: { text: string }) {
  *  - assignIndividualAddressBySerial() (`api.busAssignAddressBySerial`) -
  *    targets one specific device by its serial number, no button-press
  *    needed, safe even with several devices in programming mode at once.
- *    Sourced from the Falcon SDK's own docs + Calimero's implementation,
- *    but (unlike every other write path this app exposes) has no real-
- *    hardware confirmation yet - flagged in the UI as experimental, not
- *    presented as equally proven.
+ *    Real-hardware confirmed (a device moved from its factory-default
+ *    address to a real target address - see docs/knx-device-write-
+ *    protocol.md §9.2).
  *
  * Matching a detected serial to a specific project device: an exact match
  * against the project's own recorded `serial_number` (imported from the
@@ -1144,19 +1143,10 @@ export function AddressDeviceModal({
                       title={
                         !lockedTarget?.serial_number
                           ? 'No serial recorded — record one on the Serial Number tab first'
-                          : `Write ${newAddr} by targeting this exact serial number — not yet confirmed on real hardware. Writes whatever is shown in the address fields above, saved or not, and updates the project automatically once confirmed.`
+                          : `Write ${newAddr} by targeting this exact serial number — no programming-button press needed, real-hardware confirmed. Writes whatever is shown in the address fields above, saved or not, and updates the project automatically once confirmed.`
                       }
                     >
-                      {writeBySerialBusy ? (
-                        <Spinner />
-                      ) : (
-                        <>
-                          Write by Serial{' '}
-                          <span className={styles.experimentalBadge}>
-                            Experimental
-                          </span>
-                        </>
-                      )}
+                      {writeBySerialBusy ? <Spinner /> : 'Write by Serial'}
                     </Btn>
                   </div>
                   {writeAddrStatus && (
@@ -1184,6 +1174,16 @@ export function AddressDeviceModal({
                       {writeBySerialResult.msg}
                     </div>
                   )}
+                  {/* Pointer, not a duplicate control - the real toggle
+                      lives on the Programming page header (a per-device
+                      modal is the wrong scope for an all-devices setting).
+                      Real request, 2026-09-01: someone landing here first
+                      (like this one) should still discover it exists. */}
+                  <div className={styles.emptyState}>
+                    This is also used automatically during Program when
+                    "Auto-address by serial" is enabled — see the
+                    Programming page header.
+                  </div>
                 </>
               ) : (
                 // ── Serial tab, redesigned 2026-08-31: real user feedback
@@ -1566,19 +1566,10 @@ export function AddressDeviceModal({
                 title={
                   manualNoChange
                     ? 'No change — this is already the recorded serial for this device'
-                    : 'Write by targeting this exact serial number — not yet confirmed on real hardware'
+                    : 'Write by targeting this exact serial number — no programming-button press needed, real-hardware confirmed'
                 }
               >
-                {manualBusy ? (
-                  <Spinner />
-                ) : (
-                  <>
-                    Write Address{' '}
-                    <span className={styles.experimentalBadge}>
-                      Experimental
-                    </span>
-                  </>
-                )}
+                {manualBusy ? <Spinner /> : 'Write Address'}
               </Btn>
               {manualResult && (
                 <div

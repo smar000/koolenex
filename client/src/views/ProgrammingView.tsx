@@ -66,6 +66,31 @@ export function ProgrammingView() {
   const [progress, setProgress] = useState<Record<string, { state: string }>>(
     {},
   );
+  // Persisted server-side (settings table, like knxip_host/demo_mode) so
+  // it's a durable, team-shared preference rather than a per-browser one -
+  // when on, /bus/program-device locates a factory-reset (or otherwise
+  // unreachable-at-its-address) device by its recorded serial
+  // automatically instead of prompting for a choice each time. See the
+  // address-confirmation flow in programDevice()'s own catch block.
+  const [autoAddressBySerial, setAutoAddressBySerial] = useState(false);
+  useEffect(() => {
+    api
+      .getSettings()
+      .then((s: any) => setAutoAddressBySerial(s.auto_address_by_serial === 'true'))
+      .catch(() => {});
+  }, []);
+  const toggleAutoAddressBySerial = async () => {
+    const next = !autoAddressBySerial;
+    setAutoAddressBySerial(next); // optimistic - this is a low-stakes preference toggle
+    try {
+      await api.saveSettings({ auto_address_by_serial: next ? 'true' : '' });
+    } catch (e: any) {
+      setAutoAddressBySerial(!next); // revert on failure
+      addLog(
+        `[${new Date().toLocaleTimeString()}] Failed to save "Auto-address by serial" setting → ${e.message}`,
+      );
+    }
+  };
   // A device download isn't one write, it's several in sequence (parameter
   // memory, then possibly GA table / Association table / Object 3 flags) -
   // the server's own progress is computed PER SEGMENT, not cumulatively
@@ -217,10 +242,25 @@ export function ProgrammingView() {
     [sidebarWidth, sidebarHeight, logOrientation],
   );
 
+  // Set when /bus/program-device can't find the device at its assigned
+  // address and needs the operator to choose how to locate/readdress it
+  // (see server/routes/bus.ts's 'address_needs_confirmation' response) -
+  // drives the choice modal below. null when no choice is pending.
+  const [addressChoiceFor, setAddressChoiceFor] = useState<{
+    deviceId: any;
+    devAddr: string;
+    mode: 'full' | 'partial';
+  } | null>(null);
+
   const programDevice = async (
     deviceId: any,
     devAddr: string,
     mode: 'full' | 'partial' = 'full',
+    // How to locate/(re)address the device if it doesn't currently answer
+    // with a matching serial - omitted on the first attempt; set on the
+    // retry after the user (or 'auto_address_by_serial') has decided. See
+    // server/routes/bus.ts's own doc comment on the same param.
+    addressMethod?: 'button' | 'serial',
   ) => {
     setLogOpen(true);
     programPctMaxRef.current[deviceId] = 0;
@@ -260,6 +300,7 @@ export function ProgrammingView() {
         deviceId,
         mode,
         controller.signal,
+        addressMethod,
       );
       setProgress((p) => ({ ...p, [deviceId]: { state: 'done' } }));
       // Real request, 2026-08-31: "the log doesn't say that the download
@@ -339,6 +380,20 @@ export function ProgrammingView() {
         });
         addLog(
           `[${new Date().toLocaleTimeString()}] Cancelled → ${devAddr} — no address was written, nothing else attempted`,
+        );
+      } else if (err.code === 'address_needs_confirmation') {
+        // Not a failure - the device genuinely isn't answering at its
+        // assigned address (e.g. a factory reset) and a serial is on
+        // record, so there's a real choice to offer instead of forcing
+        // straight into the button-press wait. No write was attempted.
+        setProgress((p) => {
+          const next = { ...p };
+          delete next[deviceId];
+          return next;
+        });
+        setAddressChoiceFor({ deviceId, devAddr, mode });
+        addLog(
+          `[${new Date().toLocaleTimeString()}] ${devAddr} not found at its assigned address — choose how to locate it`,
         );
       } else {
         setProgress((p) => ({ ...p, [deviceId]: { state: 'error' } }));
@@ -625,6 +680,24 @@ export function ProgrammingView() {
         <SectionHeader
           title="Programming"
           actions={[
+            // Persistently visible (not a one-time "don't ask again" -
+            // real request, 2026-09-01: needs an obvious way to reset it,
+            // not just a checkbox buried in a popup that stops appearing
+            // once checked). Toggling it also settles the choice for any
+            // in-flight "device not found" prompt going forward, since
+            // programDevice() reads this same setting fresh each call.
+            <label
+              key="auto-serial"
+              className={styles.headerCheckboxRow}
+              title="When a device doesn't answer at its assigned address (e.g. after a factory reset) but a serial is on record, locate/readdress it by serial automatically instead of asking each time."
+            >
+              <input
+                type="checkbox"
+                checked={autoAddressBySerial}
+                onChange={toggleAutoAddressBySerial}
+              />
+              Auto-address by serial
+            </label>,
             <Btn
               key="address"
               onClick={() => setAddressModalFor('scan')}
@@ -1397,6 +1470,58 @@ export function ProgrammingView() {
             </div>
           );
         })}
+      {/* "How should we locate this device?" choice - shown when
+          /bus/program-device can't find it at its assigned address but a
+          serial is on record (real ETS offers the same choice). Only
+          reached when 'auto_address_by_serial' is off - when it's on, the
+          server just picks serial automatically and this never fires. */}
+      {addressChoiceFor &&
+        (() => {
+          const d = devices.find((dev: any) => dev.id === addressChoiceFor.deviceId);
+          if (!d) return null;
+          return (
+            <div className={primStyles.modalOverlay}>
+              <div className={primStyles.modalBox}>
+                <div className={primStyles.modalTitle}>
+                  Device not found at {addressChoiceFor.devAddr}
+                </div>
+                <div className={primStyles.modalBody}>
+                  {d.name} didn't answer at its assigned address with a
+                  matching serial ({d.serial_number}) - this can happen
+                  after a factory reset. How should it be located?
+                </div>
+                <div className={primStyles.modalActions}>
+                  <Btn
+                    onClick={() => {
+                      const { deviceId, devAddr, mode } = addressChoiceFor;
+                      setAddressChoiceFor(null);
+                      programDevice(deviceId, devAddr, mode, 'serial');
+                    }}
+                    color="var(--accent)"
+                  >
+                    Locate by Serial
+                  </Btn>
+                  <Btn
+                    onClick={() => {
+                      const { deviceId, devAddr, mode } = addressChoiceFor;
+                      setAddressChoiceFor(null);
+                      programDevice(deviceId, devAddr, mode, 'button');
+                    }}
+                    color="var(--amber)"
+                  >
+                    Press Programming Button
+                  </Btn>
+                  <Btn
+                    onClick={() => setAddressChoiceFor(null)}
+                    color="var(--dim)"
+                  >
+                    Cancel
+                  </Btn>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
     </div>
   );
 }

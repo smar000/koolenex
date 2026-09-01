@@ -178,6 +178,14 @@ export async function init(
   db.run(`INSERT OR IGNORE INTO settings VALUES ('knxip_host', '224.0.23.12')`);
   db.run(`INSERT OR IGNORE INTO settings VALUES ('knxip_port', '3671')`);
   db.run(`INSERT OR IGNORE INTO settings VALUES ('active_project_id', '')`);
+  // When a device doesn't answer at its assigned address (e.g. after a
+  // factory reset) and a serial is on record, /bus/program-device can
+  // locate/readdress it by serial (A_IndividualAddressSerialNumber_Write,
+  // real-hardware confirmed - see docs/knx-device-write-protocol.md §9.2)
+  // instead of always requiring a physical programming-button press.
+  // 'true' skips the choice prompt and does this automatically; '' (the
+  // default) offers the choice each time.
+  db.run(`INSERT OR IGNORE INTO settings VALUES ('auto_address_by_serial', '')`);
 
   // ── Migrations: add columns introduced after initial schema ──────────────
   // SQLite has no ADD COLUMN IF NOT EXISTS, so we check pragma first.

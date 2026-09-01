@@ -198,20 +198,6 @@
   color: var(--dim);
   padding: 8px 0;
 }
-/* The experimental serial-based write path (no real-hardware confirmation
-   yet - see docs/knx-device-write-protocol.md §9, koolenex repo) needs to
-   read differently from every other write action in this app, which are
-   all real-hardware proven. Amber, not the app's usual accent/green, and
-   named as such rather than presented as equally trustworthy. */
-.experimentalBadge {
-  font-size: 9px;
-  color: var(--amber);
-  background: color-mix(in srgb, var(--amber) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--amber) 30%, transparent);
-  border-radius: 999px;
-  padding: 1px 7px;
-  white-space: nowrap;
-}
 /* "Press the programming button now" prompt - real user request, 2026-08-31:
    "the notice to press prog should be in an amber badge - slightly
    flashing?" Used for both the Detect scan (scanStatus) and the

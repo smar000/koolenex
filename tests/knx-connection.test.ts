@@ -1055,6 +1055,10 @@ describe('KnxConnection.downloadDevice', () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
+    // Doesn't test the "device never answers identity reads" fallback
+    // itself - opts into the fast path (see TestKnxConnection's own doc
+    // comment) instead of paying a real 3s+ timeout for no reason.
+    conn.autoAnswerIdentityReads = true;
 
     const steps: DownloadStep[] = [
       { type: 'WriteProp', objIdx: 0, propId: 56, data: Buffer.from([0x01]) },
@@ -1138,6 +1142,11 @@ describe('KnxConnection.downloadDevice', () => {
       const conn = new TestKnxConnection();
       conn.connected = true;
       conn.localAddr = '1.0.1';
+      // Doesn't test the identity-read fallback itself - opts into the
+      // fast path. Real payoff: this loop previously paid a real 3s+
+      // timeout per objIdx (4 total), the single biggest contributor to
+      // this whole file's runtime (~74s for this one test alone).
+      conn.autoAnswerIdentityReads = true;
 
       const steps: DownloadStep[] = [{ type: 'LoadImageProp', objIdx, propId: 27 }];
       const progress: string[] = [];
@@ -1175,6 +1184,7 @@ describe('KnxConnection.downloadDevice', () => {
     const conn2 = new TestKnxConnection();
     conn2.connected = true;
     conn2.localAddr = '1.0.1';
+    conn2.autoAnswerIdentityReads = true;
     const gaTable = Buffer.from([0x02, 0x08, 0x00, 0x08, 0x01]);
     await conn2.downloadDevice(
       '1.1.2',
@@ -1204,6 +1214,7 @@ describe('KnxConnection.downloadDevice', () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
+    conn.autoAnswerIdentityReads = true;
 
     // Real literal data from 1.1.10's own app model (M-0004_A-3030-23-F0EA-O000A).
     const declared = Buffer.from('000028c0003300000000', 'hex'); // 10 bytes
@@ -1235,6 +1246,7 @@ describe('KnxConnection.downloadDevice', () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
+    conn.autoAnswerIdentityReads = true;
 
     const data = Buffer.from('0007080770', 'hex'); // real PID_PROGRAM_VERSION-shaped example
     const steps: DownloadStep[] = [{ type: 'WriteProp', objIdx: 4, propId: 13, data }];
@@ -1259,6 +1271,7 @@ describe('KnxConnection.downloadDevice', () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
+    conn.autoAnswerIdentityReads = true;
 
     // 25 bytes of param memory - well under MEM_CHUNK (228, see
     // knx-connection.ts's own comment), so this exercises the single-chunk
@@ -1320,6 +1333,12 @@ describe('KnxConnection.downloadDevice', () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
+    // Safe to opt into the fast path here specifically: an address that
+    // doesn't fit in 16 bits forces the extended service regardless of
+    // mask (a physical wire constraint, not a mask-based choice) - whether
+    // DeviceDescriptor_Read answers or not can't change this test's
+    // outcome, unlike the sibling "falls back to legacy..." test above.
+    conn.autoAnswerIdentityReads = true;
 
     const paramMem = Buffer.alloc(8, 0xaa);
     const steps: DownloadStep[] = [
@@ -1352,6 +1371,7 @@ describe('KnxConnection.downloadDevice', () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
+    conn.autoAnswerIdentityReads = true;
 
     const steps: DownloadStep[] = [
       { type: 'WriteRelMem', objIdx: 0, propId: 0, size: 10, offset: 0 },
@@ -1367,6 +1387,7 @@ describe('KnxConnection.downloadDevice', () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
+    conn.autoAnswerIdentityReads = true;
 
     const steps: DownloadStep[] = [
       { type: 'CompareProp', objIdx: 0, propId: 56 },

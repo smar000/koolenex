@@ -2210,25 +2210,33 @@ export class KnxConnection extends EventEmitter {
                   peekBytesReadSoFar += bytesJustRead;
                   // Real feedback, 2026-09-01: "% doesn't seem to reflect
                   // what is actually shown as bytes written, e.g. 8% when
-                  // at 8000/11000". The bar's own `pct` is deliberately
-                  // compressed into a 0-15% slice (see this block's own
-                  // comment above) so this phase can't finish at its own
-                  // 100% and leave the write phase's lower 0-80% numbers
-                  // stuck unable to exceed it once the client clamps the
-                  // bar to never move backward (ProgrammingView.tsx's
-                  // programPctMaxRef) - but showing the raw byte fraction
-                  // right next to that compressed number, with no
-                  // indication the two use different scales, read as the
-                  // percentage being simply wrong. Now states its own
-                  // phase-relative percentage explicitly ("41% through
-                  // this check"), separate from and honest about not
-                  // being the same number as the bar's own fill.
+                  // at 8000/11000" - fixed same day by stating this phase's
+                  // own phase-relative percentage explicitly in the message
+                  // text, separate from the bar's own (differently-scaled)
+                  // `pct`.
+                  //
+                  // Second, distinct bug, same day, found from a live
+                  // screenshot: the bar's own `pct` was capped to a 0-15%
+                  // slice here, on the theory that this phase is a short
+                  // prelude to the write phase's own larger 0-80% slice
+                  // below. Real measured evidence says the opposite - peek
+                  // (reading each object's FULL current content to diff
+                  // against target) is the dominant cost, not a prelude:
+                  // one real single-field partial download measured ~47.8s
+                  // of peek against ~0.1s of actual (surgical) write. Capping
+                  // peek to 0-15% meant the visible button sat at "5%" for
+                  // essentially the whole real download, then rocketed to
+                  // 100% almost instantly once the tiny write ran - exactly
+                  // the "% incorrect" behavior reported. Now 0-90% for peek,
+                  // matching its real share of wall-clock time far better;
+                  // the write loop below uses the remaining 90-100% in
+                  // partial mode (see its own comment).
                   const phasePct = Math.round(
                     (peekBytesReadSoFar / totalPeekBytes) * 100,
                   );
                   onProgress({
                     msg: `Checking ObjIdx=${j.objIdx} (${j.label}) for changes - ${phasePct}% through this check (${Math.min(peekBytesReadSoFar, totalPeekBytes)}/${totalPeekBytes} bytes read)`,
-                    pct: Math.min(15, (peekBytesReadSoFar / totalPeekBytes) * 15),
+                    pct: Math.min(90, (peekBytesReadSoFar / totalPeekBytes) * 90),
                   });
                 }
               },
@@ -2308,6 +2316,16 @@ export class KnxConnection extends EventEmitter {
           0,
         );
         let bytesWrittenSoFar = 0;
+        // Real fix, 2026-09-01 (see the peek loop's own comment above for
+        // the full story): partial mode's peek phase now occupies 0-90% of
+        // the bar, since it's the real dominant cost, not a short prelude -
+        // so this phase's own slice shrinks to the remaining 90-100% there.
+        // Full mode has no peek phase eating time ahead of this, so it
+        // keeps its original, unchanged 0-80% (the last 80-100% covers the
+        // real, expected long stretch at "80%" before LoadCompleted/Restart
+        // - see that behavior's own doc comment further below).
+        const writePctBase = mode === 'partial' ? 90 : 0;
+        const writePctSpan = mode === 'partial' ? 10 : 80;
         const resolvedBase = new Map<number, number>();
         for (const j of activeJobs) {
           let base: number;
@@ -2466,7 +2484,10 @@ export class KnxConnection extends EventEmitter {
             if (onProgress && totalActiveBytes > 0)
               onProgress({
                 msg: `WriteRelMem ObjIdx=${j.objIdx} (${j.label}) ${jobBytesWritten}/${jobBytesToWrite}`,
-                pct: ((bytesWrittenSoFar + jobBytesWritten) / totalActiveBytes) * 80,
+                pct:
+                  writePctBase +
+                  ((bytesWrittenSoFar + jobBytesWritten) / totalActiveBytes) *
+                    writePctSpan,
               });
             off = chunkEnd;
             }

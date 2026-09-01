@@ -137,9 +137,20 @@ class LoadGatedFakeDevice extends KnxConnection {
       // fixed dummy value (shape matches the real captured
       // 0004002510: manufacturer(2)+appNumber(2)+version(1)) so that
       // round-trip actually completes instead of timing out.
+      //
+      // PID_MAX_APDULENGTH (property 56, objIdx 0) - real request,
+      // 2026-08-31: needs its OWN case, not the generic fallback below -
+      // the generic 5-byte dummy value would parse as a real but tiny
+      // (4) max-APDU value, capping every chunk in this file's tests down
+      // to ~1 byte and silently breaking their existing chunk-count
+      // assumptions (built around the real 228-byte default). A generous
+      // value here keeps every existing test's chunking unaffected.
       const objIdx = frame.apduData[0]!;
       const propId = frame.apduData[1]!;
-      const value = Buffer.from('0004002510', 'hex');
+      const value =
+        objIdx === 0 && propId === 56
+          ? Buffer.from([0x03, 0xe8]) // 1000
+          : Buffer.from('0004002510', 'hex');
       const respApdu = apduConnectedFull(
         0,
         APCI_EXT.PropertyValue_Response,

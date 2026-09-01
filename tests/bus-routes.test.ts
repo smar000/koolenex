@@ -212,9 +212,13 @@ class MockBus extends EventEmitter {
     return { ok: true, verified: true, address: newAddr };
   }
 
-  async downloadDevice(): Promise<void> {
+  async downloadDevice(): Promise<{
+    unconfirmedWrites: number;
+    unconfirmedDetails: string[];
+  }> {
     this.calls.push({ method: 'downloadDevice', args: [...arguments] });
     if (!this.connected) throw new Error('Not connected to KNX bus');
+    return { unconfirmedWrites: 0, unconfirmedDetails: [] };
   }
 
   // Optional canned device image: address -> byte. readMemory serves from it

@@ -360,3 +360,55 @@ describe('WriteRelMem protocol-level test — 1.1.10 (real captured memory, base
     assert.equal(sentWrites[0]!.address, 0x5f53);
   });
 });
+
+/** Like FakeWritableMemoryDevice, but never answers a memory write - proves
+ * a genuinely unanswered write is detected and reported, not silently
+ * swallowed as success (see DownloadResult, knx-connection.ts). */
+class UnresponsiveMemoryDevice extends FakeWritableMemoryDevice {
+  sendCEMI(cemi: Buffer): Promise<void> {
+    const frame = parseCEMI(cemi);
+    if (frame && (frame.apciName === 'Memory_Write' || frame.apciName === 'MemoryExtended_Write')) {
+      this.sent.push(cemi);
+      return Promise.resolve(); // swallow - simulate no response
+    }
+    return super.sendCEMI(cemi);
+  }
+}
+
+describe('downloadDevice() reports unconfirmed writes instead of silent success', () => {
+  it('surfaces a write whose response never arrived, rather than reporting unconditional success', async () => {
+    const backing = Buffer.alloc(0x10000);
+    const dev = new UnresponsiveMemoryDevice('1.1.9', backing);
+    const payload = Buffer.alloc(5, 0xaa);
+
+    const steps: DownloadStep[] = [
+      { type: 'WriteRelMem', objIdx: 4, propId: 0, size: payload.length, offset: 0 },
+    ];
+    const result = await dev.downloadDevice('1.1.9', steps, null, null, payload, undefined, {
+      resolvedBases: { 4: 0x5f53 },
+    });
+
+    assert.equal(result.unconfirmedWrites, 1);
+    assert.equal(result.unconfirmedDetails.length, 1);
+    assert.match(result.unconfirmedDetails[0]!, /unconfirmed/);
+    // The write was still genuinely attempted (sent on the wire) - this is
+    // "no response", not "never sent".
+    assert.equal(dev.writesSent().length, 1);
+  });
+
+  it('reports zero unconfirmed writes when every write gets its response', async () => {
+    const backing = Buffer.alloc(0x10000);
+    const dev = new FakeWritableMemoryDevice('1.1.9', backing);
+    const payload = Buffer.alloc(5, 0xaa);
+
+    const steps: DownloadStep[] = [
+      { type: 'WriteRelMem', objIdx: 4, propId: 0, size: payload.length, offset: 0 },
+    ];
+    const result = await dev.downloadDevice('1.1.9', steps, null, null, payload, undefined, {
+      resolvedBases: { 4: 0x5f53 },
+    });
+
+    assert.equal(result.unconfirmedWrites, 0);
+    assert.deepEqual(result.unconfirmedDetails, []);
+  });
+});

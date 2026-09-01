@@ -21,6 +21,8 @@ import {
   _apduGroupResponse as apduGroupResponse,
   _apduControl as apduControl,
   _TPCI as TPCI,
+  apduConnectedFull,
+  APCI_EXT,
 } from '../server/knx-cemi.ts';
 
 // ── Test subclass ─────────────────────────────────────────────────────────────
@@ -37,8 +39,70 @@ class TestKnxConnection extends KnxConnection {
   _routingAvailable = true;
   disconnected = false;
 
+  // Opt-in only (default false). Tried defaulting this to `true` (fast-
+  // answering DeviceDescriptor_Read/PID_MAX_APDULENGTH) to speed up this
+  // file's downloadDevice() tests - real request, 2026-08-31 - but this
+  // class is shared far more broadly than that: a whole `scan()` describe
+  // block (and others) specifically build their assertions around
+  // "nothing ever responds", and defaulting to answering broke 10 of them
+  // at once. Left opt-in, per-test, rather than chasing every remaining
+  // edge case - correctness over shaving this file's real-but-bounded
+  // test time. See `sendCEMI()`'s own doc comment for what opting in
+  // actually answers.
+  autoAnswerIdentityReads = false;
+
   sendCEMI(cemi: Buffer): Promise<void> {
     this.sent.push(cemi);
+    // Real request, 2026-08-31: KnxConnection now resolves both a
+    // device's real mask (DeviceDescriptor_Read, for the memory-service
+    // decision) and its real PID_MAX_APDULENGTH (property 56, objIdx 0,
+    // for chunk sizing) once per downloadDevice()/readMemory() session.
+    // This class deliberately never auto-responds to anything by
+    // default - several tests in this file specifically exercise the
+    // "device never answers DeviceDescriptor_Read" fallback/timeout
+    // behavior itself (e.g. "returns null on timeout", "falls back to
+    // legacy Memory_Write... when the device never answers
+    // DeviceDescriptor_Read") and a blanket auto-response here broke
+    // them outright the first time this was tried. Opt in per-test via
+    // `autoAnswerIdentityReads` instead, for tests that just want a fast
+    // downloadDevice()/readMemory() run and aren't testing this fallback
+    // path themselves.
+    if (this.autoAnswerIdentityReads) {
+      const frame = parseCEMI(cemi);
+      if (frame?.apciName === 'DeviceDescriptor_Read') {
+        const respApdu = apduGroup(
+          'DeviceDescriptor_Response',
+          0,
+          Buffer.from([0x07, 0xb0]),
+        );
+        const resp = parseCEMI(
+          buildCEMI(frame.dst, frame.src, respApdu, false),
+        )!;
+        setImmediate(() => this._onCEMI(resp));
+      } else {
+        const fullApci =
+          frame && frame.apdu.length >= 2
+            ? ((frame.apdu[0]! & 0x03) << 8) | frame.apdu[1]!
+            : -1;
+        if (fullApci === 0x3d5 /* PropertyValue_Read */) {
+          const objIdx = frame!.apduData[0]!;
+          const propId = frame!.apduData[1]!;
+          if (objIdx === 0 && propId === 56) {
+            const meta = Buffer.from([objIdx, propId, 0x10, 0x01]);
+            const value = Buffer.from([0x03, 0xe8]); // 1000 - generous, never caps
+            const respApdu = apduConnectedFull(
+              0,
+              APCI_EXT.PropertyValue_Response,
+              Buffer.concat([meta, value]),
+            );
+            const resp = parseCEMI(
+              buildCEMI(frame!.dst, frame!.src, respApdu, false),
+            )!;
+            setImmediate(() => this._onCEMI(resp));
+          }
+        }
+      }
+    }
     return Promise.resolve();
   }
 
@@ -851,6 +915,10 @@ describe('KnxConnection.scan', () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
+    // This test relies on every probed address genuinely finding nothing -
+    // the default auto-answer would make every DeviceDescriptor_Read
+    // "succeed", breaking that assumption outright.
+    conn.autoAnswerIdentityReads = false;
 
     let progressCount = 0;
     // Abort after 3 probes
@@ -881,6 +949,9 @@ describe('KnxConnection._probeSingle', () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
+    // This test IS the "device never answers" case - the default
+    // auto-answer would defeat the entire point of it.
+    conn.autoAnswerIdentityReads = false;
 
     const result = await conn._probeSingle('1.1.1', 50);
     assert.equal(result, null);
@@ -942,6 +1013,115 @@ describe('KnxConnection.downloadDevice', () => {
 
     assert.ok(progress.some((m) => m.includes('WriteProp')));
     assert.ok(progress.includes('Download complete'));
+  });
+
+  it('resolves the write service from a declared WriteProp[PropId=27] InlineData byte, without a live mask read', async () => {
+    for (const [byte5, expectExtended] of [
+      [0x33, true],
+      [0xff, false],
+    ] as const) {
+      const conn = new TestKnxConnection();
+      conn.connected = true;
+      conn.localAddr = '1.0.1';
+
+      const steps: DownloadStep[] = [
+        {
+          type: 'WriteProp',
+          objIdx: 4,
+          propId: 27,
+          data: Buffer.from([0x00, 0x00, 0x18, 0x04, 0x00, byte5, 0x00, 0x00]),
+        },
+      ];
+      const progress: string[] = [];
+
+      await conn.downloadDevice('1.1.2', steps, null, null, null, (p) =>
+        progress.push(p.msg),
+      );
+
+      assert.ok(
+        progress.some(
+          (m) =>
+            m.includes(`byte5=0x${byte5.toString(16)}`) &&
+            m.includes(expectExtended ? 'extended' : 'legacy'),
+        ),
+        `byte5=0x${byte5.toString(16)} should resolve to ${expectExtended ? 'extended' : 'legacy'}`,
+      );
+      // A static resolution must skip the live DeviceDescriptor_Read mask
+      // fallback entirely - no live probe needed when the project file
+      // already has the answer.
+      assert.ok(
+        !progress.some((m) => m.includes('DeviceDescriptor mask=')),
+        'must not fall back to a live mask read once resolved statically',
+      );
+    }
+  });
+
+  it('a static WriteProp resolution is never overridden by the app\'s own later LoadImageProp read, even if the live value disagrees', async () => {
+    // Real apps declare both: LdCtrlWriteProp early (the static ground
+    // truth) and LdCtrlLoadImageProp later (a read-only verification pass -
+    // see docs/knx-device-write-protocol.md §4.1). This device answers the
+    // LoadImageProp read with a byte5 that CONTRADICTS the WriteProp step's
+    // own data, to prove the guard actually holds in the shape real apps
+    // use, not just when no live read ever happens.
+    class ContradictingReadDevice extends TestKnxConnection {
+      sendCEMI(cemi: Buffer): Promise<void> {
+        this.sent.push(cemi);
+        const frame = parseCEMI(cemi);
+        const fullApci =
+          frame && frame.apdu.length >= 2
+            ? ((frame.apdu[0]! & 0x03) << 8) | frame.apdu[1]!
+            : -1;
+        if (fullApci === 0x3d5 /* PropertyValue_Read */) {
+          const objIdx = frame!.apduData[0]!;
+          const propId = frame!.apduData[1]!;
+          if (objIdx === 4 && propId === 27) {
+            const meta = Buffer.from([objIdx, propId, 0x10, 0x01]);
+            // byte5=0xFF (legacy) - the OPPOSITE of the WriteProp step's
+            // own 0x33 (extended) below.
+            const value = Buffer.from([0x00, 0x00, 0x18, 0x04, 0x00, 0xff, 0x00, 0x00]);
+            const respApdu = apduConnectedFull(
+              0,
+              APCI_EXT.PropertyValue_Response,
+              Buffer.concat([meta, value]),
+            );
+            const resp = parseCEMI(
+              buildCEMI(frame!.dst, frame!.src, respApdu, false),
+            )!;
+            setImmediate(() => this._onCEMI(resp));
+            return Promise.resolve();
+          }
+        }
+        return super.sendCEMI(cemi);
+      }
+    }
+
+    const conn = new ContradictingReadDevice();
+    conn.connected = true;
+    conn.localAddr = '1.0.1';
+
+    const steps: DownloadStep[] = [
+      {
+        type: 'WriteProp',
+        objIdx: 4,
+        propId: 27,
+        data: Buffer.from([0x00, 0x00, 0x18, 0x04, 0x00, 0x33, 0x00, 0x00]),
+      },
+      { type: 'LoadImageProp', objIdx: 4, propId: 27 },
+    ];
+    const progress: string[] = [];
+
+    await conn.downloadDevice('1.1.2', steps, null, null, null, (p) =>
+      progress.push(p.msg),
+    );
+
+    assert.ok(
+      progress.some((m) => m.includes('byte5=0x33') && m.includes('extended')),
+      'should resolve extended from the static WriteProp data',
+    );
+    assert.ok(
+      !progress.some((m) => m.includes('byte5=0xff')),
+      'the contradicting live read must never be acted on once resolved statically',
+    );
   });
 
   it('LoadImageProp is read-only for every objIdx, including 4 (real ETS never writes it there)', async () => {
@@ -1116,6 +1296,9 @@ describe('KnxConnection.downloadDevice', () => {
     const conn = new TestKnxConnection();
     conn.connected = true;
     conn.localAddr = '1.0.1';
+    // This test IS the "device never answers DeviceDescriptor_Read" case -
+    // the default auto-answer would defeat the entire point of it.
+    conn.autoAnswerIdentityReads = false;
 
     const paramMem = Buffer.alloc(8, 0xaa);
     const steps: DownloadStep[] = [

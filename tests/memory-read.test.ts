@@ -21,10 +21,12 @@ import {
   parseMemoryExtendedResponse,
   buildCEMI,
   parseCEMI,
+  apduConnectedFull,
+  apduGroup,
   TPCI,
   APCI_EXT,
 } from '../server/knx-cemi.ts';
-import { KnxConnection } from '../server/knx-connection.ts';
+import { KnxConnection, maxChunkFromApduLength } from '../server/knx-connection.ts';
 
 /**
  * A fake device: answers every A_Memory_Read with the corresponding slice of a
@@ -41,6 +43,15 @@ class FakeMemoryDevice extends KnxConnection {
   // (`node --test`) and would make this whole file fail to load.
   private readonly deviceAddr: string;
   private readonly memory: Buffer;
+  // Configurable per-test - see the PID_MAX_APDULENGTH-specific describe
+  // block below. Defaults generously high (never caps anything, and
+  // answers immediately) so every existing/unrelated test in this file
+  // keeps its pre-existing chunking behavior AND stays fast - only a test
+  // that explicitly sets a smaller value exercises real capping, and only
+  // a test that explicitly sets `null` exercises the (real, but
+  // deliberately rare/slow - a genuine 3s protocol timeout) "device never
+  // answers this property at all" fallback path.
+  maxApduLength: number | null = 1000;
   constructor(deviceAddr: string, memory: Buffer) {
     super();
     this.deviceAddr = deviceAddr;
@@ -51,7 +62,67 @@ class FakeMemoryDevice extends KnxConnection {
   sendCEMI(cemi: Buffer): Promise<void> {
     this.sent.push(cemi);
     const frame = parseCEMI(cemi);
-    if (frame && frame.apciName === 'Memory_Read') {
+    if (!frame) return Promise.resolve();
+    // Real request, 2026-08-31: answer DeviceDescriptor_Read immediately
+    // (KnxConnection._resolveMemoryServiceForSession(), added earlier the
+    // same session) - previously unanswered here, silently costing every
+    // test in this file a real 3s protocol timeout. Mask 0x07B0 (System B)
+    // matches every real device this project has tested; the resolved
+    // value isn't currently used to gate the read-service decision itself
+    // (see readRegionInSession()'s own "reverted" note), so answering it
+    // doesn't change any existing test's chunking behavior - it only
+    // removes a wasted wait.
+    if (frame.apciName === 'DeviceDescriptor_Read') {
+      const respApdu = apduGroup(
+        'DeviceDescriptor_Response',
+        0,
+        Buffer.from([0x07, 0xb0]),
+      );
+      const resp = parseCEMI(
+        buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+      )!;
+      setImmediate(() => this._onCEMI(resp));
+      return Promise.resolve();
+    }
+    // Extended APCIs (10-bit) don't reliably resolve through
+    // `frame.apciName` for dispatch purposes here - compute the raw
+    // numeric APCI directly instead, matching the proven-working pattern
+    // used elsewhere in this test suite (e.g. ga-assoc-table-write.test.ts).
+    const fullApci =
+      frame.apdu.length >= 2
+        ? ((frame.apdu[0]! & 0x03) << 8) | frame.apdu[1]!
+        : -1;
+    // PID_MAX_APDULENGTH (property 56, objIdx 0) - real request, 2026-08-31:
+    // readMemory()/readMemoryMany() now resolve this once per session
+    // (KnxConnection._resolveMaxApduLength()) to compute the real per-
+    // device chunk-size ceiling instead of trusting a fixed constant. Only
+    // answered when `maxApduLength` is non-null (defaults to a generous
+    // value - see the field's own doc comment above - so every existing/
+    // unrelated test keeps its pre-existing chunking behavior and stays
+    // fast; a test that explicitly sets `null` opts into the real,
+    // deliberately rare "device never answers this property" timeout).
+    if (fullApci === 0x3d5 /* PropertyValue_Read */ && this.maxApduLength != null) {
+      const objIdx = frame.apduData[0]!;
+      const propId = frame.apduData[1]!;
+      if (objIdx === 0 && propId === 56) {
+        const meta = Buffer.from([objIdx, propId, 0x10, 0x01]); // echo count=1/startIndex=1
+        const value = Buffer.from([
+          (this.maxApduLength >> 8) & 0xff,
+          this.maxApduLength & 0xff,
+        ]);
+        const respApdu = apduConnectedFull(
+          0,
+          APCI_EXT.PropertyValue_Response,
+          Buffer.concat([meta, value]),
+        );
+        const resp = parseCEMI(
+          buildCEMI(this.deviceAddr, this.localAddr, respApdu, false),
+        )!;
+        setImmediate(() => this._onCEMI(resp));
+      }
+      return Promise.resolve();
+    }
+    if (frame.apciName === 'Memory_Read') {
       const count = frame.apdu[1]! & 0x3f;
       const address = (frame.apduData[0]! << 8) | frame.apduData[1]!;
       const data = this.memory.slice(address, address + count);
@@ -112,9 +183,9 @@ class FakeMemoryDevice extends KnxConnection {
 // instead of copying it into the wrong offset.
 class MisaddressingDevice extends FakeMemoryDevice {
   sendCEMI(cemi: Buffer): Promise<void> {
-    this.sent.push(cemi);
     const frame = parseCEMI(cemi);
     if (frame && frame.apciName === 'Memory_Read') {
+      this.sent.push(cemi);
       const count = frame.apdu[1]! & 0x3f;
       const reqAddr = (frame.apduData[0]! << 8) | frame.apduData[1]!;
       const badAddr = (reqAddr + 1) & 0xffff; // off-by-one, wrong on purpose
@@ -132,8 +203,13 @@ class MisaddressingDevice extends FakeMemoryDevice {
         buildCEMI('1.1.4', this.localAddr, respApdu, false),
       )!;
       setImmediate(() => this._onCEMI(resp));
+      return Promise.resolve();
     }
-    return Promise.resolve();
+    // Delegate everything else (DeviceDescriptor_Read, PID_MAX_APDULENGTH)
+    // to the base class's own fast-answering handling - avoids paying
+    // both real 3s protocol timeouts on every test using this device, for
+    // requests this device doesn't itself need to special-case.
+    return super.sendCEMI(cemi);
   }
 }
 
@@ -409,9 +485,9 @@ describe('KnxConnection.readMemory — addresses above 0xFFFF', () => {
   it('rejects a MemoryExtended_Read_Response with a non-zero return code', async () => {
     class FailingExtendedDevice extends FakeMemoryDevice {
       sendCEMI(cemi: Buffer): Promise<void> {
-        this.sent.push(cemi);
         const frame = parseCEMI(cemi);
         if (frame && frame.apciName === 'MemoryExtended_Read') {
+          this.sent.push(cemi);
           const word =
             ((TPCI.DATA_CONNECTED << 10) |
               APCI_EXT.MemoryExtended_Read_Response) &
@@ -428,8 +504,10 @@ describe('KnxConnection.readMemory — addresses above 0xFFFF', () => {
             buildCEMI('1.1.10', '1.0.1', respApdu, false),
           )!;
           setImmediate(() => this._onCEMI(resp));
+          return Promise.resolve();
         }
-        return Promise.resolve();
+        // See MisaddressingDevice's identical delegation for why.
+        return super.sendCEMI(cemi);
       }
     }
     const dev = new FailingExtendedDevice('1.1.10', Buffer.alloc(0x10010));
@@ -462,9 +540,9 @@ describe('KnxConnection.readMemory — a response shorter than requested', () =>
       // for, forcing the read loop to come back for more.
       static readonly MAX_PER_RESPONSE = 10;
       sendCEMI(cemi: Buffer): Promise<void> {
-        this.sent.push(cemi);
         const frame = parseCEMI(cemi);
         if (frame && frame.apciName === 'MemoryExtended_Read') {
+          this.sent.push(cemi);
           const requested = frame.apduData[0]!;
           const address =
             (frame.apduData[1]! << 16) |
@@ -497,8 +575,10 @@ describe('KnxConnection.readMemory — a response shorter than requested', () =>
             buildCEMI('1.1.9', '1.0.1', respApdu, false),
           )!;
           setImmediate(() => this._onCEMI(resp));
+          return Promise.resolve();
         }
-        return Promise.resolve();
+        // See MisaddressingDevice's identical delegation for why.
+        return super.sendCEMI(cemi);
       }
     }
     // Base above 0xFFFF so this exercises the extended-read branch, matching
@@ -524,5 +604,111 @@ describe('KnxConnection.readMemory — a response shorter than requested', () =>
       .map((c) => parseCEMI(c))
       .filter((f) => f && f.apciName === 'MemoryExtended_Read');
     assert.equal(reads.length, 10);
+  });
+});
+
+// ── PID_MAX_APDULENGTH-derived chunk sizing ─────────────────────────────────
+//
+// Real request, 2026-08-31: a real Full Download to a real HDL device (mask
+// 0x07B0) stalled silently - koolenex sent a single 152-byte
+// MemoryExtended_Write, well under the previously-assumed-universal 228-byte
+// "safe" ceiling (itself only ever confirmed against a DIFFERENT device,
+// 1.1.10), and got no response at all. Real ETS never guesses this - it
+// reads PID_MAX_APDULENGTH (property 56, objIdx 0) once and computes the
+// exact safe size up front. Verified by decoding a real ETS-written frame's
+// raw wire bytes against this exact device: PID_MAX_APDULENGTH read back 55;
+// the real wire NPDU Length byte on ETS's own 52-byte MemWrite was 0x37=55
+// too (the classic KNX convention that the wire Length field equals real
+// octet count minus 1, so real capacity = 55+1 = 56 octets) - subtracting
+// the real header size (4 bytes legacy, 2 TPCI+APCI+count + 2 address) gives
+// exactly 52, the same number found by direct empirical bisection.
+describe('maxChunkFromApduLength', () => {
+  it('reproduces the real HDL device figure: declared 55 -> 52 usable legacy bytes', () => {
+    assert.equal(maxChunkFromApduLength(55, false), 52);
+  });
+
+  it('computes the extended-service ceiling with its own real 6-byte header', () => {
+    // (declared+1) - 6. Not independently confirmed against real hardware
+    // for the extended service specifically (no captured PID_MAX_APDULENGTH
+    // value for a device using extended chunks up to 228 was available at
+    // the time this was written) - the header byte count itself is real,
+    // read directly off apduMemoryExtendedRead/Write's own layout
+    // (knx-cemi.ts), not a separate guess.
+    assert.equal(maxChunkFromApduLength(233, true), 228);
+  });
+
+  it('never returns less than 1, even for a degenerate tiny declared value', () => {
+    assert.equal(maxChunkFromApduLength(2, false), 1);
+    assert.equal(maxChunkFromApduLength(0, true), 1);
+  });
+});
+
+describe('KnxConnection.readMemory — real per-device PID_MAX_APDULENGTH capping', () => {
+  it('caps every legacy chunk to the device\'s own declared real capacity, not the protocol max', async () => {
+    const mem = Buffer.alloc(0x0200);
+    for (let i = 0; i < mem.length; i++) mem[i] = i & 0xff;
+    const dev = new FakeMemoryDevice('1.1.20', mem);
+    // Matches the real HDL device this fix was built against.
+    dev.maxApduLength = 55;
+
+    // Ask for 100 bytes with the real default chunkSize (228) - without the
+    // device's own real 52-byte ceiling applied, this would go out as
+    // fewer, larger (up to 63-byte legacy-max) chunks.
+    const out = await dev.readMemory('1.1.20', 0x0000, 100, 228);
+
+    assert.equal(out.length, 100);
+    assert.deepEqual([...out], [...mem.slice(0, 100)]);
+    const reads = dev.sent
+      .map((c) => parseCEMI(c))
+      .filter((f) => f && f.apciName === 'Memory_Read');
+    for (const f of reads) {
+      const count = f!.apdu[1]! & 0x3f;
+      assert.ok(
+        count > 0 && count <= 52,
+        `chunk must respect this device's real 52-byte ceiling, got ${count}`,
+      );
+    }
+    // 100 bytes at up to 52/chunk takes at least 2 real requests - proves
+    // the cap actually changed the chunking, not just a no-op assertion.
+    assert.ok(reads.length >= 2);
+  });
+
+  it('does not shrink chunks below the protocol max when the device declares a generous capacity', async () => {
+    const mem = Buffer.alloc(0x0200);
+    for (let i = 0; i < mem.length; i++) mem[i] = i & 0xff;
+    const dev = new FakeMemoryDevice('1.1.10', mem);
+    // A generous declared value (far above anything the protocol allows) -
+    // the resolved cap must never exceed the legacy 63-byte protocol max
+    // regardless, so this is still a single request.
+    dev.maxApduLength = 1000;
+
+    const out = await dev.readMemory('1.1.10', 0x0000, 40, 228);
+    assert.deepEqual([...out], [...mem.slice(0, 40)]);
+    const reads = dev.sent
+      .map((c) => parseCEMI(c))
+      .filter((f) => f && f.apciName === 'Memory_Read');
+    assert.equal(reads.length, 1);
+  });
+
+  it('falls back to the protocol-theoretical max when the device never answers PID_MAX_APDULENGTH', async () => {
+    // A real, if deliberately rare, case: a device that simply doesn't
+    // answer this property at all. Real 3s protocol timeout - kept as its
+    // own explicit, named test rather than the file's default fake-device
+    // behavior (which defaults to answering generously, so every other
+    // test here stays fast and keeps its pre-existing chunking behavior).
+    const mem = Buffer.alloc(0x0200);
+    for (let i = 0; i < mem.length; i++) mem[i] = i & 0xff;
+    const dev = new FakeMemoryDevice('1.1.4', mem);
+    dev.maxApduLength = null;
+
+    const out = await dev.readMemory('1.1.4', 0x0000, 100, 228);
+    assert.deepEqual([...out], [...mem.slice(0, 100)]);
+    const reads = dev.sent
+      .map((c) => parseCEMI(c))
+      .filter((f) => f && f.apciName === 'Memory_Read');
+    for (const f of reads) {
+      const count = f!.apdu[1]! & 0x3f;
+      assert.ok(count > 0 && count <= 63);
+    }
   });
 });

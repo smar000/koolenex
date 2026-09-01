@@ -54,6 +54,14 @@ class FakeRWMemoryDevice extends KnxConnection {
     this.memory = memory;
     this.connected = true;
     this.localAddr = '1.0.1';
+    // PID_MAX_APDULENGTH (property 56, objIdx 0) - real request, 2026-08-31:
+    // downloadDevice() now resolves this once per session
+    // (KnxConnection._resolveMaxApduLength()) to compute the real chunk-
+    // size ceiling. Defaulted here (generous - never caps anything at the
+    // sizes this file's tests use) so every existing test keeps its real
+    // 3s-timeout-free speed; a test can still override via setProperty()
+    // to exercise real capping/fallback behavior explicitly.
+    this.setProperty(0, 56, Buffer.from([0x03, 0xe8])); // 1000
   }
 
   /** Configure this fake device to answer a PropertyValue_Read for (objIdx, propId) with `data`. */

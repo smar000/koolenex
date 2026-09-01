@@ -571,6 +571,25 @@ export function ProgrammingView() {
   // knx_serial_number_addressing_research memory for the real fix for
   // that case, not yet implemented).
   const [programmingAll, setProgrammingAll] = useState(false);
+  // Real request 2026-09-01: "disable all the buttons on the Programming
+  // Page when Verify or Reprogram are clicked (to stop people doing
+  // multiple clicks)". The underlying KNX bus is a single physical
+  // connection - two device operations running at once would genuinely
+  // interfere with each other on the wire, not just look messy in the UI.
+  // Derived, not new state - `progress`/`verifyingIds` already track every
+  // in-flight operation. OR'd into each gated button's own existing
+  // `disabled` expression (below) rather than replacing it, so a button
+  // re-enables to whatever ITS OWN independent conditions already say once
+  // this goes back to false - "restore to previous state" falls out of
+  // React's normal re-render for free, no extra bookkeeping needed. Scoped
+  // to buttons that could start or interfere with a bus operation (Program,
+  // Verify, the address/serial-assignment icons, Scan for New Device) - log
+  // panel controls and slide-over close buttons are left alone, since
+  // they're not bus operations and blocking them would only get in the way
+  // of someone watching progress on a device that's actively downloading.
+  const anyOperationRunning =
+    Object.values(progress).some((p: any) => p?.state === 'running') ||
+    verifyingIds.size > 0;
   const programmAll = async (mode: 'full' | 'partial') => {
     if (programmingAll) return;
     const targets = devices.filter(
@@ -735,6 +754,7 @@ export function ProgrammingView() {
               key="address"
               onClick={() => setAddressModalFor('scan')}
               color="var(--accent)"
+              disabled={anyOperationRunning}
             >
               ⟲ Scan for New Device
             </Btn>,
@@ -751,7 +771,7 @@ export function ProgrammingView() {
                   setDownloadModePopoverFor((v) => (v === 'all' ? null : 'all'))
                 }
                 color="var(--amber)"
-                disabled={programmingAll}
+                disabled={programmingAll || anyOperationRunning}
               >
                 {programmingAll ? '⋯ Programming…' : '▷ Program All Modified'}
               </Btn>
@@ -847,7 +867,11 @@ export function ProgrammingView() {
                           // 31, see that component's own doc comment) -
                           // it already supports a locked target with no
                           // project address yet (lockedNoAddress).
-                          onAssignClick={() => setAddressModalFor(d.id)}
+                          onAssignClick={
+                            anyOperationRunning
+                              ? undefined
+                              : () => setAddressModalFor(d.id)
+                          }
                         />
                         {/* Serial-status indicator, added 2026-08-30: a
                             device can have a real project address and still
@@ -873,7 +897,8 @@ export function ProgrammingView() {
                               : d.serial_number
                                 ? 'var(--green)'
                                 : 'var(--amber)',
-                            cursor: 'pointer',
+                            cursor: anyOperationRunning ? 'default' : 'pointer',
+                            opacity: anyOperationRunning ? 0.5 : 1,
                           }}
                           title={
                             !d.has_address
@@ -882,7 +907,11 @@ export function ProgrammingView() {
                                 ? `Serial ${d.serial_number} — click to re-address`
                                 : 'Not yet commissioned — no serial recorded. Click to address this device.'
                           }
-                          onClick={() => setAddressModalFor(d.id)}
+                          onClick={
+                            anyOperationRunning
+                              ? undefined
+                              : () => setAddressModalFor(d.id)
+                          }
                         >
                           <IconSerial size={12} />
                         </span>
@@ -968,7 +997,7 @@ export function ProgrammingView() {
                               type="button"
                               className={styles.iconChipBtn}
                               onClick={() => openComparison(d.id)}
-                              disabled={verifying}
+                              disabled={verifying || anyOperationRunning}
                               title="View the last comparison result — no bus read"
                             >
                               👁
@@ -1055,7 +1084,8 @@ export function ProgrammingView() {
                               verifying ||
                               !d.has_address ||
                               !d.serial_number ||
-                              d.status === 'unassigned'
+                              d.status === 'unassigned' ||
+                              anyOperationRunning
                             }
                             title={
                               !d.has_address
@@ -1167,7 +1197,11 @@ export function ProgrammingView() {
                               v === d.id ? null : d.id,
                             );
                           }}
-                          disabled={prog?.state === 'running' || !d.has_address}
+                          disabled={
+                            prog?.state === 'running' ||
+                            !d.has_address ||
+                            anyOperationRunning
+                          }
                           title={
                             !d.has_address
                               ? 'No individual address assigned yet — click the "-.-.-" badge to assign one'

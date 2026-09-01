@@ -19,6 +19,12 @@ data/
 # never commit.
 captures/
 
+# Reusable-but-unproductized replay/dry-run/diff tooling built during
+# real-hardware investigations - several embed real IPs, same category as
+# captures/ above. Kept deliberately (not deleted) for reuse next time a
+# similar investigation is needed - see scratch-tools/README.md.
+scratch-tools/
+
 # Build output
 client/dist/
 

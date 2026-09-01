@@ -1438,6 +1438,72 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       });
     }
 
+    // Shared by both re-addressing paths below (button-press and serial) -
+    // real request, 2026-08-31: "I have seen ETS wait between 9 seconds
+    // and 19 seconds at times" for a device to come back up and answer
+    // again after an address write. programIA()/assignIndividualAddress
+    // BySerial() each already restart the device internally (KnxConnection
+    // .restartDevice(), including its own real-capture-confirmed ~3s
+    // post-Restart settle wait) - this retry is on TOP of that built-in
+    // wait, not instead of it: even after a full settle wait, a first
+    // confirmation attempt can still genuinely fail ("did not respond"),
+    // so this doesn't rely on a single attempt succeeding. Deadline-based
+    // (not a fixed attempt count) so the spacing stays 2s regardless of
+    // how long the budget ends up needing to be - same pattern as the
+    // programming-mode detection loop below.
+    //
+    // Real bug, found live 2026-09-01: the serial-based branch below
+    // originally set addressConfirmed=true immediately after a verified
+    // write, with no equivalent wait at all - assignIndividualAddress
+    // BySerial()'s own ~3.3s internal settle wait alone wasn't always
+    // enough, and downloadDevice() connecting immediately afterward
+    // genuinely failed on a real device that hadn't finished rebooting
+    // yet (confirmed live: the first Program attempt failed right after
+    // the address update/reboot, the second succeeded once the device had
+    // had more wall-clock time to come back up on its own). This helper -
+    // previously inline, button-press-only - is now shared by both paths.
+    const waitForDeviceBackUp = async (): Promise<{
+      serialNumber?: string;
+    } | null> => {
+      onProgress({ msg: `Confirming device at ${deviceAddress}…` });
+      const confirmStart = Date.now();
+      const confirmDeadlineMs = 35000;
+      let confirmedInfo: { serialNumber?: string } | null = null;
+      let attempt = 0;
+      let lastHeartbeatMs = 0;
+      while (
+        !confirmedInfo &&
+        Date.now() - confirmStart < confirmDeadlineMs &&
+        !aborted
+      ) {
+        attempt++;
+        if (attempt > 1) await delay(2000);
+        const elapsedMs = Date.now() - confirmStart;
+        // Heartbeat every ~5s so a long real wait doesn't read as "stuck"
+        // in the log panel - real prior lesson this session (the progress-
+        // bar-stuck-at-0% saga) was exactly this: a genuinely-still-
+        // working wait with no visible sign of life looks indistinguishable
+        // from a hang.
+        if (elapsedMs - lastHeartbeatMs >= 5000) {
+          lastHeartbeatMs = elapsedMs;
+          onProgress({
+            msg: `Still waiting for ${deviceAddress} to come back up after restart… (${Math.round(elapsedMs / 1000)}s)`,
+          });
+        }
+        try {
+          confirmedInfo = await b.readDeviceInfo(deviceAddress);
+        } catch (e) {
+          logger.warn('knx', 'Post-address-write confirmation read failed', {
+            deviceAddress,
+            attempt,
+            elapsedMs,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+      return confirmedInfo;
+    };
+
     if (!addressConfirmed) {
       // Real gap, found live 2026-09-01: a serial on record was only ever
       // used for the fast-path check above - if that failed (e.g. a
@@ -1494,6 +1560,19 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
           return res.status(409).json({
             error: 'serial_address_failed',
             message: `No device with serial ${dev.serial_number} answered, or the address write to ${deviceAddress} could not be verified. Try Press Programming Button instead.`,
+          });
+        }
+        // The write itself is verified (assignIndividualAddressBySerial's
+        // own read-back), but the device still restarts after this -
+        // same "wait for it to actually come back up" step the button-
+        // press path already has, see waitForDeviceBackUp's own doc
+        // comment for the real live failure this fixes.
+        const confirmedInfo = await waitForDeviceBackUp();
+        if (aborted) return;
+        if (!confirmedInfo) {
+          return res.status(502).json({
+            error: 'address_write_unconfirmed',
+            message: `Address ${deviceAddress} was written by serial, but the device did not answer afterward - the write could not be confirmed, so the rest of the download was not attempted.`,
           });
         }
         onProgress({
@@ -1559,61 +1638,10 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
       // (KnxConnection.restartDevice(), including its own real-capture-
       // confirmed ~3s post-Restart settle wait) - real request, 2026-08-31:
       // "Don't forget the device reboot that ETS does once address is
-      // written, waiting till the device is back up". The retry below is
-      // on TOP of that built-in wait, not instead of it - real live-test
-      // finding the same day: even after a full settle wait, a first
-      // confirmation attempt can still genuinely fail ("did not respond"),
-      // so this doesn't rely on a single attempt succeeding.
+      // written, waiting till the device is back up". waitForDeviceBackUp()
+      // (above) is on TOP of that built-in wait, not instead of it.
       await b.programIA(deviceAddress);
-      onProgress({ msg: `Confirming device at ${deviceAddress}…` });
-      // Real user observation, 2026-08-31: "I have seen ETS wait between 9
-      // seconds and 19 seconds at times" for a device to come back up and
-      // answer again after an address write - the previous fixed 3-
-      // attempt/2s-spacing budget (~7-9s total, on top of programIA()'s
-      // own ~3.3s built-in settle+Restart+postRestartDelay wait) sat right
-      // at the LOW end of that and could give up on a device that was
-      // still genuinely rebooting, not actually gone. Budgeted generously
-      // past the observed range (35s) rather than a number that only just
-      // covers today's evidence - this is real device-reboot variance,
-      // not something a fixed small retry count should be gambling on.
-      // Deadline-based (not a fixed attempt count) so the spacing stays
-      // 2s regardless of how long the budget ends up needing to be - same
-      // pattern as the programming-mode detection loop above.
-      const confirmStart = Date.now();
-      const confirmDeadlineMs = 35000;
-      let confirmedInfo: { serialNumber?: string } | null = null;
-      let attempt = 0;
-      let lastHeartbeatMs = 0;
-      while (
-        !confirmedInfo &&
-        Date.now() - confirmStart < confirmDeadlineMs &&
-        !aborted
-      ) {
-        attempt++;
-        if (attempt > 1) await delay(2000);
-        const elapsedMs = Date.now() - confirmStart;
-        // Heartbeat every ~5s so a long real wait doesn't read as "stuck"
-        // in the log panel - real prior lesson this session (the progress-
-        // bar-stuck-at-0% saga) was exactly this: a genuinely-still-
-        // working wait with no visible sign of life looks indistinguishable
-        // from a hang.
-        if (elapsedMs - lastHeartbeatMs >= 5000) {
-          lastHeartbeatMs = elapsedMs;
-          onProgress({
-            msg: `Still waiting for ${deviceAddress} to come back up after restart… (${Math.round(elapsedMs / 1000)}s)`,
-          });
-        }
-        try {
-          confirmedInfo = await b.readDeviceInfo(deviceAddress);
-        } catch (e) {
-          logger.warn('knx', 'Post-address-write confirmation read failed', {
-            deviceAddress,
-            attempt,
-            elapsedMs,
-            error: e instanceof Error ? e.message : String(e),
-          });
-        }
-      }
+      const confirmedInfo = await waitForDeviceBackUp();
       if (aborted) return;
       if (!confirmedInfo) {
         return res.status(502).json({

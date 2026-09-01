@@ -1507,6 +1507,28 @@ describe('POST /bus/program-device — address-by-serial choice', () => {
       mockBus.calls.some((c) => c.method === 'downloadDevice'),
       true,
     );
+    // Real bug, found live 2026-09-01: this branch used to declare the
+    // address confirmed immediately after a verified serial write, with
+    // no wait for the device to actually finish restarting -
+    // assignIndividualAddressBySerial()'s own ~3.3s internal settle wait
+    // alone wasn't always enough on real hardware, and downloadDevice()
+    // connecting immediately afterward genuinely failed. Fixed by reusing
+    // the same waitForDeviceBackUp() step the button-press path already
+    // had - assert the real call ORDER proves it's actually in the
+    // sequence now, not just present somewhere: a readDeviceInfo call
+    // AFTER assignIndividualAddressBySerial, still BEFORE downloadDevice.
+    const order = mockBus.calls.map((c) => c.method);
+    const assignIdx = order.indexOf('assignIndividualAddressBySerial');
+    const downloadIdx = order.indexOf('downloadDevice');
+    const confirmReadIdx = order.indexOf('readDeviceInfo', assignIdx + 1);
+    assert.ok(
+      assignIdx !== -1 && confirmReadIdx !== -1 && downloadIdx !== -1,
+      'expected assignIndividualAddressBySerial, a follow-up readDeviceInfo, and downloadDevice all present',
+    );
+    assert.ok(
+      assignIdx < confirmReadIdx && confirmReadIdx < downloadIdx,
+      `expected order assign(${assignIdx}) < confirm-read(${confirmReadIdx}) < download(${downloadIdx})`,
+    );
   });
 
   it('falls through to the button-press flow when the client explicitly chooses it (addressMethod:"button")', async () => {

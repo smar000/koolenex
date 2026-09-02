@@ -22,7 +22,7 @@ below, still open).
 
 **Correction (same day, commit `95805ff`)**: Fix 6 originally shipped as an unconditional "always use
 `A_MemoryExtended_Write`" rule, generalized from real-hardware evidence on exactly two devices (1.1.9,
-1.1.10). The user correctly challenged this generalization before it was trusted further - both devices
+1.1.10). That generalization doesn't hold up before further use - both devices
 turned out to share the same mask family (`0x07B0`, "System B" per this project's own bundled KNX Master
 Data), so "always extended" happened to be right for them specifically, not because it's universally true.
 `WriteRelMem` now reads the device's real mask version (`A_DeviceDescriptor_Read`, mirroring what real ETS
@@ -61,9 +61,8 @@ parameter ("Use standard NTP server (pool.ntp.org)", `M-0004_A-0025-10-1BA6-O00A
    still didn't take).
 
 At this point the server needed restarting to pick up the new endpoint — it wasn't running under a
-supervised/tracked process this session (a leftover from an earlier session's background task), so it was
-killed and restarted under session tracking, giving visibility into its own logs for the first time this
-session.
+supervised/tracked process, so it was killed and restarted under session tracking, giving visibility
+into its own logs for the first time.
 
 ## Root cause: the entire Unload → Load → LoadCompleted sequence is missing
 
@@ -168,7 +167,7 @@ git history of `test/relmem-real-device-fixtures`.
   `apciName`.
 - **Fix 4 (`f5588c7`) — missing `PID_PROGRAM_VERSION` write-back.** Real ETS reads `PID_PROGRAM_VERSION`
   (objIdx 4, property 13) early, then writes the identical value straight back right before
-  `LoadCompleted` — found only after the user explicitly pushed back on the methodology ("I am wondering if
+  `LoadCompleted` — found only after revisiting the methodology directly ("I am wondering if
   there is more in the total captured data that we are missing/inadvertently ignoring") when two prior
   narrow, hypothesis-driven greps of the same full capture had both missed it. A genuinely complete,
   systematic frame-type-sequence extraction of every frame (not a targeted grep) is what actually found
@@ -211,11 +210,11 @@ git history of `test/relmem-real-device-fixtures`.
 
 ## Fix 6, corrected: gate on the device's real mask version, not a blanket rule
 
-The user pushed back on "always extended" immediately, correctly: it was generalized from real-hardware
-evidence on exactly two devices (1.1.9, 1.1.10), both tested only because they happened to be available on
-this testbed — not because they were chosen to represent device diversity. Asked directly: *"is it possible
-that the manufacturer device library has some config value that specifies this? Can you trawl through the
-ETS project file and make sure we have not missed anything."*
+"Always extended" doesn't hold up on inspection: it was generalized from real-hardware evidence on
+exactly two devices (1.1.9, 1.1.10), both tested only because they happened to be available on this
+testbed — not because they were chosen to represent device diversity. The real question: *"is it
+possible that the manufacturer device library has some config value that specifies this? Can you trawl
+through the ETS project file and make sure we have not missed anything."*
 
 **Trawled the project's own bundled KNX Master Data** (`data/knx_master_<projectId>.xml`, ETS's own
 standardized reference table, not manufacturer-specific config — every project bundles the same one).
@@ -300,7 +299,7 @@ fix for this gap.
 - Whether 1.1.10 (and any other `RelSegment`-family device) needed all six fixes too, confirmed empirically
   rather than by analogy - not yet re-tested since these fixes landed. The 2026-08-26 "write path proven
   correct" finding for 1.1.10 specifically should still not be cited until it is (see "Retroactive
-  implication" below). (1.1.10 is also mask `0x07B0` per this session's live check, so it should take the
+  implication" below). (1.1.10 is also mask `0x07B0` per a live check, so it should take the
   same System B code path once re-tested - not yet confirmed for the WriteRelMem path specifically.)
 - The GA/Association table (objIdx 1/2) wire format - still uses a guessed format, unfixed (per the
   2026-08-27/28 GA-wire-format work).

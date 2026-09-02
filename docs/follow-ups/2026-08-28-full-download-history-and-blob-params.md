@@ -1,6 +1,6 @@
 # Investigation: does a real ETS Full Download depend on device history, and what's actually in the "1984-byte gap"?
 
-**See also**: `docs/knx-device-write-protocol.md` Parts 8-9 — the distilled protocol facts this
+**See also**: `docs/knx-device-write-protocol.md` §7 — the distilled protocol facts this
 investigation settled. This log is the full narrative (dead ends, corrected mistakes, exact order
 of discovery, including a self-corrected "99.2%" framing that turned out to be the whole 100%).
 
@@ -32,11 +32,11 @@ open is narrower: why ETS only rewrites this object on some Full Downloads and n
 ## Why this came up
 
 Closing out the property-27/`WriteRelMem` work (see `2026-08-29-property27-ga-write-wiring-and-ui.md`),
-the user raised a sharp objection to the "ETS only writes what differs from the manufacturer's
+a sharp objection surfaced against the "ETS only writes what differs from the manufacturer's
 static default" theory: reuse a device across two different projects (or a factory reset in
 between) and a value that happens to already match the *new* project's default would never get
-corrected, even if it's genuinely stale. Rather than debate this from file data alone, the user
-proposed a decisive real-hardware test.
+corrected, even if it's genuinely stale. Rather than debate this from file data alone, a decisive
+real-hardware test was the better path.
 
 ## The test (methodology)
 
@@ -54,7 +54,7 @@ observed at that offset alone) and already well-understood.
    (bypassing ETS entirely, via koolenex's own `POST /bus/write-memory` debug route), leave the
    project unchanged (still at default), and do another real Full Download. If ETS detects and
    corrects it, that's real evidence against a naive "diff against own memory" mechanism. If it
-   silently leaves the device stuck, that's the user's scenario confirmed as a real gap.
+   silently leaves the device stuck, that confirms a real gap.
 
 ## Two self-caught mistakes before the real result (documented deliberately - see below)
 
@@ -66,7 +66,7 @@ connection, wrong memory service, a suspected read-path bug for short reads, eve
 the debug write had wiped the whole segment) before finding the real, embarrassing cause: a
 manual hex-to-decimal conversion error, reading `0x0C38AC` (an unrelated address, coincidentally
 also `0x00`) instead of the intended `0x0C30AC`. Re-verified with the correct address and both
-"failures" evaporated immediately. **Lesson, explicitly requested by the user afterward**: a single
+"failures" evaporated immediately. **Lesson**: a single
 data point (one read matching a hypothesis) is not proof; the actual finding was that both
 "confirmations" were internally consistent with each other by coincidence, not independently
 verified against ground truth.
@@ -111,10 +111,10 @@ rewrite, not a blind wipe to factory defaults. This directly motivated Finding 2
 ## Finding 2: the "1984-byte gap" is a parser bug, not device-internal state
 
 A byte-for-byte match between the comprehensive rewrite's content and known real device values
-prompted re-examining the standing (and, per user pushback, insufficiently justified) theory that
-this region held device-internal operational/calibration state ETS never touches. The user
-specifically pushed back on a follow-on guess ("maybe ETS computes a dimming curve dynamically")
-as needlessly complex, and asked for simpler explanations to be checked first.
+prompted re-examining the standing (and insufficiently justified) theory that
+this region held device-internal operational/calibration state ETS never touches. A follow-on guess
+("maybe ETS computes a dimming curve dynamically") was rejected as needlessly complex in favor of
+checking simpler explanations first.
 
 **Checked directly**: `paramMemLayout` (koolenex's own extracted parameter data) *does* declare
 parameters at these exact offsets - labeled "Characteristic curve value domain" - but declares
@@ -140,7 +140,7 @@ count - a strong signal of one systematic error, not four independent ones, but 
 declared alternates per channel was a byte-perfect match for the real device even after picking
 the closest one.
 
-**User pushed back again**, correctly: comparing against a fixture file frozen days earlier
+**That comparison doesn't hold up either**: comparing against a fixture file frozen days earlier
 conflated the fix's real effect with unrelated project-config drift (the project has had many
 config changes across this whole multi-day investigation). Isolated properly (old code vs. new
 code, same live DB state) - the fix's own effect was real and cleanly scoped to the blob region,
@@ -204,13 +204,13 @@ interface object reports, giving a direct, unambiguous identifier rather than in
 behavior: object 3 reports type `9`, distinct from objIdx 1/2/4's `1`/`2`/`3` (which correctly
 match Address table / Association table / Application Program - confirming the read itself is
 trustworthy). Type `9`'s real standard name wasn't confirmed at the time - no reliable local KNX
-standard reference was checked yet, and the session's own memory of the standard object-type
-table wasn't trusted enough to assert a name outright (per [[dont_jump_to_conclusions]]).
+standard reference had been checked yet, and recollection of the standard object-type
+table wasn't trusted enough to assert a name outright.
 
-**A real ETS screenshot from the user surfaced a plausible connection, then needed correcting
+**A real ETS screenshot surfaced a plausible connection, then needed correcting
 once, then partly reinstated**: the "Change Application Program" dropdown initially looked like it
 might tie to a device-side "application management" object (supporting an application-version
-guess for object 3). The user first clarified this was just an ETS-side local-file picker
+guess for object 3). Further clarification established this was just an ETS-side local-file picker
 (weakening that link), then corrected further: it genuinely supports loading a *different*
 application version onto already-commissioned hardware (a real device-level capability, not just
 a project-editing convenience) - which does plausibly need device-side infrastructure to support,
@@ -219,17 +219,17 @@ partially reinstating the connection at the time.
 **Checked whether Object 3 activity correlates with Full vs. Partial Download** (a much simpler,
 already-established distinction) - genuinely tested, not assumed: swept every saved capture in
 the project for `OX=3 P=5` activity. Every Partial Download capture: zero. But *not* every Full
-Download either - within today's own capture, only the two comprehensive-rewrite sessions touched
-it, not the two routine flag-toggle Full Downloads earlier in the same session. Every *other*
+Download either - among that day's own captures, only the two comprehensive-rewrite downloads
+touched it, not the two routine flag-toggle Full Downloads earlier the same day. Every *other*
 capture showing Object 3 activity (2026-08-27, two from 2026-08-28) is a first-download-of-a-
 session or post-reconnect/post-failed-attempt capture - consistent with, not proof of, "written
 when ETS has reason to be uncertain about device state."
 
-**Per explicit user instruction, the above was documented as checked facts (size, base, object
+**Documented as checked facts (size, base, object
 type, universal/undeclared nature, the Full/Partial correlation) with the causal story
 (application-identity tracking) explicitly marked as speculation requiring further investigation,
-not settled** - which turned out to matter: the user then asked directly whether the ETS SDK's
-help file might help, prompting a check of `ETS 6.4 SDK/ETS6 SDK.chm` (extractable with 7-Zip
+not settled** - which turned out to matter: whether the ETS SDK's
+help file might help was worth checking, prompting a look at `ETS 6.4 SDK/ETS6 SDK.chm` (extractable with 7-Zip
 like an archive) - its `MasterData.InterfaceObjectType` class docs described the *shape* of a
 number→name lookup but not the actual values (loaded at runtime from KNX Master Data, not baked
 into the help file). That pointed to a better source already available: koolenex's own bundled

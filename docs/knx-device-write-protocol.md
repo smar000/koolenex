@@ -281,10 +281,11 @@ The write-service decision is determined by **byte 5 of this property's value fo
 and the mechanism differs by how the app declares it:
 
 - **Apps that declare `LdCtrlWriteProp` for `ObjIdx="4" PropId="27"`** (e.g. the Jung apps in this
-  project's testbed and at the Hampden Way site): the value ETS writes is literal `InlineData`
-  baked into the app XML at compile time, not computed or read from the device. Byte 5 of that
-  literal data is ground truth for the write service, available statically from the project file —
-  no bus round-trip required. Example (Hampden Way pushbutton, `M-0004_A-D142-21-8848-O000A`):
+  project's testbed and at a second, unrelated production site): the value ETS writes is literal
+  `InlineData` baked into the app XML at compile time, not computed or read from the device. Byte 5
+  of that literal data is ground truth for the write service, available statically from the project
+  file — no bus round-trip required. Example (production-site pushbutton,
+  `M-0004_A-D142-21-8848-O000A`):
 
   ```xml
   <LdCtrlWriteProp ObjIdx="4" PropId="27" Verify="false" InlineData="00001804003300000000" />
@@ -310,10 +311,10 @@ its `data` is used directly and nothing else (`IsSecureEnabled`, the mask read, 
 resolution changes.
 
 **Confirmed against real captures on two independent apps** — a re-run of testbed device 1.1.10,
-and the actual production Hampden Way pushbutton (`192.168.0.14`, device 1.1.240, serial
-`000A06CB3118`, "PB4-240: Bedroom 4 Entrance") — both writing `PID_MCB_TABLE` for object 4 early in
-the session, well before any data write, matching their apps' own `LdCtrlWriteProp` `InlineData`
-exactly. HDL's app was checked directly and confirmed to have no such declaration.
+and a real production pushbutton at the second, unrelated site (device 1.1.240) — both writing
+`PID_MCB_TABLE` for object 4 early in the session, well before any data write, matching their
+apps' own `LdCtrlWriteProp` `InlineData` exactly. HDL's app was checked directly and confirmed to
+have no such declaration.
 
 🔴 **Open**: the exact KNX-spec meaning of byte 5 is not confirmed by any primary source checked
 (calimero's `properties.xml`, Wireshark's dissector, KNX Association's support forum). For apps

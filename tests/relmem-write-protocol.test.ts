@@ -20,7 +20,7 @@
  * unmodified downloadDevice()/WriteRelMem code path - not a re-implementation
  * of it - against this fake device, then inspects the fake device's own
  * backing buffer afterward to prove where bytes actually landed. Zero
- * hardware risk, fully deterministic, no bus/testbed/Hampden-Way needed.
+ * hardware risk, fully deterministic, no bus/testbed/production site needed.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';

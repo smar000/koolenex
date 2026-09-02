@@ -1511,7 +1511,7 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     // when it does a full download ALWAYS writes the address first,
     // reboots and then the params etc. We just go straight into the
     // params, without bothering to verify whether the address exists or
-    // not." Confirmed the hard way, same session: a genuinely factory-
+    // not." Confirmed the hard way: a genuinely factory-
     // reset device (independently verified via a real bus query to be at
     // 15.15.255) was given a project address purely as a DB record, with
     // no write ever sent to the physical device - the subsequent Full
@@ -1522,8 +1522,8 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
     // koolenex's own "successful" claim was never independently confirmed
     // by anything the device itself said.
     //
-    // Mirrors real ETS's own Full Download procedure exactly, per the
-    // user's own spec: if a serial is on record, confirm a REAL device
+    // Mirrors real ETS's own Full Download procedure exactly: if a serial
+    // is on record, confirm a REAL device
     // answering at deviceAddress actually carries that same serial before
     // touching anything else. If it doesn't (no answer, a different
     // serial, or no serial on record at all), there is no way around a
@@ -1608,10 +1608,8 @@ router.post('/bus/program-device', async (req: Request, res: Response) => {
         if (attempt > 1) await delay(2000);
         const elapsedMs = Date.now() - confirmStart;
         // Heartbeat every ~5s so a long real wait doesn't read as "stuck"
-        // in the log panel - real prior lesson this session (the progress-
-        // bar-stuck-at-0% saga) was exactly this: a genuinely-still-
-        // working wait with no visible sign of life looks indistinguishable
-        // from a hang.
+        // in the log panel - a genuinely-still-working wait with no
+        // visible sign of life looks indistinguishable from a hang.
         if (elapsedMs - lastHeartbeatMs >= 5000) {
           lastHeartbeatMs = elapsedMs;
           onProgress({

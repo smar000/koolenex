@@ -1289,7 +1289,7 @@ export class KnxConnection extends EventEmitter {
       // `maxChunkFromApduLength()`'s own doc comment for the full
       // real-hardware derivation and evidence. Falls back to the old
       // protocol-theoretical-max heuristic only when the device's own
-      // value couldn't be read this session.
+      // value couldn't be read.
       const protocolMaxN = useExtended ? 255 : 63;
       const maxN =
         maxApduLengthValue != null

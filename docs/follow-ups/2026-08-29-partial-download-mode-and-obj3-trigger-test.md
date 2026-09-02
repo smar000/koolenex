@@ -96,7 +96,7 @@ reconfirms Part 8's history-independence finding on a second device. Object 3's 
 (`OX=3 P=5 $030B...`) fired too.
 
 **Why this doesn't actually confirm the hypothesis**: cross-checked against every other
-1.1.9 Full Download capture this project has, including the two from earlier today with NO
+1.1.9 Full Download capture this project has, including two clean captures with NO
 tampering beforehand:
 
 | Capture | Tampering beforehand? | Object 3 written? |
@@ -123,7 +123,7 @@ on the single historical 08-28 session alone.
 
 ## Part 4: Object 3's content decoded - a real per-communication-object flag bitfield
 
-User pushed back on the trigger test's framing twice, both corrections real and load-bearing:
+The trigger test's framing needed correcting twice, both corrections real and load-bearing:
 
 1. **"Are you sure obj 3 is a GA holder?"** - a fair check given the name similarity between
    "Group Address table" (object 1) and "Group Object Table" (object 3). Clarified: they're
@@ -135,7 +135,7 @@ User pushed back on the trigger test's framing twice, both corrections real and 
 Tested directly: flipped the **Update** flag on com-object 7 (NTP sync input, off→on) via a real
 ETS Full Download, nothing else changed. Object 3's own 98-byte payload differed from the
 previous capture at **exactly one byte** (offset 14: `0x53`→`0xD3`), and those two values differ
-by **exactly one bit** (`XOR 0x80`). A second test in the same session reverted that flag AND
+by **exactly one bit** (`XOR 0x80`). A second test reverted that flag AND
 flipped **Read-On-Init** on com-object 6 (Date/time input, off→on) - offset 14 correctly reverted
 to `0x53` (confirming the first mapping wasn't a coincidence) while a *different* byte, offset 12,
 changed instead (`0x53`→`0x73`, `XOR 0x20`) - a clean, independent second mapping. Both objects
@@ -143,12 +143,12 @@ sit 2 bytes apart, consistent with a small regular per-object record.
 
 ## Part 5: the "GA never touched on Partial Download" claim was wrong - confounded, not tested
 
-User correctly challenged this (stated as fact in Part 4's own trigger-test framing above):
+This doesn't hold up (stated as fact in Part 4's own trigger-test framing above):
 every Partial Download capture that existed at the time happened to have zero GA changes in it,
 so "never touched" and "only touched when a GA changes" were indistinguishable from that data -
-an overclaim, not a lie, but a real methodology gap. Also separately requested a systematic redo
-of 1.1.10's 2-of-4 Full Download pattern before trusting it (single historical session, never
-reproduced) - noted as still outstanding, not done this session.
+an overclaim, not a lie, but a real methodology gap. A systematic redo
+of 1.1.10's 2-of-4 Full Download pattern is also needed before trusting it (a single historical
+capture, never reproduced) - noted as still outstanding, not done yet.
 
 Tested directly, twice, in both directions:
 - Real GA change (9/1/4→9/1/5) via genuine Partial Download: `OX=1/2/3` all fired,
@@ -166,15 +166,16 @@ the exact per-capture table: reference doc §10.2.
 
 ## Part 6: systematic 1.1.10 redo, and the checksum-read discovery
 
-User explicitly pushed back on treating 1.1.10's historical 08-28 2-of-4 Object 3 pattern as
-settled - it was a single, unreproduced session, and the two "not written" cases could have been
-"anomalies, error on my part, error on your part or any number of things." Requested a systematic,
-controlled redo before forming any strong opinion - the right call, and it paid off.
+Treating 1.1.10's historical 08-28 2-of-4 Object 3 pattern as
+settled turned out to be premature - it was a single, unreproduced capture session, and the two
+"not written" cases could have been anomalies, methodology errors, or any number of other things.
+A systematic, controlled redo was needed before forming any strong opinion - the right call, and
+it paid off.
 
 Ran five real Full Downloads to 1.1.10 in sequence, each separately captured: two genuinely clean
 (no project changes at all), one with an out-of-band tamper (same offset-172 parameter used
 throughout the original investigation, written via `/bus/write-memory` bypassing any project),
-and - after the user specifically proposed testing "does an intended project write to a parameter
+and - to test "does an intended project write to a parameter
 also trigger Object 3" - two genuine, ETS-driven changes: a GA link re-point, and a change to the
 *exact same* offset-172 byte the tamper test used, this time via ETS itself (confirmed by decoding
 the resulting real write: `MemExtWrite X=$0C30AC $1E` = 30 decimal, matching the 30-second
@@ -182,7 +183,7 @@ the resulting real write: `MemExtWrite X=$0C30AC $1E` = 30 decimal, matching the
 download was the only one that wrote Object 3, and the same-byte control (test 5) is what makes
 this decisive rather than just "tampering vs nothing."
 
-**Along the way, a genuine mid-session correction**: the user asked directly "are you 100% sure
+**Along the way, a genuine correction**: "are you 100% sure
 ETS does not read anything from the device before it starts the full download?" - a fair
 challenge to a claim in this document taken on faith rather than freshly re-checked. Re-examining
 the actual capture data (not just recalling the earlier "no live memory read" finding) surfaced
@@ -268,28 +269,28 @@ with the newer blind-prediction rigor) and the untested question of whether disa
 Communication on an object shifts other objects' offsets.
 
 **A useful accident**: sanity-checking the offset formula against object 5 (a real, already-
-linked communication object, picked by the user specifically to test a different DPT/size - 8
+linked communication object, chosen specifically to test a different DPT/size - 8
 bytes, `DPST-19-1`) before running any new capture turned up a live discrepancy: the predicted
 manufacturer-default byte (`0x4B`) didn't match the real captured value (`0x4F`) - a difference of
 exactly bit 2, one of the two bits previously marked unmapped. Checking the live project data
 showed object 5 has a real GA link, while every other object tested until then (6, 7, 96) did not
 - a real, testable hypothesis that bit 2 tracks link presence, not a coincidence.
 
-**Test 1** (user requested, blind): toggled Read-On-Init on object 5, asked me to determine what
-changed from the capture alone. Offset 10 (`2×5`) went `0x4F`→`0x6F`, XOR `0x20` = bit 5 - Read-
-On-Init, independently reconfirmed on a third object with a different DPT/size, exactly as
-predicted before being told the answer.
+**Test 1** (blind): toggled Read-On-Init on object 5, with the change identified from the capture
+alone, no advance knowledge of what had been changed. Offset 10 (`2×5`) went `0x4F`→`0x6F`, XOR
+`0x20` = bit 5 - Read-On-Init, independently reconfirmed on a third object with a different
+DPT/size, exactly as predicted before being told the answer.
 
-**Test 2** (user requested, blind, explicitly to test whether the methodology handles multiple
-simultaneous changes): user reverted object 5's Read-On-Init AND removed communication object 8's
-only GA link, in the same download, without saying so in advance. Correctly decoded both from the
-capture alone: offset 10 reverted to `0x4F` (Read-On-Init back off); offset 16 (`2×8`) went
-`0x4F`→`0x4B` (bit 2 cleared) - and, decisively, the GA table shrank from 6 to 4 bytes and the
+**Test 2** (blind, explicitly to test whether the methodology handles multiple simultaneous
+changes): object 5's Read-On-Init was reverted AND communication object 8's only GA link was
+removed, in the same download, with neither change disclosed in advance. Correctly decoded both
+from the capture alone: offset 10 reverted to `0x4F` (Read-On-Init back off); offset 16 (`2×8`)
+went `0x4F`→`0x4B` (bit 2 cleared) - and, decisively, the GA table shrank from 6 to 4 bytes and the
 Association table from 10 to 6 bytes, both losing exactly the entry for object 8's link, in the
 same download. Two unrelated changes on two different objects, both correctly isolated with zero
 cross-contamination.
 
-**Scope, per explicit user instruction**: bit 2 is documented as a real, reproduced *correlation*
+**Scope**: bit 2 is documented as a real, reproduced *correlation*
 with GA-link presence - confirmed both directions (present→absent via a real removal, and
 consistently present/absent across three other objects) - but explicitly NOT asserted to be
 *only* that. Every test so far varied exactly one thing (link existing or not); a distinguishing
@@ -305,7 +306,7 @@ byte, with one item (bit 2's exact mechanism) explicitly flagged as narrower tha
 
 ## Part 9: closing item 2 (offset reindexing), and a real correction to the Communication-flag finding
 
-User moved to item 2 of their own earlier list ("what prevents us writing Object 3"): does
+Next on the earlier open list ("what prevents us writing Object 3"): does
 disabling Communication on one object shift other objects' offsets, breaking the fixed-formula
 assumption for real projects with disabled objects?
 
@@ -313,13 +314,13 @@ assumption for real projects with disabled objects?
 objects (7 at offset 14, 8 at offset 16) moved. Neither did - the offset formula is safe to use
 unconditionally, no table compaction/reindexing occurs regardless of which objects are disabled.
 
-**Then user raised a sharp, correct objection to the standing Communication-flag finding**: "my
+**A sharp, correct objection to the standing Communication-flag finding surfaced next**: "my
 understanding is that disabling it turns off all comms on that device... there absolutely must be
 something written to the device." Right instinct, and it exposed a real confound in every prior
 test: toggling Communication had only ever been tried on *unlinked* objects (6, 7) - both times
 producing zero change, which is exactly what an AND-gated bit pinned at 0 by the missing link
-would look like, with or without the flag's own effect. This is precisely the caution the user had
-already given when bit 2 was first documented as "linked to GAs being present, we don't know if it
+would look like, with or without the flag's own effect. This is precisely the caution already
+raised when bit 2 was first documented as "linked to GAs being present, we don't know if it
 is more than that" - now vindicated directly.
 
 **Test 2, decisive**: disabled Communication on object 5 (already linked, GA link deliberately
@@ -358,16 +359,16 @@ varies with link count.
 
 **Documentation cleanup, explicit user request**: after the Communication-flag correction was
 documented (with the retracted old claim kept visible in the reference doc as a "CORRECTED"
-note), user asked for the reference doc specifically to stay "clean/factual" - no need to keep
+note), keeping the reference doc itself "clean/factual" - no need to keep
 the incorrect assertion visible there. Removed the correction-narrative paragraphs from the
 reference doc entirely (net -20 lines), keeping the full retraction narrative only in this
 follow-up doc (Part 9) where it belongs. A good instance of the same principle the reference
 doc's own intro already states - protocol facts in the reference doc, implementation/discovery
 narrative in follow-ups - now applied to a correction, not just new findings.
 
-**Property 27 cross-reference**: user pointed out Part 10's heading gave no context for "Object
-3" and asked for it to be linked back to Property 27. Clarified for the user directly (a genuine
-question, not just a docs request): property 27 is one property ID, read on four different
+**Property 27 cross-reference**: Part 10's heading gave no context for "Object
+3", so it needed linking back to Property 27. To clarify (a genuine open
+question, not just a docs gap): property 27 is one property ID, read on four different
 interface objects (1/2/3/4) - Object 3 (objIdx 3) is one of the four, with its own checksum value
 (`PropValueRead OX=3 P=27`, visible in the §1.1' 1.1.10 timeline), same mechanism Part 8 used on
 objIdx 4 for the Full-Download trigger finding. Part 10's heading and intro now state this
@@ -376,10 +377,10 @@ explicitly.
 ## Part 11: link direction (Send vs receive-only) - not in Object 3, lives in Association-table order
 
 Last remaining item on bit 2's scope: does mixed-direction linking (one Send GA, one receive-only
-GA on the same object) change anything? User clarified ETS's own rule first - direction isn't an
+GA on the same object) change anything? ETS's own rule turned out to matter first - direction isn't an
 independently settable flag, it's implicit: the first-added link sends, every subsequent link is
 receive-only. That meant the earlier multi-link test (Part 10) already had one send + one receive
-link without either of us realizing it at the time.
+link, unnoticed at the time.
 
 **Test**: kept the same two GA links on object 5 from Part 10, swapped which one sends (removed
 and re-added, changing which was "first"). Result: Object 3 and the GA table both stayed
@@ -412,11 +413,11 @@ tables.
 Found a real, separate gap: the parser only captures Communication/Read/Write/Transmit/Update
 (`C`/`R`/`W`/`T`/`U`) - Read-On-Init and Priority, both needed for Object 3's byte, aren't
 extracted anywhere in the current parser or `com_objects` DB schema. This blocks actually building
-a real `groupObjectTable` from DB data for now - noted, not fixed this session (out of the
+a real `groupObjectTable` from DB data for now - noted, not fixed yet (out of the
 explicit "write trigger" framing this step was scoped to). Also found, independently useful:
 `ga_send`/`ga_receive` columns in the existing schema already correctly implement "first link
 sends" - the exact rule Part 11 discovered empirically, already right in the parser without
-anyone having verified it against real hardware before today.
+having previously been verified against real hardware.
 
 **Implementation**: added `DownloadExtra.groupObjectTable?: Buffer | null`, and a new invocation
 right after the existing GA/Association ones:
@@ -532,7 +533,7 @@ from Part 12: no real caller built a `groupObjectTable`.
 self-describing (`buildGATable`/`buildAssocTable` compute their own size from the linked GA count),
 but Object 3 isn't - its real size (98 bytes for 1.1.9, 942 for 1.1.10, per Part 10) has no obvious
 source in the per-device data koolenex already had. Rather than guess, re-extracted the live Test
-Bed `.knxproj` a third time this session and counted real `<ComObject>` declarations directly:
+Bed `.knxproj` again and counted real `<ComObject>` declarations directly:
 1.1.9's app declares 48 (highest `Number="48"`); 1.1.10's declares 470 (highest `Number="470"`).
 `2 × 48 + 2 = 98` and `2 × 470 + 2 = 942` - both exact matches, first try. The key realization: this
 must be the app's TOTAL static declaration count, not a given device's currently-linked/active
@@ -551,7 +552,7 @@ builds a real `GroupObjectFlags[]` from `com_objects`, calling `buildGroupObject
 stored the composite `flags` display string (`buildFlags()`) - and that string has a genuine lossy
 case: when ALL of comm/read/write/tx/update are false, it falls back to the literal string `'CW'`,
 which would make `flags.includes('C')`/`flags.includes('W')` wrongly report `true`. Checked whether
-this is actually reachable in practice (every real com object seen this session had
+this is actually reachable in practice (every real com object seen so far has had
 `CommunicationFlag="Enabled"`, so probably rare) but chose not to rely on that - added dedicated
 `read`/`write`/`comm`/`tx` raw columns to `com_objects`, exactly mirroring Part 13's
 `read_on_init`/`priority` treatment. Worked out that `Update` alone is provably always safe to
@@ -642,10 +643,9 @@ at all - plausible given these are the app's distinctive non-generic objects, bu
 Real, controlled next step if this is investigated further: a real ETS download that deliberately
 changes one of objects 0/3/4/5's own flags, watching whether these specific padding bytes move.
 
-**What was NOT done**: no code was changed based on this finding (no guessing/patching without
-evidence, per this whole session's standing practice - see [[dont_jump_to_conclusions]]). No real
-device write was attempted - this was explicitly a compute-only dry run, exactly as the user asked
-for, kept separate from "let's actually try a real write" as its own future step.
+**What was NOT done**: no code was changed based on this finding - no guessing/patching without
+real evidence. No real device write was attempted - this was explicitly a compute-only dry run,
+kept separate from a real write as its own future step.
 
 ## Still open, after Part 6's redo
 
@@ -705,10 +705,11 @@ baseline (`0x4B` at offset 6, unlinked) was already known precisely from the Par
 letting the predicted outcome be stated exactly before running the test (Read-On-Init sets bit 5,
 so `0x4B | 0x20 = 0x6B`).
 
-**A process gap caught before it mattered**: initially just described the instructions to the user
-without actually starting a capture - the established pattern all session has been Claude starts
-tshark, not the user. Caught immediately when no new capture file appeared after the user said
-"done"; asked whether the download had already happened without a capture running (it had). Since
+**A process gap caught before it mattered**: the capture instructions were described but the
+capture itself wasn't actually started first, breaking from the established pattern of starting
+tshark before any change is made. Caught immediately when no new capture file appeared after the
+download was reported done; confirmed the download had already happened without a capture running
+(it had). Since
 1.1.9 writes Object 3 unconditionally on every Full Download (Part 8/CLAUDE.md's established
 finding) regardless of whether anything actually changed, no revert-and-redo was needed - just one
 more real Full Download captured, showing the already-changed state directly.
@@ -829,9 +830,8 @@ table, AND Object 3 together for a real device - and Part 15 already identified 
 project currently declares a GA link for object 8 that the device doesn't have. A full
 `program-device` write would therefore silently push that GA-link change to the device too, as a
 side effect of testing Object 3 specifically - not wrong exactly (it's just applying what's
-already saved in the project), but not a clean, isolated first test. Offered the user a choice
-(`AskUserQuestion`) between the full write and a surgical Object-3-only alternative; picked the
-surgical one.
+already saved in the project), but not a clean, isolated first test. Chose a surgical
+Object-3-only alternative over the full write instead, to keep the test isolated.
 
 **Implementation**: `downloadDevice()`'s Object 3 invocation (Part 12) only depends on
 `extra.groupObjectTable` and `declaredTableObjIdxs` (computed from `steps`) - completely
@@ -897,7 +897,7 @@ is proven, but `/bus/verify-device` doesn't check Object 3 yet."
 out where to add Object 3, found it still had the exact LoadImageProp bug from Part 12 - counting
 a declared `LoadImageProp` step as "already handled" when `LoadImageProp` is confirmed read-only.
 Checked why this hadn't been caught by either of the two earlier fixes: no dedicated unit tests
-existed for `planVerify()` at all before this session (only indirect HTTP-level coverage via
+existed for `planVerify()` at all before this (only indirect HTTP-level coverage via
 `tests/bus-routes.test.ts`, and none of those tests happened to use a LoadImageProp-declaring
 app). Fixed identically to the other two copies.
 

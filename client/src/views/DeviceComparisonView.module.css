@@ -351,17 +351,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Object 3 rows' per-flag chip display (2026-08-29, replacing an earlier
-   wrapped-sentence attempt - see docs/knx-device-write-protocol.md Part 21
-   in the koolenex repo) - one small letter box per boolean flag, ETS's own
-   checkbox order (Communication, Read, Write, Transmit, Update, Read On
-   Init - matches real ETS's parameter UI, not the underlying bit order),
-   green when set / muted when clear, so every flag is visible at a glance
-   without hovering. Priority/Size sit alongside as plain compact text (not
-   booleans, so not chips). Deliberately plain `<span>`s, not buttons yet -
-   structured this way so a future click-to-edit pass (see
-   [[koolenex_ui_todo]] item 2) can wire an onClick straight onto each chip
-   without restructuring the display first. */
+/* Object 3 rows' per-flag chip display - one small letter box per boolean
+   flag, ETS's own checkbox order (Communication, Read, Write, Transmit,
+   Update, Read On Init - matches real ETS's parameter UI, not the
+   underlying bit order), green when set / muted when clear, so every flag
+   is visible at a glance without hovering. Priority/Size sit alongside as
+   plain compact text (not booleans, so not chips). Deliberately plain
+   `<span>`s, not buttons yet - structured this way so a future
+   click-to-edit pass can wire an onClick straight onto each chip without
+   restructuring the display first. */
 .flagChips {
   display: flex;
   align-items: center;

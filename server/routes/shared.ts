@@ -310,8 +310,8 @@ export function clearPendingChanges(deviceId: number): void {
 // with zero pending rows (every outstanding edit has been reverted back to
 // its own baseline), a 'modified' device reverts to 'programmed' too, with
 // its own audit entry. Deliberately does NOT try to restore a previously-
-// cleared last_verify_match on a revert - confirmed with the user this is
-// the right call (verify describes a real bus round-trip; a net-zero edit
+// cleared last_verify_match on a revert - the right call, since
+// verify describes a real bus round-trip; a net-zero edit
 // history doesn't recreate the evidence a real Verify would have to
 // provide fresh) - `verifyCleared` reports what happened in THIS call only.
 //

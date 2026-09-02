@@ -117,9 +117,9 @@ two-pass read (real 2-byte count field first, then the real full length it impli
 defensively at 2000 bytes) rather than trusting the project's assumed size. Reconfirmed correct on
 real hardware after the fix, same reproduction steps.
 
-**UI refinement, same session**: the two separate "params matched"/"GAs matched" badges were
+**UI refinement**: the two separate "params matched"/"GAs matched" badges were
 combined into one (`All N params / M GAs matched`, or composing whichever side has a nonzero count
-when something differs) - per the user's observation that the page shows both scopes together
+when something differs) - the page shows both scopes together
 with no real filtering distinction between them, so two badges was pure redundancy once neither
 had anything to report. Commit `6f0bff0`. The Group Addresses table section also got a
 deliberately stronger, fixed visual treatment (thicker border, left accent bar, bold title)

@@ -31,9 +31,9 @@ Every factual claim is tagged:
 (§6.4), and §7 are confirmed only against the two Albrecht Jung devices in this project's own
 testbed (1.1.9, 1.1.10), both mask `0x07B0` (System B, a device classification explained in §1) —
 nothing there has been confirmed against a different manufacturer or mask version, unless noted.
-§4.1 (memory-write service selection) and §4.1d (Verify Mode) have a much broader real sample: nine
-app/device combinations across four manufacturers (Albrecht Jung, HDL, Gira, Weinzierl) as of
-2026-09-01 — see those sections for the breakdown. §4.1a–§4.1c (chunk sizing, cached APDU length,
+§4.1 (memory-write service selection) and §4.1d (Verify Mode) have a much broader real sample: all
+eight devices in the Test hardware table above, across four manufacturers (Albrecht Jung, HDL,
+Gira, Weinzierl) as of 2026-09-01 — see those sections for the breakdown. §4.1a–§4.1c (chunk sizing, cached APDU length,
 the legacy write-encoding fix) are confirmed on HDL in addition to the two Jung devices. §9 (device
 addressing) is confirmed on HDL in addition to Jung.
 
@@ -60,48 +60,26 @@ matters because it changes which lower-level services the device actually suppor
 ## Test hardware
 
 Real hardware used across this document, spanning two sites: this project's own testbed, and a
-second, unrelated production site.
+second, unrelated production site. The **Write service** column exists because §4.1 (which
+memory-write service a device requires) and §4.1d (Verify Mode) are confirmed or cross-checked
+against every device below; everywhere else in this document (§1–§3, §5–§7) is derived from the
+three testbed devices only.
 
-| Device | Manufacturer | Individual address | Mask version | Site | Role |
-|---|---|---|---|---|---|
-| KNX IP router (additional function) | Albrecht Jung | 1.1.9 | `07B0` (System B) 🟢 | Testbed | koolenex writes |
-| 4-gang dimmer actuator | Albrecht Jung | 1.1.10 | `07B0` (System B) 🟢 | Testbed | koolenex writes — real memory addresses above `0xFFFF`, and the only testbed device whose configuration declares the checksum step (§7) |
-| `M/AG40B.1` actuator | HDL | 1.1.20 / 1.1.21 (readdressed across sessions) | `07B0` (System B) 🟢 | Testbed | koolenex writes — added to diversify the testbed by manufacturer; used extensively, across §4.1a–§4.1d and §9 |
-| 5292 1ST pushbutton | Albrecht Jung | 1.1.240 | — | Production | ETS download only |
-| Presence detector Universal | Albrecht Jung | 1.1.42 | — | Production | ETS download only |
-| TSM pushbutton | Albrecht Jung | 1.1.200 | `MV-0705` | Production | ETS download only — older app generation (`LoadProcedureStyle="ProductProcedure"`, §4.1d) |
-| Smoke alarm, part 234300 | Gira | 1.1.24 | — | Production | ETS download only |
-| `KNX IO 534 CV (4D)` RGBW controller | Weinzierl | 1.1.11 | — | Production | ETS download only |
+| Device | Manufacturer | Individual address | Mask version | Site | Write service | Role |
+|---|---|---|---|---|---|---|
+| KNX IP router (additional function) | Albrecht Jung | 1.1.9 | `07B0` (System B) 🟢 | Testbed | Extended | koolenex writes |
+| 4-gang dimmer actuator | Albrecht Jung | 1.1.10 | `07B0` (System B) 🟢 | Testbed | Extended | koolenex writes — real memory addresses above `0xFFFF`, and the only testbed device whose configuration declares the checksum step (§7) |
+| `M/AG40B.1` actuator | HDL | 1.1.20 / 1.1.21 (readdressed across sessions) | `07B0` (System B) 🟢 | Testbed | Legacy | koolenex writes — added to diversify the testbed by manufacturer; used extensively, across §4.1a–§4.1d and §9 |
+| 5292 1ST pushbutton | Albrecht Jung | 1.1.240 | — | Production | Extended | ETS download only |
+| Presence detector Universal | Albrecht Jung | 1.1.42 | — | Production | Legacy | ETS download only — same manufacturer as the extended-service devices above, isolating app generation from manufacturer (§4.1) |
+| TSM pushbutton | Albrecht Jung | 1.1.200 | `MV-0705` | Production | Legacy | ETS download only — older app generation (`LoadProcedureStyle="ProductProcedure"`, §4.1d) |
+| Smoke alarm, part 234300 | Gira | 1.1.24 | — | Production | Legacy | ETS download only — no `LdCtrlWriteRelMem`/`Verify` attribute at all (§4.1d) |
+| `KNX IO 534 CV (4D)` RGBW controller | Weinzierl | 1.1.11 | — | Production | Legacy | ETS download only — falsified the `PID_MCB_TABLE` byte-5 candidate rule (§4.1) |
 
 Mask versions confirmed via a live device-descriptor read against real hardware (§2.1) where
 noted, cross-checked against the KNX standard's own published mask-version table, which classifies
 `07B0` (and its variants `17B0`/`27B0`/`57B0`, for different physical media) as management model
-"System B" — a real KNX-standardized device-family classification, not manufacturer-specific. The
-deep protocol mechanics in §1–§3 and §5–§7 are derived from the three testbed devices; §4.1 and
-§4.1d additionally draw on the five production-site devices — see those sections, and the broader
-per-app sample below, for the per-finding breakdown.
-
-### Broader sample: capturing real ETS download packets (§4.1 write-service selection, §4.1d Verify Mode)
-
-Beyond the 3 devices koolenex has written to, memory-write-service selection and Verify Mode
-specifically have been confirmed or cross-checked against a much wider sample — **9 app/device
-combinations across 4 manufacturers, as of 2026-09-01** — by capturing and decoding real ETS's own
-download traffic against each one, not by koolenex writing to them:
-
-| Manufacturer | App / product | Individual address | Write service | Confirmed via | Role |
-|---|---|---|---|---|---|
-| Albrecht Jung | 1.1.9 (see Test hardware table above) | 1.1.9 | Extended | koolenex write 🟢 | Deep protocol testbed |
-| Albrecht Jung | 1.1.10 (see Test hardware table above) | 1.1.10 | Extended | koolenex write 🟢 | Deep protocol testbed |
-| Albrecht Jung | 5292 1ST pushbutton, app `D142-21-8848-O000A` | 1.1.240 | Extended | ETS capture only | Live production device, second unrelated site |
-| Albrecht Jung | "Presence detector Universal", app `A011-13-400D` | — | Legacy | ETS capture only | Same manufacturer as the three extended-service apps above — isolates app/generation from manufacturer as the explanatory variable |
-| Albrecht Jung | Older-generation push-button module, app `1106-11-5D53` (`MaskVersion="MV-0705"`, `LoadProcedureStyle="ProductProcedure"` — a materially different load mechanism, §4.1d) | — | Legacy | ETS capture only | As above |
-| HDL | `M/AG40B.1`, app `M-0073_A-20A9-10-EAA5` | 1.1.20 / 1.1.21 (readdressed across sessions, §4.1c/§9) | Legacy | koolenex write 🟢 | This project's own testbed — chunk-size ceiling (§4.1a), legacy write-encoding fix (§4.1c), and addressing (§9.3–§9.5) all derived from this device |
-| HDL | Second, distinct app, `20A8-10-3AB7` | — | Legacy | ETS capture only | Same-manufacturer control point for the write-service sample |
-| Gira | Smoke-alarm app, `C016-02-1019` | — | Legacy | ETS capture only | Uses `LdCtrlAbsSegment`/`LdCtrlTaskSegment`, not `LdCtrlWriteRelMem` — no `Verify` attribute at all (§4.1d) |
-| Weinzierl | `KNX IO 534 CV (4D)`, app `0508-10-B5DC` | — | Legacy | ETS capture only | Falsified the `PID_MCB_TABLE` byte-5 candidate rule (§4.1) |
-
-See §4.1 for the write-service-selection evidence itself and §4.1d for Verify Mode; individual
-addresses not listed above were never assigned/recorded for that app in this project's data.
+"System B" — a real KNX-standardized device-family classification, not manufacturer-specific.
 
 ## 1. Session overview
 
@@ -291,17 +269,16 @@ would matter. Tracked in the `knx-ets-manager` repo's `CLAUDE.md` ("Track B writ
 section, standing-gaps list) too — update both if this gets confirmed or disproven.
 
 **Update 2026-09-01 — sample considerably broadened, including a same-manufacturer control test,
-still an inference not a confirmed rule.** Real captures now cover nine app/device combinations
-across four manufacturers: `IsSecureEnabled="true"` and extended service — three Jung apps (1.1.9,
-1.1.10, and the production `D142-21-8848-O000A` pushbutton). `IsSecureEnabled` absent and legacy
-service — HDL (two distinct apps, `20A9-10-EAA5` and `20A8-10-3AB7`), a Gira smoke-alarm app
-(`C016-02-1019`), Weinzierl's `KNX IO 534 CV (4D)` (`0508-10-B5DC`), and two further Jung apps: a
-"Presence detector Universal" (`A011-13-400D`) and an older-generation push-button module
-(`1106-11-5D53`, `MaskVersion="MV-0705"`, `LoadProcedureStyle="ProductProcedure"` — a materially
-different load mechanism from the `MergedProcedure`/`RelSegment`-style apps used everywhere else
-in this document). The latter two are notable because they are the same manufacturer as the three
-`IsSecureEnabled=true` apps above, isolating app generation from manufacturer as the candidate
-explanatory variable — nine for nine, no counter-example found so far. Still an inference, not a
+still an inference not a confirmed rule.** Real captures now cover all eight devices in the Test
+hardware table above, across four manufacturers: `IsSecureEnabled="true"` and extended service —
+three Jung devices (1.1.9, 1.1.10, and the production 5292 1ST pushbutton). `IsSecureEnabled`
+absent and legacy service — HDL (`M/AG40B.1`), a Gira smoke-alarm device, Weinzierl's `KNX IO 534
+CV (4D)`, and two further Jung devices: a "Presence detector Universal" and the TSM pushbutton
+(`MaskVersion="MV-0705"`, `LoadProcedureStyle="ProductProcedure"` — a materially different load
+mechanism from the `MergedProcedure`/`RelSegment`-style apps used everywhere else in this
+document). The latter two are notable because they are the same manufacturer as the three
+`IsSecureEnabled=true` devices above, isolating app generation from manufacturer as the candidate
+explanatory variable — eight for eight, no counter-example found so far. Still an inference, not a
 proof: the underlying mechanism connecting `IsSecureEnabled` to write-service selection is not
 independently confirmed from any primary KNX source, and the falsifying test described in the
 paragraph above (a large-segment app with `IsSecureEnabled` absent, or a small-segment app with it

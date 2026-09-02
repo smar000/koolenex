@@ -67,7 +67,7 @@ second, unrelated production site.
 | KNX IP router (additional function) | Albrecht Jung | 1.1.9 | `07B0` (System B) 🟢 | Testbed | koolenex writes |
 | 4-gang dimmer actuator | Albrecht Jung | 1.1.10 | `07B0` (System B) 🟢 | Testbed | koolenex writes — real memory addresses above `0xFFFF`, and the only testbed device whose configuration declares the checksum step (§7) |
 | `M/AG40B.1` actuator | HDL | 1.1.20 / 1.1.21 (readdressed across sessions) | `07B0` (System B) 🟢 | Testbed | koolenex writes — added to diversify the testbed by manufacturer; used extensively, across §4.1a–§4.1d and §9 |
-| 5292 1ST pushbutton ("PB4-240: Bedroom 4 Entrance") | Albrecht Jung | 1.1.240 | — | Production | ETS download only |
+| 5292 1ST pushbutton | Albrecht Jung | 1.1.240 | — | Production | ETS download only |
 | Presence detector Universal | Albrecht Jung | 1.1.42 | — | Production | ETS download only |
 | TSM pushbutton | Albrecht Jung | 1.1.200 | `MV-0705` | Production | ETS download only — older app generation (`LoadProcedureStyle="ProductProcedure"`, §4.1d) |
 | Smoke alarm, part 234300 | Gira | 1.1.24 | — | Production | ETS download only |

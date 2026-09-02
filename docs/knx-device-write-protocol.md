@@ -27,12 +27,15 @@ Every factual claim is tagged:
   in isolation.
 - 🔴 **SPECULATIVE** — a guess or open question. Not a fact.
 
-**Sample size, throughout §1–§8**: all real-hardware evidence there comes from exactly two
-physical devices, both from one manufacturer (Albrecht Jung), both the same KNX "mask version" (a
-device classification explained in §1) — System B, `0x07B0`. Nothing in §1–§8 has been confirmed
-against a different manufacturer, a different mask version, or other hardware, unless noted. §9
-(device addressing) additionally uses a third, brand-new device from a different manufacturer
-(HDL) — noted there specifically.
+**Sample size varies by section.** §1–§3, §4.2–§4.3, §5, §6.1–§6.3, object 3's record layout
+(§6.4), and §7 are confirmed only against the two Albrecht Jung devices in this project's own
+testbed (1.1.9, 1.1.10), both mask `0x07B0` (System B, a device classification explained in §1) —
+nothing there has been confirmed against a different manufacturer or mask version, unless noted.
+§4.1 (memory-write service selection) and §4.1d (Verify Mode) have a much broader real sample: nine
+app/device combinations across four manufacturers (Albrecht Jung, HDL, Gira, Weinzierl) as of
+2026-09-01 — see those sections for the breakdown. §4.1a–§4.1c (chunk sizing, cached APDU length,
+the legacy write-encoding fix) are confirmed on HDL in addition to the two Jung devices. §9 (device
+addressing) is confirmed on HDL in addition to Jung.
 
 ## Some KNX terms used throughout
 
@@ -55,6 +58,11 @@ Every device also reports a 2-byte **mask version** — a KNX-standardized code 
 matters because it changes which lower-level services the device actually supports (§4.1).
 
 ## Test hardware
+
+These two devices are the primary testbed the deep protocol mechanics in this document (§1–§3,
+§5–§7) were derived from. A wider set of devices/apps across four manufacturers (Albrecht Jung,
+HDL, Gira, Weinzierl) has since confirmed or cross-checked the memory-write-service selection
+(§4.1) and Verify Mode (§4.1d) findings specifically — see those sections for the full list.
 
 | Device | Individual address | Mask version | Role |
 |---|---|---|---|
@@ -229,11 +237,11 @@ implemented rule specifically because it would require guessing a numeric thresh
 completely unconfirmed gap (anywhere from ~200 to ~4000 bytes would fit the three known points
 equally well), whereas `IsSecureEnabled` is a real declared boolean requiring no threshold at all.
 
-**A fourth real device reinforces the same pattern, same day**: Jung 5292 1ST (a 2-gang
+**A fourth real device reinforces the same pattern**: Jung 5292 1ST (a 2-gang
 pushbutton panel, product `M-0004_H-4.20.2F.2F.2052921ST-0-O000A_P-52921ST`, app
 `M-0004_A-D142-21-8848-O000A`) — a genuine **live production device** at a second, unrelated real
-site, downloaded to directly via real ETS (never touched by koolenex, so zero risk to the live
-installation). `IsSecureEnabled="true"`, segment `Size="6152"`, real capture confirms
+site, downloaded to directly via real ETS (not a koolenex write).
+`IsSecureEnabled="true"`, segment `Size="6152"`, real capture confirms
 `MemExtWrite` used throughout, including at least one chunk (`X=$00F000`) whose address fits
 comfortably in 16 bits — the same decisive shape as the original 1.1.9 evidence. 4 for 4 now
 (`IsSecureEnabled=true` → extended on all three Jung/production apps; absent → legacy on the one
@@ -388,14 +396,11 @@ genuine independent confirmation, not a coincidence of re-deriving the same numb
 **Real ETS stores its own resolved `PID_MAX_APDULENGTH` directly on each `<DeviceInstance>`
 element in the `.knxproj`** — `LastUsedAPDULength` and `ReadMaxAPDULength`, confirmed present on
 every real device instance checked across two separate real projects (this project's own testbed,
-and a second, unrelated live/production site). Found 2026-08-31 while cross-checking the
-`IsSecureEnabled` hypothesis against a fourth real device (Jung 5292 1ST, a production device an
-ETS Full Download was done to directly — not touched by koolenex at all, since it's a live
-production device).
+and a second, unrelated production site, via Jung 5292 1ST).
 
 Confirmed exact match against a live read for one real device: HDL's cached
 `LastUsedAPDULength`/`ReadMaxAPDULength` are both `55`, identical to the live `PID_MAX_APDULENGTH`
-property-56 read decoded earlier the same session (§4.1a). For 1.1.9 the two cached fields
+property-56 read decoded earlier (§4.1a). For 1.1.9 the two cached fields
 *differ* — `LastUsedAPDULength=239`, `ReadMaxAPDULength=248` — 🟡 **INFERRED, not independently
 confirmed**: `ReadMaxAPDULength` looks like the device's raw declared capability (what a live
 property-56 read would itself return), while `LastUsedAPDULength` is what ETS actually chose to
@@ -415,12 +420,12 @@ downloaded to from this project needs zero extra bus round-trips to get its corr
 The live read remains the fallback for a device that's never been downloaded to from this project
 (no cached value yet, e.g. right after import, before any real session).
 
-🔴 This has not yet been exercised end-to-end on real hardware in its NEW cached-path form (the
-HDL Full Download that confirmed the 52-byte ceiling used the LIVE property-56 read, since the
-caching code didn't exist yet at that point in the same session) - typechecked and covered by the
-existing PID_MAX_APDULENGTH test suite (which exercises the underlying `maxChunkFromApduLength()`
-formula, not the new cached-value plumbing specifically), but a real download that actually takes
-the cached-value branch (not the live-read fallback) has not been independently confirmed yet.
+🔴 The cached-path branch itself has not yet been exercised end-to-end on real hardware — the HDL
+Full Download that confirmed the 52-byte ceiling (§4.1a) predates this caching code and used the
+live property-56 read instead. Typechecked and covered by the existing `PID_MAX_APDULENGTH` test
+suite (which exercises the underlying `maxChunkFromApduLength()` formula, not the cached-value
+plumbing specifically), but a real download that actually takes the cached-value branch (not the
+live-read fallback) has not been independently confirmed.
 
 **Gotcha**: at least one common packet-capture tool's own protocol dissector has repeatedly
 mis-displayed this write's target address in its one-line summary view (observed showing one
@@ -428,77 +433,52 @@ address when the real decoded address, from the raw bytes, was a different one).
 capture tool's own summary/quick-view for a memory-write address — always manually decode the
 raw bytes.
 
-**Real per-chunk flow control, not a fixed pace** 🟢, found 2026-08-30 investigating a genuinely
-blank (factory-reset) device: a large object (e.g. the parameter object, split into many
-same-size memory-write chunks) sent as a fast, fire-and-forget burst — one write chunk immediately
-after the previous, with no wait for each chunk's own response — measurably outruns the device's
-own processing rate. Symptom observed live: after such a burst, the device kept sending write
-responses for several more seconds (~9s trickle observed) after koolenex had already finished
-sending, and any read issued to the device during that backlog (e.g. the next object's
-`PID_TABLE_REFERENCE` resolve, §3.1) went unanswered — not because the address was genuinely
-unallocated, but because the device had no processing capacity free to answer it.
+**Real per-chunk flow control is required, not a fixed pace** 🟢: sending write chunks as a fast,
+fire-and-forget burst (no wait for each chunk's own response) measurably outruns a device's own
+processing rate — the device falls behind, and any read issued to it while backlogged (e.g. the
+next object's `PID_TABLE_REFERENCE` resolve, §3.1) goes unanswered, indistinguishable from an
+unallocated address. Real ETS avoids this by waiting for each chunk's own write response before
+sending the next one — confirmed directly from a real capture: per-chunk response time varies
+observably (56ms–279ms), never a fixed pace. A per-chunk `await` on the matching
+`Memory_Response`/`MemoryExtended_Write_Response` (generous timeout, tolerant catch-and-continue —
+occasionally missing one response should not abort the whole download) matches this behavior.
+Implemented in `downloadDevice()`'s memory-write loop (`server/knx-connection.ts`).
 
-**Real ETS never has this problem because it waits for each chunk's own write response before
-sending the next one** — confirmed directly from a real capture: per-chunk response time varies
-observably (56ms–279ms across chunks in the same session), never a fixed pace. This means the
-correct fix is genuine flow control (wait for the real device response before sending the next
-chunk), not a fixed or scaled delay between chunks — a scaled-delay guess was tried first and,
-while it reduced the failure rate, did not fully eliminate it; real per-chunk `await` on the
-matching `Memory_Response`/`MemoryExtended_Write_Response` (with a generous timeout and a
-tolerant catch-and-continue, matching the existing `propWrite` pattern, since occasionally missing
-one response should not abort the whole download) is what actually matched real ETS's own
-behavior and resolved the issue. Implemented 2026-08-30 in `downloadDevice()`'s memory-write loop
-(`server/knx-connection.ts`).
-
-**Real per-chunk size: up to 228 bytes, not a small fixed pace** 🟢, found 2026-08-30 diagnosing a
-correct-but-very-slow real download (every chunk got a real, healthy response - the flow-control
-fix above was working - but writing 10KB of parameter memory still took several minutes). Decoded
-every `MemoryExtended_Write` chunk size directly from a real ETS Full Download capture
+**Real per-chunk size: up to 228 bytes** 🟢. Decoded every `MemoryExtended_Write` chunk size
+directly from a real ETS Full Download capture
 (`docs/data/captures/2026-08-30_ets_full_download_serial_addressing.pcapng`): the real values seen
-are 1, 2, 3, 4, 5, 6, 7, 10, 15, 30, 61, 62, 97, and 228 bytes - i.e. ETS writes as much as fits in
-one chunk, capped at 228, using the smaller values only for a segment's tail remainder or
-genuinely small segments, never a fixed small pace. koolenex's own `MEM_CHUNK` constant had been
-`10` for as long as this per-chunk-flow-control code existed, with no real evidence behind that
-specific number - it made every chunk correct, just forced roughly 23x more round trips than the
-data needed. Fixed to `228`, confirmed against the real wire bytes above rather than assumed.
-Confirmed live afterward on real hardware: a real Full Download to 1.1.10 (10,433 bytes of
-parameter memory) that previously took 9+ minutes to reach 54% completed cleanly in ~38 seconds.
+are 1, 2, 3, 4, 5, 6, 7, 10, 15, 30, 61, 62, 97, and 228 bytes — ETS writes as much as fits in one
+chunk, capped at 228, using smaller values only for a segment's tail remainder or genuinely small
+segments. `MEM_CHUNK` is set to `228` accordingly. Confirmed live on real hardware: a Full Download
+to 1.1.10 (10,433 bytes of parameter memory) that previously took 9+ minutes to reach 54% completed
+cleanly in ~38 seconds at this chunk size.
 
-**The read side (`readMemory()`/`readMemoryMany()`, used by `/bus/verify-device`) has the same
-slowness, for the same reason, and 228 turned out to be safe for reads too** 🟢 - a real
-`MemoryExtended_Read` at 228 bytes against 1.1.10 came back `rc=252` (a genuine device-reported
-error) on a first attempt live 2026-08-30, which looked at the time like reads and writes had
-asymmetric safe chunk sizes. Root-caused the same day: that test used a stale database device id
-(a project reimport had regenerated device rows), so the GA table's computed "expected" length was
-wrong, and the read request over-ran the real, much smaller table actually allocated on the device
-- confirmed directly, with the correct device id, that a single read at the table's real exact size
-(6 bytes here) succeeds cleanly at any chunk size, including 228. Restored to 228, matching the
-write side; `readRegionInSession()`'s own `Math.min(chunkSize, length - off)` already clamps
-correctly down to a small region's real length regardless of chunk size, so 228 is safe for both
-the large parameter-memory region (where it matters for speed) and small undeclared tables (where
-it's a no-op).
+**228 is also safe for reads** 🟢 (`readMemory()`/`readMemoryMany()`, used by `/bus/verify-device`).
+`readRegionInSession()`'s own `Math.min(chunkSize, length - off)` already clamps correctly down to
+a small region's real length regardless of chunk size, so 228 is safe for both the large
+parameter-memory region (where it matters for speed) and small undeclared tables (where it's a
+no-op). **Gotcha worth keeping in mind when diagnosing a read failure**: an over-length read
+request (e.g. built from a stale/mismatched table-size computation) can come back as a genuine
+device-reported error (`rc=252`) that looks like a chunk-size problem but is actually a
+request-size problem — check the requested length against the table's real allocated size before
+suspecting the chunk size itself.
 
-**A second, genuinely separate read bug was found the same day, independent of chunk size
-entirely** 🟢: a real device answered a large single read request (98 bytes, Object 3's whole
-table) with a genuinely SHORT response (~34 real bytes) - the request was well-formed and the
-device ACKed it (`returnCode=0`), it simply didn't return everything asked for in one response.
-`readRegionInSession()`'s loop used to advance its read offset by the REQUESTED amount regardless
-of how much data actually came back, permanently losing the shortfall - every later byte silently
-stayed at the output buffer's zero default, indistinguishable from genuine on-device content. This
-produced a symptom that looked exactly like a real device-side data-loss/hardware limitation (a
-whole block of communication-object flags reading back as blank/default, consistently, across
-multiple real downloads from both koolenex AND real ETS) until a deliberately smaller, separate
-re-read of the same address range came back with the real, non-zero content the large read had been
-silently dropping the whole time. Fixed: the read loop now advances by what was ACTUALLY received,
-retrying for the genuine remainder, rather than assuming a fixed chunk size always arrives in full.
-A real, general lesson from how long this one took to find: a symptom that looks identical whether
-produced by "the device didn't persist this" or "our own read didn't retrieve this" cannot be told
-apart by re-reading with the same buggy read path, no matter how many times or how carefully - it
-took an intentionally differently-shaped read (a smaller, separate chunk) to reveal which one it
-actually was.
+**A read bug, independent of chunk size**: a real device answered a large single read request (98
+bytes, Object 3's whole table) with a genuinely SHORT response (~34 real bytes) — the request was
+well-formed and the device ACKed it (`returnCode=0`), it simply didn't return everything asked for
+in one response. `readRegionInSession()`'s loop used to advance its read offset by the REQUESTED
+amount regardless of how much data actually came back, permanently losing the shortfall — every
+later byte silently stayed at the output buffer's zero default, indistinguishable from genuine
+on-device content (this produced a symptom identical to real device-side data loss: a whole block
+of communication-object flags reading back as blank/default, consistently, across multiple real
+downloads from both koolenex and real ETS). Fixed: the read loop now advances by what was ACTUALLY
+received, retrying for the genuine remainder, rather than assuming a fixed chunk size always
+arrives in full. **General lesson**: a symptom that looks identical whether produced by "the device
+didn't persist this" or "the read didn't retrieve this" cannot be told apart by re-reading with the
+same buggy read path, no matter how many times — only a deliberately differently-shaped read (a
+smaller, separate chunk) revealed which one it actually was.
 
-**A third, separate read bug found the same day, once the short-response fix made larger reads
-practical again** 🟢: the legacy (non-extended) `Memory_Read` service packs its requested byte
+**A third, separate read bug**: the legacy (non-extended) `Memory_Read` service packs its requested byte
 count into a 6-bit field of the APCI byte, giving a real maximum of 63, not 255 (the extended
 service's limit). A request for exactly 64 bytes silently wrapped to a 0-byte count field
 (`64 & 0x3f = 0`), producing a well-formed but meaningless request; the device correctly rejected
@@ -828,8 +808,8 @@ instance-level attributes, when present, and preferring them. Confirmed against 
 capture: the affected byte (Read-On-Init) now matches exactly once the override is applied.
 
 **Group Object Size code** (the companion byte) — the standard KNX 4-bit code for a
-communication object's expected data size, confirmed 4-for-4 against real declared sizes on two
-devices/manufacturers:
+communication object's expected data size, confirmed 4-for-4 against real declared sizes on both
+test devices (1.1.9, 1.1.10 — same manufacturer, not independently confirmed on another):
 
 | Code | Size | Code | Size |
 |---|---|---|---|
@@ -1126,22 +1106,20 @@ this capture was taken, in the same order real ETS uses.
 
 ### 9.5 koolenex's own detect-before-write UI flow, live-tested end-to-end on a second manufacturer 🟢
 
-Real, live-hardware testing session, 2026-08-31, against the §9.3/9.4 device (HDL `M/AG40B.1`,
-mask `07b0`) via koolenex's own UI (`AddressDeviceModal.tsx`'s "Write Address" button), not a
-direct protocol capture of ETS. Three real bugs found and fixed in the process, plus one real,
-still-open behavioral gap:
+Real, live-hardware testing against the §9.3/9.4 device (HDL `M/AG40B.1`, mask `07b0`) via
+koolenex's own UI (`AddressDeviceModal.tsx`'s "Write Address" button), not a direct protocol
+capture of ETS. Three real bugs found and fixed, plus one real, resolved behavioral question:
 
 - **`readSerialNumbersInProgrammingMode()` alone got zero replies from this device, even with the
   physical button genuinely held** - cross-checked directly against §9.4's own real ETS capture
-  taken the same day against the same physical unit, which shows ETS itself using
-  `checkProgrammingMode()`'s mechanism (`A_IndividualAddress_Read`) instead, not the
-  `A_SystemNetworkParameter_Read`-based one. **This is a real per-manufacturer/mask gap, not a bug
-  in either service** - both remain independently real-hardware confirmed (§9.2 for
-  `readSerialNumbersInProgrammingMode()` on the Albrecht Jung devices tested there; this section
-  for `checkProgrammingMode()` on HDL). Fixed at the call site (`AddressDeviceModal.tsx`'s
-  `writeAddressDirect()`), not in either service itself: both are now run concurrently and their
-  results merged by responding address, covering either manufacturer without slowing down the one
-  that answers the faster/richer service.
+  against the same physical unit, which shows ETS itself using `checkProgrammingMode()`'s
+  mechanism (`A_IndividualAddress_Read`) instead, not the `A_SystemNetworkParameter_Read`-based
+  one. **This is a real per-manufacturer/mask gap, not a bug in either service** - both remain
+  independently real-hardware confirmed (§9.2 for `readSerialNumbersInProgrammingMode()` on the
+  Albrecht Jung devices tested there; this section for `checkProgrammingMode()` on HDL). Fixed at
+  the call site (`AddressDeviceModal.tsx`'s `writeAddressDirect()`), not in either service itself:
+  both are now run concurrently and their results merged by responding address, covering either
+  manufacturer without slowing down the one that answers the faster/richer service.
 - **A one-shot broadcast only catches a device already in programming mode at the exact instant
   it's sent** - a telegram can't retroactively be seen by a device that enters programming mode
   moments later. Real ETS itself (§9.3/9.4 captures) re-sends its own equivalent broadcast roughly
@@ -1154,25 +1132,23 @@ still-open behavioral gap:
   `readSerialNumbersInProgrammingMode()` deliberately never resolves early (by design, so it can
   collect replies from more than one simultaneous device - see §9.1); `Promise.all` doesn't resolve
   until *both* promises settle, so it stayed blocked on that one regardless of how fast
-  `checkProgrammingMode()`'s own early-resolve-on-match fired. Fixed client-side: `writeAddressDirect()` now polls in short (3s) rounds instead of one long call, breaking out of the loop the
-  instant either service reports a device - same overall ~30s budget for someone to physically
-  reach the device, but a real response within a few seconds of an actual press, matching ETS.
-- **🟢 RESOLVED, 2026-08-31 (later the same day): no visible physical reboot (screen/IP display) on
-  the HDL device is real device-specific behavior, not a koolenex bug.** Isolated via a new
-  diagnostic-only endpoint (`POST /bus/restart-device`, `server/routes/bus.ts` +
-  `KnxBusManager.restartDevice()`, `server/knx-bus.ts`) that sends nothing but a real `A_Restart` to
-  an already-addressed device, with no write/detect/read-back around it - added specifically to
-  test this question in isolation. Two back-to-back real tests, same code path, same session:
-  against the HDL device (`1.1.21`, this section's `M/AG40B.1`), sent twice, confirmed no visible
-  screen/IP change either time; immediately after, against `1.1.10` (the Albrecht Jung LED actuator
-  from §1-§8, a genuinely different manufacturer/product) with its status light left on beforehand -
-  the same `A_Restart` call turned the light off, confirmed by direct observation. Identical
-  trigger, identical code, two real devices, opposite outcomes - this is conclusive: `A_Restart` is
-  being sent and accepted correctly in both cases (as the earlier capture evidence already showed),
-  but this specific HDL device/firmware genuinely does not perform a visible reboot in response to
-  it, while the Albrecht Jung device does. Not a koolenex defect, and nothing further to chase here
-  for either device - the "missing identity reads" hypothesis this superseded (see `restartDevice()`'s
-  own doc comment) remains correctly retired as the explanation.
+  `checkProgrammingMode()`'s own early-resolve-on-match fired. Fixed client-side:
+  `writeAddressDirect()` now polls in short (3s) rounds instead of one long call, breaking out of
+  the loop the instant either service reports a device - same overall ~30s budget for someone to
+  physically reach the device, but a real response within a few seconds of an actual press,
+  matching ETS.
+- **No visible physical reboot (screen/IP display) on the HDL device is real device-specific
+  behavior, not a koolenex bug.** Isolated via a diagnostic-only endpoint (`POST
+  /bus/restart-device`, `server/routes/bus.ts` + `KnxBusManager.restartDevice()`,
+  `server/knx-bus.ts`) that sends nothing but a real `A_Restart` to an already-addressed device,
+  with no write/detect/read-back around it. Two back-to-back real tests, same code path: against
+  the HDL device (`1.1.21`, this section's `M/AG40B.1`), sent twice, confirmed no visible
+  screen/IP change either time; against `1.1.10` (the Albrecht Jung LED actuator from §1-§8, a
+  different manufacturer/product) with its status light left on beforehand, the same `A_Restart`
+  call turned the light off, confirmed by direct observation. Identical trigger, identical code,
+  two real devices, opposite outcomes - `A_Restart` is being sent and accepted correctly in both
+  cases; this specific HDL device/firmware genuinely does not perform a visible reboot in response
+  to it, while the Albrecht Jung device does.
 
 Net result: the full detect → validate-exactly-one-device → write → restart → read-back-confirm →
 serial-capture flow is now confirmed working end-to-end, live, on a **second** manufacturer (HDL,

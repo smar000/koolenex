@@ -59,22 +59,27 @@ matters because it changes which lower-level services the device actually suppor
 
 ## Test hardware
 
-**koolenex has itself performed real writes against 3 devices total.** Two (below) are the primary
-testbed the deep protocol mechanics in this document (§1–§3, §5–§7) were derived from — every
-finding there comes from koolenex writing to one of these two. A third, HDL (`M/AG40B.1`, see the
-table below), has also been directly written to by koolenex, but only for the narrower scope of
-§4.1a–§4.1c and §9 (chunk sizing, the legacy write-encoding fix, and device addressing) — not the
-deep session/object-write mechanics tested against the two below.
+Real hardware used across this document, spanning two sites: this project's own testbed, and a
+second, unrelated production site.
 
-| Device | Individual address | Mask version | Notes |
-|---|---|---|---|
-| KNX IP router (additional function) | 1.1.9 | `07B0` (System B) 🟢 | |
-| 4-gang dimmer actuator | 1.1.10 | `07B0` (System B) 🟢 | Real memory addresses above `0xFFFF`, and the only one of the two whose configuration declares the checksum step described in §7 |
+| Device | Manufacturer | Individual address | Mask version | Site | Role |
+|---|---|---|---|---|---|
+| KNX IP router (additional function) | Albrecht Jung | 1.1.9 | `07B0` (System B) 🟢 | Testbed | koolenex writes |
+| 4-gang dimmer actuator | Albrecht Jung | 1.1.10 | `07B0` (System B) 🟢 | Testbed | koolenex writes — real memory addresses above `0xFFFF`, and the only testbed device whose configuration declares the checksum step (§7) |
+| `M/AG40B.1` actuator | HDL | 1.1.20 / 1.1.21 (readdressed across sessions) | `07B0` (System B) 🟢 | Testbed | koolenex writes — added to diversify the testbed by manufacturer; used extensively, across §4.1a–§4.1d and §9 |
+| 5292 1ST pushbutton ("PB4-240: Bedroom 4 Entrance") | Albrecht Jung | 1.1.240 | — | Production | ETS download only |
+| Presence detector Universal | Albrecht Jung | 1.1.42 | — | Production | ETS download only |
+| TSM pushbutton | Albrecht Jung | 1.1.200 | `MV-0705` | Production | ETS download only — older app generation (`LoadProcedureStyle="ProductProcedure"`, §4.1d) |
+| Smoke alarm, part 234300 | Gira | 1.1.24 | — | Production | ETS download only |
+| `KNX IO 534 CV (4D)` RGBW controller | Weinzierl | 1.1.11 | — | Production | ETS download only |
 
-Mask versions confirmed via a live device-descriptor read against real hardware (§2.1), and
-cross-checked against the KNX standard's own published mask-version table, which classifies
+Mask versions confirmed via a live device-descriptor read against real hardware (§2.1) where
+noted, cross-checked against the KNX standard's own published mask-version table, which classifies
 `07B0` (and its variants `17B0`/`27B0`/`57B0`, for different physical media) as management model
-"System B" — a real KNX-standardized device-family classification, not manufacturer-specific.
+"System B" — a real KNX-standardized device-family classification, not manufacturer-specific. The
+deep protocol mechanics in §1–§3 and §5–§7 are derived from the three testbed devices; §4.1 and
+§4.1d additionally draw on the five production-site devices — see those sections, and the broader
+per-app sample below, for the per-finding breakdown.
 
 ### Broader sample: capturing real ETS download packets (§4.1 write-service selection, §4.1d Verify Mode)
 

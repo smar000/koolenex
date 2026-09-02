@@ -59,36 +59,41 @@ matters because it changes which lower-level services the device actually suppor
 
 ## Test hardware
 
-These two devices are the primary testbed the deep protocol mechanics in this document (§1–§3,
-§5–§7) were derived from.
+**koolenex has itself performed real writes against 3 devices total.** Two (below) are the primary
+testbed the deep protocol mechanics in this document (§1–§3, §5–§7) were derived from — every
+finding there comes from koolenex writing to one of these two. A third, HDL (`M/AG40B.1`, see the
+table below), has also been directly written to by koolenex, but only for the narrower scope of
+§4.1a–§4.1c and §9 (chunk sizing, the legacy write-encoding fix, and device addressing) — not the
+deep session/object-write mechanics tested against the two below.
 
-| Device | Individual address | Mask version | Role |
+| Device | Individual address | Mask version | Notes |
 |---|---|---|---|
-| KNX IP router (additional function) | 1.1.9 | `07B0` (System B) 🟢 | Primary test device |
-| 4-gang dimmer actuator | 1.1.10 | `07B0` (System B) 🟢 | Secondary test device — real memory addresses above `0xFFFF`, and the only one of the two whose configuration declares the checksum step described in §7 |
+| KNX IP router (additional function) | 1.1.9 | `07B0` (System B) 🟢 | |
+| 4-gang dimmer actuator | 1.1.10 | `07B0` (System B) 🟢 | Real memory addresses above `0xFFFF`, and the only one of the two whose configuration declares the checksum step described in §7 |
 
 Mask versions confirmed via a live device-descriptor read against real hardware (§2.1), and
 cross-checked against the KNX standard's own published mask-version table, which classifies
 `07B0` (and its variants `17B0`/`27B0`/`57B0`, for different physical media) as management model
 "System B" — a real KNX-standardized device-family classification, not manufacturer-specific.
 
-### Broader real-hardware sample (§4.1 write-service selection, §4.1d Verify Mode)
+### Broader sample: capturing real ETS download packets (§4.1 write-service selection, §4.1d Verify Mode)
 
-Memory-write-service selection and Verify Mode specifically (not the rest of this document) have
-been confirmed or cross-checked against a much wider real sample — nine app/device combinations
-across four manufacturers, as of 2026-09-01:
+Beyond the 3 devices koolenex has written to, memory-write-service selection and Verify Mode
+specifically have been confirmed or cross-checked against a much wider sample — **9 app/device
+combinations across 4 manufacturers, as of 2026-09-01** — by capturing and decoding real ETS's own
+download traffic against each one, not by koolenex writing to them:
 
-| Manufacturer | App / product | Individual address | Write service | Role |
-|---|---|---|---|---|
-| Albrecht Jung | 1.1.9 (see above) | 1.1.9 | Extended | Primary test device |
-| Albrecht Jung | 1.1.10 (see above) | 1.1.10 | Extended | Secondary test device |
-| Albrecht Jung | 5292 1ST pushbutton, app `D142-21-8848-O000A` | 1.1.240 | Extended | Live production device, second unrelated site — real ETS write, not koolenex's |
-| Albrecht Jung | "Presence detector Universal", app `A011-13-400D` | — | Legacy | Same manufacturer as the three extended-service apps above — isolates app/generation from manufacturer as the explanatory variable |
-| Albrecht Jung | Older-generation push-button module, app `1106-11-5D53` (`MaskVersion="MV-0705"`, `LoadProcedureStyle="ProductProcedure"` — a materially different load mechanism, §4.1d) | — | Legacy | As above |
-| HDL | `M/AG40B.1`, app `M-0073_A-20A9-10-EAA5` | 1.1.20 / 1.1.21 (readdressed across sessions, §4.1c/§9) | Legacy | This project's own testbed — chunk-size ceiling (§4.1a), legacy write-encoding fix (§4.1c), and addressing (§9.3–§9.5) all derived from this device |
-| HDL | Second, distinct app, `20A8-10-3AB7` | — | Legacy | Same-manufacturer control point for the write-service sample |
-| Gira | Smoke-alarm app, `C016-02-1019` | — | Legacy | Uses `LdCtrlAbsSegment`/`LdCtrlTaskSegment`, not `LdCtrlWriteRelMem` — no `Verify` attribute at all (§4.1d) |
-| Weinzierl | `KNX IO 534 CV (4D)`, app `0508-10-B5DC` | — | Legacy | Falsified the `PID_MCB_TABLE` byte-5 candidate rule (§4.1) |
+| Manufacturer | App / product | Individual address | Write service | Confirmed via | Role |
+|---|---|---|---|---|---|
+| Albrecht Jung | 1.1.9 (see Test hardware table above) | 1.1.9 | Extended | koolenex write 🟢 | Deep protocol testbed |
+| Albrecht Jung | 1.1.10 (see Test hardware table above) | 1.1.10 | Extended | koolenex write 🟢 | Deep protocol testbed |
+| Albrecht Jung | 5292 1ST pushbutton, app `D142-21-8848-O000A` | 1.1.240 | Extended | ETS capture only | Live production device, second unrelated site |
+| Albrecht Jung | "Presence detector Universal", app `A011-13-400D` | — | Legacy | ETS capture only | Same manufacturer as the three extended-service apps above — isolates app/generation from manufacturer as the explanatory variable |
+| Albrecht Jung | Older-generation push-button module, app `1106-11-5D53` (`MaskVersion="MV-0705"`, `LoadProcedureStyle="ProductProcedure"` — a materially different load mechanism, §4.1d) | — | Legacy | ETS capture only | As above |
+| HDL | `M/AG40B.1`, app `M-0073_A-20A9-10-EAA5` | 1.1.20 / 1.1.21 (readdressed across sessions, §4.1c/§9) | Legacy | koolenex write 🟢 | This project's own testbed — chunk-size ceiling (§4.1a), legacy write-encoding fix (§4.1c), and addressing (§9.3–§9.5) all derived from this device |
+| HDL | Second, distinct app, `20A8-10-3AB7` | — | Legacy | ETS capture only | Same-manufacturer control point for the write-service sample |
+| Gira | Smoke-alarm app, `C016-02-1019` | — | Legacy | ETS capture only | Uses `LdCtrlAbsSegment`/`LdCtrlTaskSegment`, not `LdCtrlWriteRelMem` — no `Verify` attribute at all (§4.1d) |
+| Weinzierl | `KNX IO 534 CV (4D)`, app `0508-10-B5DC` | — | Legacy | ETS capture only | Falsified the `PID_MCB_TABLE` byte-5 candidate rule (§4.1) |
 
 See §4.1 for the write-service-selection evidence itself and §4.1d for Verify Mode; individual
 addresses not listed above were never assigned/recorded for that app in this project's data.

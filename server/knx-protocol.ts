@@ -419,23 +419,64 @@ class KnxIpConnection extends (KnxConnection as new () => InstanceType<
     if (msg.length >= 20) this.localAddr = decodePhysicalRaw(msg, 18);
 
     this.connected = true;
-    // The CONNECTIONSTATE_REQUEST heartbeat is UDP-only - confirmed
-    // against Calimero's own client (ClientConnection.java: the heartbeat
-    // monitor is never started for a stream/TCP connection). TCP's own
-    // connection liveness ('close'/'error' on the socket, see
-    // _connectTcp() above) covers what the heartbeat exists for over UDP.
-    // A KNXnet/IP gateway may still close an idle TCP tunneling connection
-    // on its own after a period with no application traffic; rather than
-    // holding the connection open indefinitely against a gateway-specific
-    // idle timeout, the caller (KnxBusManager) reconnects on demand before
-    // the next bus operation - see _ensureConnected() in knx-bus.ts.
-    if (this.transport !== 'tcp') {
-      this._hbTimer = setInterval(() => {
-        this._sendRaw(
-          pktConnState(this.channelId, this.localIp, this.localPort),
-        );
-      }, 60000);
-    }
+    // CONNECTIONSTATE_REQUEST heartbeat over TCP.
+    //
+    // Sending this over TCP was previously believed to be unnecessary: TCP's
+    // own connection liveness ('close'/'error' on the socket) was assumed to
+    // cover what the heartbeat provides over UDP, matching Calimero's client
+    // (ClientConnection.java), which never starts its heartbeat monitor for
+    // a stream/TCP connection.
+    //
+    // A real KNXnet/IP gateway was observed closing a genuinely idle TCP
+    // tunnel after approximately 120 seconds with no heartbeat running.
+    // Reconnect-on-demand does not substitute for the heartbeat in this
+    // case: it masks the gap between operations, but a long single write
+    // remains exposed to the idle timeout for its own duration. A
+    // byte-level parse of a real ETS capture confirmed ETS itself sends a
+    // genuine CONNECTIONSTATE_REQUEST over its own persistent TCP tunnel
+    // approximately every 30.2 seconds throughout a session, with the
+    // gateway answering OK every time and never disconnecting. Real
+    // captured bytes: `06100207001001000802000000000000` - HPAI = `08 02
+    // 00000000 0000` (protocol byte 0x02 = TCP, address/port = the
+    // 0.0.0.0:0 placeholder).
+    //
+    // An earlier attempt to send this over TCP resulted in the gateway
+    // closing the tunnel with a clean FIN shortly after sending - not
+    // evidence that the heartbeat itself is harmful over TCP, but a
+    // call-site bug: `pktConnState(this.channelId, this.localIp,
+    // this.localPort)` was called with no 4th (`hostProtocol`) argument,
+    // silently defaulting to `HOST_PROTOCOL.UDP` - which `hpai()` writes
+    // into byte 1 of the HPAI regardless of the address/port passed in.
+    // Since `this.localIp`/`this.localPort` are already `'0.0.0.0'`/`0` for
+    // a TCP connection (set at connect time, see `_connectTcp()` above),
+    // the actual bytes sent were `08 01 00000000 0000` - protocol byte
+    // 0x01 (UDP) paired with the TCP placeholder address, a
+    // self-contradictory HPAI (claims a UDP endpoint but declares no
+    // reachable UDP address/port) that the gateway rejected by closing the
+    // tunnel. This is a single incorrect byte from an omitted argument, not
+    // a protocol-level restriction on sending heartbeats over TCP. Fixed by
+    // passing `HOST_PROTOCOL.TCP` explicitly for TCP connections, matching
+    // `pktConnect()`/`pktDisconnect()`'s own existing call-site pattern.
+    // Interval corrected to match ETS's own observed cadence (previously
+    // 60000ms, not verified against a real capture).
+    //
+    // Confirmed against real hardware: a TCP tunnel held genuinely idle for
+    // over 540 seconds (more than four times the approximately 120-second
+    // failure point observed without the heartbeat) with repeated clean
+    // CONNECTIONSTATE_REQUEST/OK exchanges and zero disconnects, and
+    // separately across repeated real Full Downloads to multiple devices in
+    // sequence with zero disconnects on any of them.
+    this._hbTimer = setInterval(() => {
+      logger.debug('knx', 'Sending CONNECTIONSTATE_REQUEST heartbeat to keep the tunnel alive', {
+        transport: this.transport,
+        channelId: this.channelId,
+      });
+      this._sendRaw(
+        this.transport === 'tcp'
+          ? pktConnState(this.channelId, this.localIp, this.localPort, HOST_PROTOCOL.TCP)
+          : pktConnState(this.channelId, this.localIp, this.localPort),
+      );
+    }, 30000);
 
     this.emit('connected');
     this.emit('_connected');
